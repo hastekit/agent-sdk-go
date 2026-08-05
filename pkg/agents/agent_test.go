@@ -818,3 +818,69 @@ func TestAgentLoop_NestedHandoffToolApprovalPausesRun(t *testing.T) {
 		t.Fatalf("output missing nested handoff answer, got:\n%s", text)
 	}
 }
+
+// Single-turn ends the run as soon as the model responds. The emitted tool call
+// must survive into the output and the tool must NOT execute: offline
+// single-turn evals score the model's decision, so executing it (or faking a
+// result) would replace the thing under test with an improvised continuation.
+func TestAgentLoop_SingleTurn_ReturnsToolCallWithoutExecuting(t *testing.T) {
+	// Only one response is scripted: a second model call would exhaust the
+	// scripted LLM and fail the run.
+	llm := &scriptedLLM{script: []*responses.Response{
+		toolCallResponse("call_search", "search", `{"q":"weather"}`),
+	}}
+	search := newFakeTool("search", false, "search done")
+	agent := agents.NewAgent(&agents.AgentOptions{
+		Name:       "main",
+		Tools:      []agents.Tool{search},
+		SingleTurn: true,
+	}).WithLLM(llm)
+
+	out := runAgent(t, agent, &agents.AgentInput{
+		Namespace: "test",
+		ThreadID:  "thread-single-turn-tool",
+		Message:   userMessage("what's the weather?"),
+	})
+
+	requireStatus(t, out, agentstate.RunStatusCompleted)
+	if search.callCount() != 0 {
+		t.Fatalf("single turn executed the tool %d times, want 0", search.callCount())
+	}
+	if llm.callCount() != 1 {
+		t.Fatalf("single turn made %d model calls, want 1", llm.callCount())
+	}
+
+	var emitted bool
+	for _, m := range out.Output {
+		if m.OfFunctionCall != nil && m.OfFunctionCall.Name == "search" {
+			emitted = true
+		}
+	}
+	if !emitted {
+		t.Fatalf("single turn dropped the emitted tool call, got: %#v", out.Output)
+	}
+}
+
+// The common single-turn case: the model answers in text and the run completes
+// normally, exactly as it would without the flag.
+func TestAgentLoop_SingleTurn_ReturnsText(t *testing.T) {
+	llm := &scriptedLLM{script: []*responses.Response{textResponse("sunny")}}
+	agent := agents.NewAgent(&agents.AgentOptions{
+		Name:       "main",
+		SingleTurn: true,
+	}).WithLLM(llm)
+
+	out := runAgent(t, agent, &agents.AgentInput{
+		Namespace: "test",
+		ThreadID:  "thread-single-turn-text",
+		Message:   userMessage("what's the weather?"),
+	})
+
+	requireStatus(t, out, agentstate.RunStatusCompleted)
+	if llm.callCount() != 1 {
+		t.Fatalf("single turn made %d model calls, want 1", llm.callCount())
+	}
+	if text := messagesText(out.Output); !strings.Contains(text, "sunny") {
+		t.Fatalf("single turn output missing the model's text, got:\n%s", text)
+	}
+}

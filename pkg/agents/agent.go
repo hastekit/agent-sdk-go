@@ -44,6 +44,7 @@ type Agent struct {
 	toolExecutor  ToolExecutor
 	durableStep   DurableStep
 	stickyHandoff bool
+	singleTurn    bool
 }
 
 type AgentOptions struct {
@@ -63,6 +64,19 @@ type AgentOptions struct {
 	StreamBroker  StreamBroker
 	DurableStep   DurableStep
 	StickyHandoff bool
+
+	// SingleTurn ends the run as soon as the model has responded, before any
+	// tool is executed. The returned AgentOutput carries exactly what the model
+	// emitted — assistant text and/or tool calls — with status completed.
+	//
+	// This is for evaluating a single decision rather than an outcome: offline
+	// single-turn evals score "given this conversation, what does the model do
+	// next?", where executing the tool (or faking its result) would replace the
+	// thing under test with an improvised continuation.
+	//
+	// Note this is not the same as MaxLoops=1, which still executes the first
+	// round of tools and then fails the run with "exceeded maximum loops".
+	SingleTurn bool
 }
 
 func NewAgent(opts *AgentOptions) *Agent {
@@ -118,6 +132,7 @@ func NewAgent(opts *AgentOptions) *Agent {
 		streamBroker:  streamBroker,
 		durableStep:   durableStep,
 		stickyHandoff: opts.StickyHandoff,
+		singleTurn:    opts.SingleTurn,
 	}
 }
 
@@ -138,6 +153,7 @@ func (e *Agent) WithLLM(wrappedLLM LLM) *Agent {
 		toolExecutor:  e.toolExecutor,
 		durableStep:   e.durableStep,
 		stickyHandoff: e.stickyHandoff,
+		singleTurn:    e.singleTurn,
 	}
 }
 
@@ -570,7 +586,12 @@ func (e *Agent) ExecuteWithRun(ctx context.Context, in *AgentInput, run *history
 				}
 			}
 
-			if len(toolCalls) == 0 {
+			if e.singleTurn {
+				// Single turn: the model has responded, and that response — text
+				// and/or tool calls, already in finalOutput — is the whole result.
+				// Complete before any tool runs.
+				run.RunState.TransitionToComplete()
+			} else if len(toolCalls) == 0 {
 				// No tools = done
 				run.RunState.TransitionToComplete()
 			} else {
