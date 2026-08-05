@@ -339,7 +339,7 @@ type FunctionCallOutputMessage struct {
 
 type ReasoningMessage struct {
 	Type             constants.MessageTypeReasoning `json:"type"`
-	ID               string                         `json:"id"`
+	ID               string                         `json:"id,omitempty"`
 	Summary          []SummaryTextContent           `json:"summary"`
 	EncryptedContent *string                        `json:"encrypted_content,omitempty"`
 }
