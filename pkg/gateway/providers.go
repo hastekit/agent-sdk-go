@@ -63,6 +63,9 @@ func (g *LLMGateway) getProvider(ctx context.Context, providerName llm.ProviderN
 		}), nil
 
 	case llm.ProviderNameOpenRouter:
+		if baseUrl == "" {
+			baseUrl = "https://openrouter.ai/api/v1"
+		}
 		return openai.NewClient(&openai.ClientOptions{
 			BaseURL: baseUrl,
 			ApiKey:  key,
