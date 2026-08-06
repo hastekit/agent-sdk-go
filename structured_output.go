@@ -39,3 +39,12 @@ func NewOutputSchema(v any) map[string]any {
 
 	return ss
 }
+
+func NewOutputFormatJSONSchema(v any, strict bool) map[string]any {
+	return map[string]any{
+		"type":   "json_schema",
+		"name":   "structured_output",
+		"strict": strict,
+		"schema": NewOutputSchema(v),
+	}
+}
