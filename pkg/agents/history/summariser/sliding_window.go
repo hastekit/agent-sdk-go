@@ -2,7 +2,6 @@ package summariser
 
 import (
 	"context"
-	"slices"
 
 	"github.com/google/uuid"
 	"github.com/hastekit/hastekit-sdk-go/pkg/agents/history"
@@ -36,30 +35,7 @@ func NewSlidingWindowHistorySummarizer(opts *SlidingWindowHistorySummarizerOptio
 // For sliding window, we simply keep the most recent N runs and discard the rest.
 // We don't create a summary message, we just return which messages to keep.
 func (s *SlidingWindowHistorySummarizer) Summarize(ctx context.Context, msgIdToRunId map[string]string, msgs []messages.Message, contextTokens int) (*history.SummaryResult, error) {
-	// Group messages by their run ID
-	type Run struct {
-		RunID    string
-		Messages []messages.Message
-	}
-
-	runs := []Run{}
-	runIdsSeen := []string{}
-	for _, mm := range msgs {
-		runId := msgIdToRunId[mm.ID]
-
-		if !slices.Contains(runIdsSeen, runId) {
-			runs = append(runs, Run{
-				RunID:    runId,
-				Messages: []messages.Message{mm},
-			})
-			runIdsSeen = append(runIdsSeen, runId)
-			continue
-		}
-
-		// Add message to the last run (assumes messages are grouped by run ID)
-		run := &runs[len(runs)-1]
-		run.Messages = append(run.Messages, mm)
-	}
+	runs := groupIntoRuns(msgIdToRunId, msgs)
 
 	// If we have fewer or equal runs than keepCount, keep everything
 	if len(runs) <= s.keepCount {

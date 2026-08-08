@@ -322,6 +322,14 @@ func (cm *ConversationRunManager) summarize(ctx context.Context) error {
 	}
 
 	if result.Summary != nil {
+		// Register the summary under its own run id, the same way LoadMessages
+		// does when it reads the summary row back. Without this the summary is
+		// unplaced for the rest of this run and groups with whatever unplaced
+		// message sits next to it, so the run the summarizer sees in memory
+		// differs from the one it sees after a reload.
+		if result.Summary.ID != "" {
+			cm.msgIdToRunId[result.Summary.ID] = result.SummaryID
+		}
 		cm.oldMessages = append([]Message{*result.Summary}, kept...)
 	} else {
 		cm.oldMessages = kept
