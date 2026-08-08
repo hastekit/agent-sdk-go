@@ -18,8 +18,17 @@ type SlidingWindowHistorySummarizerOptions struct {
 }
 
 func NewSlidingWindowHistorySummarizer(opts *SlidingWindowHistorySummarizerOptions) *SlidingWindowHistorySummarizer {
+	// Floor the window at one run, matching NewLLMHistorySummarizer. Taking
+	// KeepCount verbatim made the zero value — what you get by not setting the
+	// field — discard every run, including the one in flight, leaving the model
+	// with no conversation at all.
+	keepCount := 1
+	if opts.KeepCount > 0 {
+		keepCount = opts.KeepCount
+	}
+
 	return &SlidingWindowHistorySummarizer{
-		keepCount: opts.KeepCount,
+		keepCount: keepCount,
 	}
 }
 

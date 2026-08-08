@@ -223,35 +223,122 @@ func (cm *ConversationRunManager) AddMessagesToQueue(ctx context.Context, msgs [
 func (cm *ConversationRunManager) GetMessages(ctx context.Context, agentName string) ([]responses.InputMessageUnion, error) {
 	cm.RunState.LastAgentName = agentName
 
-	// Process messages with summarizer if available
 	if cm.summarizer != nil {
-		summaryResult, err := cm.summarizer.Summarize(ctx, cm.msgIdToRunId, cm.oldMessages, cm.RunState.ContextTokens)
-		if err != nil {
+		if err := cm.summarize(ctx); err != nil {
 			return nil, err
-		}
-
-		// If a summary was created, track it for saving later and apply it to messages
-		if summaryResult != nil {
-			cm.summaries = summaryResult
-			if summaryResult.Summary == nil {
-				cm.oldMessages = summaryResult.MessagesToKeep
-			} else {
-				cm.oldMessages = append([]Message{*summaryResult.Summary}, summaryResult.MessagesToKeep...)
-			}
 		}
 	}
 
-	// Add queued messages to the new messages
+	// Queued messages join this run's messages after summarization. Draining
+	// earlier would let the summarizer see them, but it could not act on them:
+	// they belong to the run in flight, which every summarizer keeps whole. They
+	// already carry this run's id from when they were queued — QueuedMessages is
+	// not carried into a fresh RunState, so a queued message is only ever
+	// drained by the same run that queued it.
 	if len(cm.RunState.QueuedMessages) > 0 {
 		cm.newMessages = append(cm.newMessages, cm.RunState.QueuedMessages...)
 		cm.RunState.QueuedMessages = nil
 	}
 
-	msgList := append(cm.oldMessages, cm.newMessages...)
+	// Build the outgoing list into its own backing array. `append(cm.oldMessages,
+	// ...)` writes the run's messages into oldMessages' spare capacity whenever
+	// it has any, so the filter below would mutate the history it was handed.
+	msgList := make([]Message, 0, len(cm.oldMessages)+len(cm.newMessages))
+	msgList = append(msgList, cm.oldMessages...)
+	msgList = append(msgList, cm.newMessages...)
+
 	if cm.messageFilter != nil {
 		msgList = cm.messageFilter.Filter(ctx, msgList, agentName)
 	}
 	return cm.attributeMessages(msgList, agentName), nil
+}
+
+// summarize hands the summarizer the whole outgoing conversation — the history
+// loaded from persistence *and* everything this run has produced so far — and
+// applies what it decides to trim.
+//
+// Passing both halves changes the decision, not just the bookkeeping. A run's
+// own output is the fastest-growing part of the request: each loop iteration
+// appends an assistant turn plus its tool results, and none of it reaches
+// persistence until the run reaches a terminal step. A summarizer shown only
+// the loaded history sees a conversation that has stopped growing, and declines
+// to act while the request it is being asked about keeps expanding.
+//
+// Only the loaded half is reshaped by the result. cm.newMessages is also the
+// save buffer — SaveMessages persists exactly those messages — so dropping from
+// it here would leave a hole in the thread's history. Both shipped summarizers
+// keep the most recent run whole and every in-flight message belongs to it, so
+// the partition below defends an invariant rather than changing behaviour.
+func (cm *ConversationRunManager) summarize(ctx context.Context) error {
+	candidates := make([]Message, 0, len(cm.oldMessages)+len(cm.newMessages))
+	candidates = append(candidates, cm.oldMessages...)
+	candidates = append(candidates, cm.newMessages...)
+
+	result, err := cm.summarizer.Summarize(ctx, cm.msgIdToRunId, candidates, cm.RunState.ContextTokens)
+	if err != nil {
+		return err
+	}
+	if result == nil {
+		return nil
+	}
+
+	// A summary is persisted as "history up to and including run X is covered",
+	// and a boundary naming the run still being written is not a claim this
+	// manager should make. No summarizer here produces one — both floor their
+	// keep window at one run, so the boundary always stops short of the most
+	// recent — and the bundled persistence adapter would ignore it anyway: it
+	// applies a summary only when the named run is strictly older than the row
+	// being loaded, which by then is a run that finished saving. Neither of
+	// those is guaranteed by an interface a caller can implement, so refuse the
+	// claim rather than rely on both holding. Clearing it leaves the summary row
+	// saved but inert on reload.
+	if result.LastSummarizedMessageID == cm.msgId {
+		slog.WarnContext(ctx, "summarizer covered the in-flight run; not persisting the summary boundary",
+			"run_id", cm.msgId)
+		result.LastSummarizedMessageID = ""
+	}
+
+	cm.summaries = result
+
+	inFlight := make(map[string]struct{}, len(cm.newMessages))
+	for _, m := range cm.newMessages {
+		if m.ID != "" {
+			inFlight[m.ID] = struct{}{}
+		}
+	}
+
+	kept := make([]Message, 0, len(result.MessagesToKeep))
+	for _, m := range result.MessagesToKeep {
+		if _, ok := inFlight[m.ID]; ok {
+			// Already held in the save buffer; GetMessages appends it after
+			// oldMessages, so keeping it here too would send it twice.
+			continue
+		}
+		kept = append(kept, m)
+	}
+
+	if result.Summary != nil {
+		cm.oldMessages = append([]Message{*result.Summary}, kept...)
+	} else {
+		cm.oldMessages = kept
+	}
+
+	return nil
+}
+
+// trackRun records which run a bundle belongs to. LoadMessages does this for
+// persisted history; without the same for messages produced during the run,
+// every in-flight bundle looks up to the empty run id and the summarizer groups
+// them into one nameless pseudo-run — pooled with the re-injected summary, whose
+// id is also empty.
+func (cm *ConversationRunManager) trackRun(m Message) {
+	if m.ID == "" {
+		return
+	}
+	if cm.msgIdToRunId == nil {
+		cm.msgIdToRunId = map[string]string{}
+	}
+	cm.msgIdToRunId[m.ID] = cm.msgId
 }
 
 func (cm *ConversationRunManager) LoadMessages(ctx context.Context, namespace string, threadID string, previousMessageID string) error {
@@ -454,6 +541,7 @@ func (cm *ConversationRunManager) ProcessIncomingMessages(message Message, queue
 		if len(stored) != len(message.Messages) {
 			bundle.Messages = stored
 		}
+		cm.trackRun(bundle)
 		if queue {
 			cm.RunState.QueuedMessages = append(cm.RunState.QueuedMessages, bundle)
 		} else {
