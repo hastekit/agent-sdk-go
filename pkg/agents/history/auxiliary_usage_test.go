@@ -60,7 +60,8 @@ func TestSummarizerUsageBilledWithoutDisturbingContextTokens(t *testing.T) {
 		t.Errorf("Usage.InputTokens = %d, want 128000", got)
 	}
 
-	// ...but the context signal still describes the agent's conversation.
+	// ...but the context signal still describes the agent's conversation:
+	// its prompt plus its reply, both measured.
 	if got := run.RunState.ContextTokens; got != 120500 {
 		t.Fatalf("ContextTokens = %d, want 120500 — the summarization call must not overwrite it", got)
 	}
@@ -83,7 +84,7 @@ func TestAuxiliaryUsageLeavesContextTokensAlone(t *testing.T) {
 	run.TrackAuxiliaryUsage(nil)
 
 	if got := run.RunState.ContextTokens; got != 1050 {
-		t.Errorf("ContextTokens = %d, want 1050", got)
+		t.Errorf("ContextTokens = %d, want 1050 (the measured prompt plus reply)", got)
 	}
 	if got := run.RunState.Usage.TotalTokens; got != 1370 {
 		t.Errorf("Usage.TotalTokens = %d, want 1370", got)

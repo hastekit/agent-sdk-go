@@ -34,7 +34,19 @@ type RunState struct {
 	CurrentStep   Step            `json:"current_step"`
 	LoopIteration int             `json:"loop_iteration"`
 	Usage         responses.Usage `json:"usage"`
-	ContextTokens int             `json:"context_tokens"` // ContextTokens is the total token count of the most recent LLM call (input + output of a single response)
+	// ContextTokens is the measured half of the context-occupancy signal: the
+	// most recent call's reported total, being the prompt it was given plus the
+	// reply it produced. Both are in the next prompt, and both are numbers the
+	// provider supplied — nothing here is inferred.
+	ContextTokens int `json:"context_tokens"`
+
+	// PendingContextTokens is the estimated half: everything appended since
+	// that call — tool results, user turns, queued messages — which no usage
+	// report has covered yet. It holds estimates only, and is cleared the
+	// moment the next call reports a real number that supersedes it.
+	//
+	// The summarizer triggers on the sum. See ConversationRunManager.
+	PendingContextTokens int `json:"pending_context_tokens"`
 
 	QueuedApprovals  []string           `json:"queued_approvals,omitempty"`
 	QueuedRejections []string           `json:"queued_rejections,omitempty"`
@@ -186,12 +198,13 @@ func NewRunState() *RunState {
 // ToMeta converts RunState to a map for storage in messages.meta
 func (s *RunState) ToMeta() map[string]any {
 	runStateMap := map[string]any{
-		"status":         s.getStatus(),
-		"current_step":   string(s.CurrentStep),
-		"loop_iteration": s.LoopIteration,
-		"usage":          s.Usage,
-		"context_tokens": s.ContextTokens,
-		"traceid":        s.TraceID,
+		"status":                 s.getStatus(),
+		"current_step":           string(s.CurrentStep),
+		"loop_iteration":         s.LoopIteration,
+		"usage":                  s.Usage,
+		"context_tokens":         s.ContextTokens,
+		"pending_context_tokens": s.PendingContextTokens,
+		"traceid":                s.TraceID,
 	}
 
 	// pending_interrupts is the single canonical representation of a paused
@@ -302,6 +315,10 @@ func LoadRunStateFromMeta(meta map[string]any) *RunState {
 
 	if contextTokens, ok := metaInt(runStateData["context_tokens"]); ok {
 		state.ContextTokens = contextTokens
+	}
+
+	if pending, ok := metaInt(runStateData["pending_context_tokens"]); ok {
+		state.PendingContextTokens = pending
 	}
 
 	if usageData, ok := runStateData["usage"]; ok {

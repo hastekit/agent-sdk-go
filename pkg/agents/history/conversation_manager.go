@@ -160,14 +160,24 @@ func NewRun(ctx context.Context, cm *CommonConversationManager, namespace string
 		// summarization — so an agent that answers in one LLM call per turn
 		// (no tool loop) would never summarize at all.
 		var lastAgent string
-		var contextTokens int
+		var contextTokens, pendingContextTokens int
 		if cr.RunState != nil {
 			lastAgent = cr.RunState.LastAgentName
 			contextTokens = cr.RunState.ContextTokens
+			// The estimate carries too, though it is usually zero here: a run
+			// that ends normally does so straight after an LLM call, and that
+			// call's usage report cleared it. The exception is a cancelled run,
+			// which appends synthetic tool results and a cancellation notice
+			// and then completes without calling the model again — leaving real
+			// messages in history that nothing has measured. Carrying a zero
+			// costs nothing; dropping a non-zero one would under-count the next
+			// turn.
+			pendingContextTokens = cr.RunState.PendingContextTokens
 		}
 		cr.RunState = agentstate.NewRunState()
 		cr.RunState.LastAgentName = lastAgent
 		cr.RunState.ContextTokens = contextTokens
+		cr.RunState.PendingContextTokens = pendingContextTokens
 	} else {
 		// Continuing the previous run
 		runID = cr.previousMsgId
@@ -210,13 +220,36 @@ func WithRunContext(rc map[string]any) RunOption {
 	}
 }
 
-func (cm *ConversationRunManager) AddMessages(ctx context.Context, message Message) {
-	cm.ProcessIncomingMessages(message, false)
+// AddMessageOption adjusts how an appended message is accounted for.
+type AddMessageOption func(*addMessageConfig)
+
+type addMessageConfig struct {
+	estimate bool
+}
+
+// AlreadyMeasured marks a bundle whose tokens the most recent usage report
+// already covers, so it is appended without being estimated on top.
+//
+// Exactly one thing qualifies: the model's own reply, appended straight after
+// TrackUsage, which counted it as part of that call's reported total. Anything
+// else added during a run — tool results, user turns, synthetic messages — has
+// not been weighed by any provider yet and must be estimated, so it takes the
+// default.
+func AlreadyMeasured() AddMessageOption {
+	return func(c *addMessageConfig) { c.estimate = false }
+}
+
+func (cm *ConversationRunManager) AddMessages(ctx context.Context, message Message, opts ...AddMessageOption) {
+	cfg := addMessageConfig{estimate: true}
+	for _, o := range opts {
+		o(&cfg)
+	}
+	cm.processIncoming(message, false, cfg.estimate)
 }
 
 func (cm *ConversationRunManager) AddMessagesToQueue(ctx context.Context, msgs []Message) {
 	for _, m := range msgs {
-		cm.ProcessIncomingMessages(m, true)
+		cm.processIncoming(m, true, true)
 	}
 }
 
@@ -274,7 +307,7 @@ func (cm *ConversationRunManager) summarize(ctx context.Context) error {
 	candidates = append(candidates, cm.oldMessages...)
 	candidates = append(candidates, cm.newMessages...)
 
-	result, err := cm.summarizer.Summarize(ctx, cm.msgIdToRunId, candidates, cm.RunState.ContextTokens)
+	result, err := cm.summarizer.Summarize(ctx, cm.msgIdToRunId, candidates, cm.contextTokens())
 	if err != nil {
 		return err
 	}
@@ -477,16 +510,34 @@ func (cm *ConversationRunManager) SaveMessages(ctx context.Context) error {
 }
 
 // TrackUsage records a call made *as* the agent — one whose input was the
-// conversation itself. It bills the tokens and updates the context-occupancy
-// signal the summarizer triggers on.
+// conversation itself. It bills the tokens and refreshes the measured half of
+// the context-occupancy signal.
+//
+// TotalTokens, because the signal predicts the size of the *next* prompt, and
+// both halves of the total are in it: the prompt just sent, plus the reply,
+// which is appended to history a moment later. Both are numbers the provider
+// gave us, so neither belongs in the estimate — and the reply least of all,
+// since a reasoning-heavy one is mostly opaque thinking blocks the estimator
+// cannot see inside and would score near zero.
 func (cm *ConversationRunManager) TrackUsage(usage *responses.Usage) {
 	if usage == nil {
 		return
 	}
 	cm.accumulateUsage(usage)
 
-	// ContextTokens tracks the most recent call's size
+	// Everything up to and including the reply is now measured, so the running
+	// estimate that stood in for it has served its purpose. The reply is
+	// appended with AlreadyMeasured so it is not counted a second time.
 	cm.RunState.ContextTokens = usage.TotalTokens
+	cm.RunState.PendingContextTokens = 0
+}
+
+// contextTokens is what the summarizer triggers on: the last measured prompt
+// plus an estimate of everything appended since. Neither half is sufficient
+// alone — the measurement is always at least one call stale, and the estimate
+// only covers the delta.
+func (cm *ConversationRunManager) contextTokens() int {
+	return cm.RunState.ContextTokens + cm.RunState.PendingContextTokens
 }
 
 // TrackAuxiliaryUsage bills a call made *on behalf of* the run against some
@@ -530,7 +581,14 @@ func (cm *ConversationRunManager) loadSubAgentContext(ctx context.Context) {
 	}
 }
 
+// ProcessIncomingMessages appends an inbound message, estimating its size
+// against the context window. Use AddMessages with AlreadyMeasured to append
+// one the provider has already counted.
 func (cm *ConversationRunManager) ProcessIncomingMessages(message Message, queue bool) {
+	cm.processIncoming(message, queue, true)
+}
+
+func (cm *ConversationRunManager) processIncoming(message Message, queue, estimate bool) {
 	// Process incoming message, and extract tool approvals and user messages
 	hasNewApproval := false
 	var stored []responses.InputMessageUnion
@@ -576,6 +634,16 @@ func (cm *ConversationRunManager) ProcessIncomingMessages(message Message, queue
 			bundle.Messages = stored
 		}
 		cm.trackRun(bundle)
+
+		// Unless a usage report already covers this message, it reaches the
+		// provider unweighed on the next call. Estimate it so the summarizer is
+		// not deciding against a reading that predates it. Queued messages count
+		// from the moment they are queued: draining only moves them between
+		// slices.
+		if estimate {
+			cm.RunState.PendingContextTokens += estimateBundleTokens(bundle)
+		}
+
 		if queue {
 			cm.RunState.QueuedMessages = append(cm.RunState.QueuedMessages, bundle)
 		} else {

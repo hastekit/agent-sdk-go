@@ -105,6 +105,8 @@ func TestGetMessages_FirstCallOfTurnSeesContextTokens(t *testing.T) {
 		t.Fatalf("GetMessages (turn 2): %v", err)
 	}
 
+	// 42000 = the measured prompt plus the measured reply, both of which are in
+	// the next prompt. Nothing here is estimated.
 	want := []int{0, 42000}
 	if len(rec.seen) != len(want) {
 		t.Fatalf("summarizer saw %v, want %v", rec.seen, want)
