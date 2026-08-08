@@ -85,14 +85,19 @@ func (sp *SimplePrompt) GetPrompt(ctx context.Context, deps *agents.Dependencies
 	}
 
 	prompt += skillsToPrompts(sp.skills)
-	prompt += handoffsToPrompts(deps.Handoffs)
-	prompt += deferredToolsToPrompts(deps.DeferredTools)
 
-	if deps.RunContext == nil {
-		return prompt, nil
+	if deps != nil {
+		prompt += handoffsToPrompts(deps.Handoffs)
+		prompt += deferredToolsToPrompts(deps.DeferredTools)
+
+		if deps.RunContext == nil {
+			return prompt, nil
+		}
+
+		return sp.resolver(prompt, deps.RunContext)
 	}
 
-	return sp.resolver(prompt, deps.RunContext)
+	return prompt, nil
 }
 
 func stringToTemplate(promptStr string) (*template.Template, error) {
