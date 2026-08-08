@@ -1,6 +1,7 @@
 package agentstate
 
 import (
+	"encoding/json"
 	"sort"
 
 	"github.com/bytedance/sonic"
@@ -251,6 +252,31 @@ func (s *RunState) getStatus() RunStatus {
 	}
 }
 
+// metaInt reads an integer out of a meta value. ToMeta stores Go ints, so a
+// persistence adapter that keeps the meta map in process returns an int, while
+// one that round-trips it through JSON returns a float64 (or a json.Number
+// under a decoder configured for it). Accept all of them — asserting only
+// float64 silently dropped the field for in-process adapters.
+func metaInt(v any) (int, bool) {
+	switch n := v.(type) {
+	case int:
+		return n, true
+	case int32:
+		return int(n), true
+	case int64:
+		return int(n), true
+	case float32:
+		return int(n), true
+	case float64:
+		return int(n), true
+	case json.Number:
+		i, err := n.Int64()
+		return int(i), err == nil
+	default:
+		return 0, false
+	}
+}
+
 // LoadRunStateFromMeta loads RunState from messages.meta
 func LoadRunStateFromMeta(meta map[string]any) *RunState {
 	if meta == nil {
@@ -270,16 +296,20 @@ func LoadRunStateFromMeta(meta map[string]any) *RunState {
 		state.CurrentStep = Step(currentStep)
 	}
 
-	if loopIteration, ok := runStateData["loop_iteration"].(float64); ok {
-		state.LoopIteration = int(loopIteration)
+	if loopIteration, ok := metaInt(runStateData["loop_iteration"]); ok {
+		state.LoopIteration = loopIteration
 	}
 
-	if contextTokens, ok := runStateData["context_tokens"].(float64); ok {
-		state.ContextTokens = int(contextTokens)
+	if contextTokens, ok := metaInt(runStateData["context_tokens"]); ok {
+		state.ContextTokens = contextTokens
 	}
 
-	if usageData, ok := runStateData["usage"].(map[string]any); ok {
-		// Parse usage from meta using JSON marshaling for proper type conversion
+	if usageData, ok := runStateData["usage"]; ok {
+		// Parse usage from meta using JSON marshaling for proper type
+		// conversion. Marshal the value as-is rather than asserting it to
+		// map[string]any: an adapter that has round-tripped the meta through
+		// JSON hands back a map, but one that kept it in process hands back
+		// the responses.Usage struct ToMeta stored.
 		usageBytes, err := sonic.Marshal(usageData)
 		if err == nil {
 			sonic.Unmarshal(usageBytes, &state.Usage)

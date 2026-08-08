@@ -152,12 +152,22 @@ func NewRun(ctx context.Context, cm *CommonConversationManager, namespace string
 		// new turn can resume where the previous one left off (sticky
 		// handoff). Nothing else reads LastAgentName, so this is inert
 		// unless an agent opts into sticky routing.
+		//
+		// ContextTokens carries forward too: it measures how full the
+		// context window already is, which is a property of the thread, not
+		// of a single run. Resetting it to zero would make the first
+		// GetMessages of every turn see "no context yet" and skip
+		// summarization — so an agent that answers in one LLM call per turn
+		// (no tool loop) would never summarize at all.
 		var lastAgent string
+		var contextTokens int
 		if cr.RunState != nil {
 			lastAgent = cr.RunState.LastAgentName
+			contextTokens = cr.RunState.ContextTokens
 		}
 		cr.RunState = agentstate.NewRunState()
 		cr.RunState.LastAgentName = lastAgent
+		cr.RunState.ContextTokens = contextTokens
 	} else {
 		// Continuing the previous run
 		runID = cr.previousMsgId
