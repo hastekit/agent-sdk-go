@@ -218,14 +218,10 @@ func (in *Response) ToNativeResponse() *responses2.Response {
 	var stopReason any
 	if len(in.Candidates) == 0 {
 		return &responses2.Response{
-			ID:     in.ResponseID,
-			Model:  in.ModelVersion,
-			Output: output,
-			Usage: &responses2.Usage{
-				InputTokens:  in.UsageMetadata.PromptTokenCount,
-				OutputTokens: in.UsageMetadata.CandidatesTokenCount,
-				TotalTokens:  in.UsageMetadata.TotalTokenCount,
-			},
+			ID:       in.ResponseID,
+			Model:    in.ModelVersion,
+			Output:   output,
+			Usage:    utils.Ptr(nativeUsage(in.UsageMetadata)),
 			Metadata: map[string]any{"stop_reason": stopReason},
 		}
 	}
@@ -285,28 +281,43 @@ func (in *Response) ToNativeResponse() *responses2.Response {
 	}
 
 	return &responses2.Response{
-		ID:     in.ResponseID,
-		Model:  in.ModelVersion,
-		Output: output,
-		Usage: &responses2.Usage{
-			InputTokens: in.UsageMetadata.PromptTokenCount,
-			InputTokensDetails: struct {
-				CachedTokens int `json:"cached_tokens"`
-			}{},
-			OutputTokens: in.UsageMetadata.CandidatesTokenCount,
-			OutputTokensDetails: struct {
-				ReasoningTokens int `json:"reasoning_tokens"`
-			}{
-				ReasoningTokens: in.UsageMetadata.ThoughtsTokenCount,
-			},
-			TotalTokens: in.UsageMetadata.TotalTokenCount,
-		},
+		ID:          in.ResponseID,
+		Model:       in.ModelVersion,
+		Output:      output,
+		Usage:       utils.Ptr(nativeUsage(in.UsageMetadata)),
 		Error:       nil,
 		ServiceTier: "",
 		Metadata: map[string]any{
 			"stop_reason": in.Candidates[0].FinishReason,
 		},
 	}
+}
+
+// nativeUsage normalizes Gemini's token accounting onto the native Usage
+// contract. Two Gemini-specific quirks:
+//
+//   - promptTokenCount already includes cachedContentTokenCount, so the cached
+//     count maps straight to the details field with nothing added on top.
+//     Gemini is the only provider here that does this — Anthropic and Bedrock
+//     both report cache counts outside their prompt total and have to add them.
+//   - candidatesTokenCount excludes thoughtsTokenCount, whereas the contract
+//     treats reasoning as a subset of OutputTokens. Adding them recovers the
+//     real output size and makes InputTokens+OutputTokens agree with the
+//     totalTokenCount Gemini reports, which counts thoughts.
+func nativeUsage(u *UsageMetadata) responses2.Usage {
+	if u == nil {
+		return responses2.Usage{}
+	}
+
+	out := responses2.Usage{
+		InputTokens:  u.PromptTokenCount,
+		OutputTokens: u.CandidatesTokenCount + u.ThoughtsTokenCount,
+	}
+	out.InputTokensDetails.CachedTokens = u.CachedContentTokenCount
+	out.OutputTokensDetails.ReasoningTokens = u.ThoughtsTokenCount
+	out.TotalTokens = out.InputTokens + out.OutputTokens
+
+	return out
 }
 
 // =============================================================================
@@ -1139,18 +1150,8 @@ func (c *ResponseChunkToNativeResponseChunkConverter) buildResponseCompleted() *
 				CreatedAt: int(time.Now().Unix()),
 				Status:    "completed",
 				Output:    c.completedOutputs,
-				Usage: responses2.Usage{
-					InputTokens: c.usage.PromptTokenCount,
-					InputTokensDetails: struct {
-						CachedTokens int `json:"cached_tokens"`
-					}{CachedTokens: 0},
-					OutputTokens: c.usage.CandidatesTokenCount,
-					TotalTokens:  c.usage.TotalTokenCount,
-					OutputTokensDetails: struct {
-						ReasoningTokens int `json:"reasoning_tokens"`
-					}{ReasoningTokens: c.usage.ThoughtsTokenCount},
-				},
-				Request: responses2.Request{Model: c.model},
+				Usage:     nativeUsage(&c.usage),
+				Request:   responses2.Request{Model: c.model},
 			},
 		},
 	}

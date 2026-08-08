@@ -22,6 +22,10 @@ type UsageMetadata struct {
 		TokenCount int    `json:"tokenCount"`
 	} `json:"promptTokensDetails"`
 	ThoughtsTokenCount int `json:"thoughtsTokenCount"`
+	// CachedContentTokenCount is the cached portion of the prompt. Unlike
+	// Anthropic's split counts it is already inside PromptTokenCount, so it
+	// maps to InputTokensDetails.CachedTokens and must not be added on top.
+	CachedContentTokenCount int `json:"cachedContentTokenCount"`
 }
 
 type Error struct {

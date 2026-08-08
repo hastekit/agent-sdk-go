@@ -358,12 +358,7 @@ func (c *ConverseStreamToNativeConverter) handleMessageStop(msg *StreamMessageSt
 
 func (c *ConverseStreamToNativeConverter) handleMetadata(meta *StreamMetadata) []*responses.ResponseChunk {
 	if meta.Usage != nil {
-		c.usage = &responses.Usage{
-			InputTokens:  meta.Usage.InputTokens,
-			OutputTokens: meta.Usage.OutputTokens,
-			TotalTokens:  meta.Usage.TotalTokens,
-		}
-		c.usage.InputTokensDetails.CachedTokens = meta.Usage.CacheReadInputTokens
+		c.usage = nativeUsage(*meta.Usage)
 	}
 
 	return c.buildResponseCompleted()
