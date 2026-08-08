@@ -282,6 +282,10 @@ func (cm *ConversationRunManager) summarize(ctx context.Context) error {
 		return nil
 	}
 
+	// Bill what the summary cost, without touching ContextTokens — the size of a
+	// summarization request says nothing about the agent's context window.
+	cm.TrackAuxiliaryUsage(result.Usage)
+
 	// A summary is persisted as "history up to and including run X is covered",
 	// and a boundary naming the run still being written is not a claim this
 	// manager should make. No summarizer here produces one — both floor their
@@ -464,17 +468,39 @@ func (cm *ConversationRunManager) SaveMessages(ctx context.Context) error {
 	return nil
 }
 
+// TrackUsage records a call made *as* the agent — one whose input was the
+// conversation itself. It bills the tokens and updates the context-occupancy
+// signal the summarizer triggers on.
 func (cm *ConversationRunManager) TrackUsage(usage *responses.Usage) {
 	if usage == nil {
 		return
 	}
-	cm.RunState.Usage.InputTokens += usage.InputTokens
-	cm.RunState.Usage.OutputTokens += usage.OutputTokens
-	cm.RunState.Usage.InputTokensDetails.CachedTokens += usage.InputTokensDetails.CachedTokens
-	cm.RunState.Usage.TotalTokens += usage.TotalTokens
+	cm.accumulateUsage(usage)
 
 	// ContextTokens tracks the most recent call's size
 	cm.RunState.ContextTokens = usage.TotalTokens
+}
+
+// TrackAuxiliaryUsage bills a call made *on behalf of* the run against some
+// other prompt — summarization being the one that exists today. Those tokens
+// are real spend and belong in the run's total, but their size says nothing
+// about how full the agent's context window is: a summarization request is its
+// own instruction plus a flattened transcript, with none of the agent's tools or
+// system prompt. Folding it into ContextTokens would hand the summarizer a
+// reading of a conversation that is not the one it is deciding about.
+func (cm *ConversationRunManager) TrackAuxiliaryUsage(usage *responses.Usage) {
+	if usage == nil {
+		return
+	}
+	cm.accumulateUsage(usage)
+}
+
+func (cm *ConversationRunManager) accumulateUsage(usage *responses.Usage) {
+	cm.RunState.Usage.InputTokens += usage.InputTokens
+	cm.RunState.Usage.OutputTokens += usage.OutputTokens
+	cm.RunState.Usage.InputTokensDetails.CachedTokens += usage.InputTokensDetails.CachedTokens
+	cm.RunState.Usage.OutputTokensDetails.ReasoningTokens += usage.OutputTokensDetails.ReasoningTokens
+	cm.RunState.Usage.TotalTokens += usage.TotalTokens
 }
 
 func (cm *ConversationRunManager) loadSubAgentContext(ctx context.Context) {

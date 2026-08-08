@@ -256,5 +256,8 @@ func (s *LLMHistorySummarizer) Summarize(ctx context.Context, msgIdToRunId map[s
 		LastSummarizedMessageID: lastSummarizedMessageID,
 		SummaryID:               summaryID,
 		MessagesToKeep:          messagesToKeep,
+		// Summarizing costs real tokens. Reporting them here is what keeps the
+		// run's usage total from silently excluding the work done to shrink it.
+		Usage: resp.Usage,
 	}, nil
 }
