@@ -58,12 +58,18 @@ type CommonConversationManager struct {
 	// bundles are flattened into the provider message list as-is.
 	MessageAttribution bool
 
+	// SteeringNotices controls whether a message that arrived mid-run is
+	// followed by a note saying so. On by default; see WithoutSteeringNotices
+	// for when to turn it off.
+	SteeringNotices bool
+
 	Options []ConversationManagerOptions
 }
 
 func NewConversationManager(p ConversationPersistenceAdapter, opts ...ConversationManagerOptions) *CommonConversationManager {
 	cm := &CommonConversationManager{
 		ConversationPersistenceAdapter: p,
+		SteeringNotices:                true,
 	}
 
 	for _, o := range opts {
@@ -96,6 +102,21 @@ func WithMessageAttribution() ConversationManagerOptions {
 	}
 }
 
+// WithoutSteeringNotices suppresses the note that normally follows a message
+// which arrived mid-run, leaving such messages indistinguishable from one that
+// opened the turn.
+//
+// Turn it off only when something upstream already conveys the distinction, or
+// when an agent's prompt depends on the exact message sequence. The note costs
+// a few dozen tokens per interjection and is otherwise worth keeping: without
+// it the model cannot tell a correction shouted mid-task from the instruction
+// it is already carrying out.
+func WithoutSteeringNotices() ConversationManagerOptions {
+	return func(cm *CommonConversationManager) {
+		cm.SteeringNotices = false
+	}
+}
+
 type ConversationRunManager struct {
 	ConversationPersistenceAdapter
 
@@ -124,6 +145,14 @@ type ConversationRunManager struct {
 	summaries          *SummaryResult
 	messageFilter      MessageFilter
 	messageAttribution bool
+
+	steeringNotices bool
+	// steeredIDs holds the bundles this run drained off the queue — the ones
+	// the user sent while the run was already working. It is deliberately not
+	// persisted: the note it drives is about *when* a message arrived relative
+	// to the run that received it, which stops being useful once that run ends
+	// and the message is simply part of the thread's history.
+	steeredIDs map[string]struct{}
 }
 
 func NewRun(ctx context.Context, cm *CommonConversationManager, namespace string, threadID string, previousMessageID string, options ...RunOption) (*ConversationRunManager, error) {
@@ -132,6 +161,7 @@ func NewRun(ctx context.Context, cm *CommonConversationManager, namespace string
 		summarizer:                     cm.Summarizer,
 		messageFilter:                  cm.MessageFilter,
 		messageAttribution:             cm.MessageAttribution,
+		steeringNotices:                cm.SteeringNotices,
 		msgIdToRunId:                   make(map[string]string),
 		State:                          make(map[string]string),
 	}
@@ -269,6 +299,13 @@ func (cm *ConversationRunManager) GetMessages(ctx context.Context, agentName str
 	// not carried into a fresh RunState, so a queued message is only ever
 	// drained by the same run that queued it.
 	if len(cm.RunState.QueuedMessages) > 0 {
+		// Everything on the queue arrived after this run started working —
+		// that is what the queue is for. Record the bundles so the outgoing
+		// list can say so; they are otherwise indistinguishable from the turn
+		// that opened the run.
+		for _, m := range cm.RunState.QueuedMessages {
+			cm.markSteered(m)
+		}
 		cm.newMessages = append(cm.newMessages, cm.RunState.QueuedMessages...)
 		cm.RunState.QueuedMessages = nil
 	}
@@ -369,6 +406,18 @@ func (cm *ConversationRunManager) summarize(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// markSteered records that a bundle reached this run mid-flight rather than
+// opening it.
+func (cm *ConversationRunManager) markSteered(m Message) {
+	if m.ID == "" || !cm.steeringNotices {
+		return
+	}
+	if cm.steeredIDs == nil {
+		cm.steeredIDs = map[string]struct{}{}
+	}
+	cm.steeredIDs[m.ID] = struct{}{}
 }
 
 // trackRun records which run a bundle belongs to. LoadMessages does this for
