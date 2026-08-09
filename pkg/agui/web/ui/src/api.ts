@@ -59,6 +59,32 @@ export function runUrl(agent: string): string {
   ).toString();
 }
 
+// streamUrl is the thread's run stream: attaching to it replays the run
+// so far and then follows it live, without starting a turn.
+export function streamUrl(agent: string, threadId: string): string {
+  return new URL(
+    `${API}/agents/${encodeURIComponent(agent)}/threads/${encodeURIComponent(
+      threadId
+    )}/stream`,
+    window.location.origin
+  ).toString();
+}
+
+// stopRun asks the server to end a run in flight, identified by the
+// stream id it reported at the start. The server answers straight away;
+// the run winds down on its own SSE connection and ends there with
+// RUN_FINISHED, so keep reading that stream.
+export async function stopRun(agent: string, streamId: string): Promise<void> {
+  const r = await fetch(`${API}/agents/${encodeURIComponent(agent)}/stop`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ streamId }),
+    // A stop is worth delivering even if the user navigates away.
+    keepalive: true,
+  });
+  if (!r.ok) throw new Error(`stop → ${r.status}`);
+}
+
 export function relativeTime(iso: string): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "";

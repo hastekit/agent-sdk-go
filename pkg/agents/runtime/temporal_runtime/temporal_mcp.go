@@ -43,9 +43,15 @@ func (t *TemporalMCPServer) ListTools(ctx context.Context, runContext map[string
 // opened here fires once and is replay-safe. callTool does the real work.
 func (t *TemporalMCPServer) ExecuteTool(ctx context.Context, params *agents.ToolCall, runContext map[string]any) (*agents.ToolCallResponse, error) {
 	injectProgressReporter(ctx, t.broker, params)
-	return agents.ExecuteWithTrace(ctx, nil, params, func(ctx context.Context, params *agents.ToolCall) (*agents.ToolCallResponse, error) {
-		return t.callTool(ctx, params, runContext)
-	})
+
+	resp, err := agents.RunStoppableTool(ctx, agents.StopWatcherFrom(t.broker), 0, params,
+		func(callCtx context.Context, p *agents.ToolCall) (*agents.ToolCallResponse, error) {
+			return agents.ExecuteWithTrace(callCtx, nil, p, func(innerCtx context.Context, ip *agents.ToolCall) (*agents.ToolCallResponse, error) {
+				return t.callTool(innerCtx, ip, runContext)
+			})
+		})
+
+	return resp, cancellationError(err)
 }
 
 func (t *TemporalMCPServer) callTool(ctx context.Context, params *agents.ToolCall, runContext map[string]any) (*agents.ToolCallResponse, error) {

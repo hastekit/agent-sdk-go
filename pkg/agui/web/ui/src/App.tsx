@@ -5,7 +5,7 @@ import {
   useDefaultRenderTool,
   useInterrupt,
 } from "@copilotkit/react-core/v2";
-import { HttpAgent } from "@ag-ui/client";
+import { StoppableHttpAgent } from "./stoppable-agent";
 import type { Message as AGUIMessage } from "@ag-ui/core";
 import {
   fetchAgents,
@@ -32,10 +32,13 @@ import {
 interface Active {
   threadId: string;
   initialMessages: AGUIMessage[];
+  // Whether this thread might have a run to rejoin. A chat we just
+  // created cannot: its id has never left the browser.
+  resumable: boolean;
 }
 
 function newActive(): Active {
-  return { threadId: crypto.randomUUID(), initialMessages: [] };
+  return { threadId: crypto.randomUUID(), initialMessages: [], resumable: false };
 }
 
 export default function App() {
@@ -77,13 +80,20 @@ export default function App() {
     refreshThreads();
   }, [refreshThreads]);
 
-  // Fresh HttpAgent per (agent, thread). The provider re-keys on
-  // threadId below so the whole chat subtree re-initialises cleanly
-  // when the user switches conversations — no leaked in-flight stream
-  // or pending interrupt from the prior thread.
+  // Fresh agent per (agent, thread). The provider re-keys on threadId
+  // below so the whole chat subtree re-initialises cleanly when the user
+  // switches conversations — no leaked in-flight stream or pending
+  // interrupt from the prior thread.
+  //
+  // StoppableHttpAgent so the stop button ends the run server-side rather
+  // than only dropping the stream.
   const agent = useMemo(() => {
     if (!agentName) return null;
-    return new HttpAgent({ url: runUrl(agentName), threadId: active.threadId });
+    return new StoppableHttpAgent({
+      agentName,
+      url: runUrl(agentName),
+      threadId: active.threadId,
+    });
   }, [agentName, active.threadId]);
 
   // Hydrate history AFTER the subtree mounts and CopilotKit's useAgent
@@ -96,6 +106,38 @@ export default function App() {
     const t = setTimeout(() => agent.setMessages(active.initialMessages), 50);
     return () => clearTimeout(t);
   }, [agent, active.initialMessages]);
+
+  // Rejoin whatever this thread already has running. Opening a
+  // conversation used to show only what had been persisted, so a run
+  // started elsewhere — or before navigating away — appeared frozen until
+  // it finished. connectAgent attaches to the thread's stream instead:
+  // the server replays the run so far and then follows it live.
+  //
+  // Only for threads that could have one: a chat created in this browser
+  // has no run behind it, and asking would leave the agent looking busy
+  // before the user has typed anything.
+  useEffect(() => {
+    if (!agent || !active.resumable) return;
+    let cancelled = false;
+
+    // After hydration, so a replayed run doesn't race setMessages above.
+    const t = setTimeout(() => {
+      if (cancelled) return;
+      agent.connectAgent().catch((e: unknown) => {
+        // Nothing to attach to is the common case, not a failure worth
+        // showing: the run finished, or never started.
+        console.debug("no run to rejoin", e);
+      });
+    }, 100);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+      // Detach without ending the run: it belongs to the thread, not to
+      // this view of it.
+      void agent.detachActiveRun?.();
+    };
+  }, [agent, active.resumable]);
 
   // Refresh the sidebar after each run finishes — that's when the
   // thread row is created/updated server-side. Also surface run errors:
@@ -124,7 +166,11 @@ export default function App() {
       if (t.thread_id === active.threadId) return;
       try {
         const messages = await fetchMessages(agentName, t.thread_id);
-        setActive({ threadId: t.thread_id, initialMessages: messages });
+        setActive({
+          threadId: t.thread_id,
+          initialMessages: messages,
+          resumable: true,
+        });
       } catch (e) {
         setError(String(e));
       }

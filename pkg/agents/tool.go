@@ -13,6 +13,7 @@ type ToolCall struct {
 	Namespace    string            `json:"namespace"`
 	SessionID    string            `json:"session_id"`
 	ThreadID     string            `json:"thread_id"`
+	StreamID     string            `json:"stream_id,omitempty"`
 	RunContext   map[string]any    `json:"run_context"`
 	State        map[string]string `json:"state,omitempty"`
 

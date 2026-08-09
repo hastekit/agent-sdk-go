@@ -10,12 +10,14 @@ import (
 type RestateMCPServer struct {
 	restateCtx       restate.WorkflowContext
 	wrappedMcpServer agents.MCPToolset
+	broker           agents.StreamBroker
 }
 
-func NewRestateMCPServer(restateCtx restate.WorkflowContext, wrappedMcpServer agents.MCPToolset) *RestateMCPServer {
+func NewRestateMCPServer(restateCtx restate.WorkflowContext, wrappedMcpServer agents.MCPToolset, broker agents.StreamBroker) *RestateMCPServer {
 	return &RestateMCPServer{
 		restateCtx:       restateCtx,
 		wrappedMcpServer: wrappedMcpServer,
+		broker:           broker,
 	}
 }
 
@@ -48,7 +50,7 @@ func (t *RestateMCPServer) ListTools(ctx context.Context, runContext map[string]
 
 	var tools []agents.Tool
 	for _, tool := range toolDefs {
-		tools = append(tools, NewRestateMCPTool(t.restateCtx, t.wrappedMcpServer, runContext, tool))
+		tools = append(tools, NewRestateMCPTool(t.restateCtx, t.wrappedMcpServer, runContext, tool, t.broker))
 	}
 
 	return tools, nil
@@ -58,26 +60,31 @@ type RestateMCPTool struct {
 	restateCtx       restate.WorkflowContext
 	runContext       map[string]any
 	wrappedMcpServer agents.MCPToolset
+	broker           agents.StreamBroker
 	*agents.BaseTool
 }
 
-func NewRestateMCPTool(restateCtx restate.WorkflowContext, wrappedMcpServer agents.MCPToolset, runContext map[string]any, baseTool agents.BaseTool) *RestateMCPTool {
+func NewRestateMCPTool(restateCtx restate.WorkflowContext, wrappedMcpServer agents.MCPToolset, runContext map[string]any, baseTool agents.BaseTool, broker agents.StreamBroker) *RestateMCPTool {
 	return &RestateMCPTool{
 		restateCtx:       restateCtx,
 		runContext:       runContext,
 		wrappedMcpServer: wrappedMcpServer,
+		broker:           broker,
 		BaseTool:         &baseTool,
 	}
 }
 
+// Execute runs the call inside a Restate run step, watching the stop flag
+// so a stop cancels the MCP call rather than leaving the server working.
+// The span runs inside the step, so execute_tool fires exactly once and
+// never on replay. callTool does the work via the connection pool.
 func (t *RestateMCPTool) Execute(ctx context.Context, params *agents.ToolCall) (*agents.ToolCallResponse, error) {
-	// Execute via restate.Run for determinism. The underlying MCPClient.CallToolDirect
-	// uses the connection pool — no ListTools call needed. The span runs inside
-	// restate.Run so the execute_tool span fires exactly once and never on
-	// replay. The RestateMCPTool itself supplies the tool metadata (t.Tool)
-	// while t.callTool does the work.
 	return restate.Run(t.restateCtx, func(runCtx restate.RunContext) (*agents.ToolCallResponse, error) {
-		return agents.ExecuteWithTrace(runCtx, t, params, t.callTool)
+		resp, err := agents.RunStoppableTool(runCtx, agents.StopWatcherFrom(t.broker), 0, params,
+			func(callCtx context.Context, p *agents.ToolCall) (*agents.ToolCallResponse, error) {
+				return agents.ExecuteWithTrace(callCtx, t, p, t.callTool)
+			})
+		return resp, cancellationError(err)
 	}, restate.WithName("MCPToolCall"))
 }
 
