@@ -1,9 +1,10 @@
 import {
   HttpAgent,
+  randomUUID,
   runHttpRequest,
   transformHttpEventStream,
 } from "@ag-ui/client";
-import type { RunAgentInput } from "@ag-ui/core";
+import type { Message, RunAgentInput } from "@ag-ui/core";
 import { stopRun, streamUrl } from "./api";
 
 // rxjs is not a direct dependency; take the Observable type from the
@@ -14,8 +15,9 @@ type EventStream = ReturnType<typeof transformHttpEventStream>;
 // the broker stream id that identifies it (agui.CustomNameStreamID).
 const STREAM_ID_EVENT = "hastekit.stream_id";
 
-// StoppableHttpAgent adds the two things a long run needs from a browser
-// that comes and goes: stopping it for real, and picking it back up.
+// StoppableHttpAgent adds the three things a long run needs from a browser
+// that comes and goes: stopping it for real, picking it back up, and
+// steering it while it works.
 //
 // Its default is to abort the fetch: the browser stops rendering, but the
 // server never learns anything and the run carries on to completion,
@@ -31,22 +33,120 @@ export class StoppableHttpAgent extends HttpAgent {
   private readonly agentName: string;
   private streamId?: string;
 
-  constructor(config: { agentName: string; url: string; threadId?: string }) {
-    super({ url: config.url, threadId: config.threadId });
+  // Turns steered into a run that was already in flight, held until that
+  // run ends. A run's event pipeline clones agent.messages when it starts
+  // and works from that copy (defaultApplyEvents), so a message appended
+  // mid-run is missing from it, and the next event that rewrites the list
+  // erases the steered turn from the chat — even though the agent received
+  // it and history has it (it reappears on reload).
+  private steered: Message[] = [];
+
+  // The thread's stored history. CopilotChat rejoins the thread by itself
+  // whenever it is given an explicit threadId, and CopilotKitCore.connectAgent
+  // clears the agent first ("fresh restore": setMessages([]) + setState({})) on
+  // the assumption that the server is the source of truth. The run's event
+  // pipeline then snapshots that empty list, so the first event it applies
+  // replaces the transcript with just the rejoined run — the conversation
+  // vanishes until reloaded. Re-seeding it below puts it back.
+  private readonly history: Message[];
+
+  constructor(config: {
+    agentName: string;
+    url: string;
+    threadId?: string;
+    history?: Message[];
+  }) {
+    super({
+      url: config.url,
+      threadId: config.threadId,
+      initialMessages: config.history,
+    });
     this.agentName = config.agentName;
+    this.history = config.history ?? [];
 
     this.subscribe({
+      // Runs between the clear and the pipeline's snapshot, so history is
+      // back before anything reads it — and it broadcasts onMessagesChanged,
+      // so the chat re-renders even when there is no run to rejoin. Keyed by
+      // id, so an ordinary turn (which still has its history) is untouched.
+      onRunInitialized: ({ messages }) => {
+        const missing = this.history.filter(
+          (m) => !messages.some((seen) => seen.id === m.id)
+        );
+        if (missing.length === 0) return;
+        return { messages: [...missing, ...messages] };
+      },
       onCustomEvent: ({ event }: any) => {
         if (event?.name === STREAM_ID_EVENT && event?.value?.streamId) {
           this.streamId = event.value.streamId as string;
         }
       },
+      // onEvent mutations are applied to the running pipeline's own message
+      // list, which is the only way to reach it from outside. Re-adding is
+      // keyed by id, so this settles after one event and leaves the rest of
+      // the run's message handling alone.
+      onEvent: ({ messages }) => {
+        const missing = this.steered.filter(
+          (m) => !messages.some((seen) => seen.id === m.id)
+        );
+        if (missing.length === 0) return;
+        return { messages: [...messages, ...missing] };
+      },
       // The id belongs to one run: a later stop must not reach back to a
-      // finished one.
+      // finished one. The steered turns are likewise done — the next run
+      // seeds its snapshot from agent.messages, which now carries them.
       onRunFinalized: () => {
         this.streamId = undefined;
+        this.steered = [];
       },
     });
+  }
+
+  // ── steer ──────────────────────────────────────────────────────────
+  //
+  // Sends a follow-up into the run that is already going: the server folds
+  // it into that run and answers 204, and the reply arrives on the stream
+  // we are already reading.
+  //
+  // This deliberately does not go through copilotkit.runAgent(): that
+  // detaches the active run before starting a new one, so the SSE the
+  // in-flight run is still writing to would be dropped — and the fold
+  // answers 204, leaving no stream to take its place. So we append the turn
+  // to the transcript ourselves and POST it.
+  //
+  // Only the steered message goes over the wire. The server takes the new
+  // turn from the trailing user block of what it is sent, and until the
+  // assistant has said anything this turn that block would also swallow the
+  // message that started the run.
+  //
+  // If the run finished in the gap between the composer deciding to steer
+  // and this request landing, the server starts a fresh run and streams it
+  // instead of folding. Nothing is reading that response, so we drop it and
+  // pick the run up on the thread's own stream, the same way a rejoin does.
+  async steer(text: string): Promise<void> {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+
+    // addMessage notifies subscribers, so the chat renders the turn at
+    // once; the live run doesn't see it, hence `steered` above.
+    const message: Message = {
+      id: randomUUID(),
+      role: "user",
+      content: trimmed,
+    };
+    this.steered.push(message);
+    this.addMessage(message);
+
+    const input = { ...this.prepareRunAgentInput(), messages: [message] };
+    const res = await fetch(this.url, this.requestInit(input));
+    if (res.status === 204) return;
+
+    void res.body?.cancel();
+    if (!res.ok) {
+      console.error("steer failed", res.status);
+      return;
+    }
+    void this.connectAgent();
   }
 
   // connect attaches to whatever this thread already has running, instead

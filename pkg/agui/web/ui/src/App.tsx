@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   CopilotKitProvider,
   CopilotChat,
+  CopilotChatInput,
   useDefaultRenderTool,
   useInterrupt,
 } from "@copilotkit/react-core/v2";
@@ -32,13 +33,10 @@ import {
 interface Active {
   threadId: string;
   initialMessages: AGUIMessage[];
-  // Whether this thread might have a run to rejoin. A chat we just
-  // created cannot: its id has never left the browser.
-  resumable: boolean;
 }
 
 function newActive(): Active {
-  return { threadId: crypto.randomUUID(), initialMessages: [], resumable: false };
+  return { threadId: crypto.randomUUID(), initialMessages: [] };
 }
 
 export default function App() {
@@ -87,57 +85,28 @@ export default function App() {
   //
   // StoppableHttpAgent so the stop button ends the run server-side rather
   // than only dropping the stream.
+  //
+  // The thread's history goes in at construction. CopilotChat rejoins the
+  // thread itself (it connects whenever it is given an explicit threadId),
+  // and that connect clears the agent's messages first — so hydrating from
+  // here afterwards is a race we lose. The agent re-seeds its own history
+  // on run initialization instead; see StoppableHttpAgent.
   const agent = useMemo(() => {
     if (!agentName) return null;
     return new StoppableHttpAgent({
       agentName,
       url: runUrl(agentName),
       threadId: active.threadId,
+      history: active.initialMessages,
     });
-  }, [agentName, active.threadId]);
+  }, [agentName, active.threadId, active.initialMessages]);
 
-  // Hydrate history AFTER the subtree mounts and CopilotKit's useAgent
-  // subscribes. setMessages fires onMessagesChanged so the chat
-  // re-renders with the prior turns (the constructor's stored messages
-  // don't broadcast). Defer one tick because the agent + provider
-  // remount in the same commit.
-  useEffect(() => {
-    if (!agent || active.initialMessages.length === 0) return;
-    const t = setTimeout(() => agent.setMessages(active.initialMessages), 50);
-    return () => clearTimeout(t);
-  }, [agent, active.initialMessages]);
-
-  // Rejoin whatever this thread already has running. Opening a
-  // conversation used to show only what had been persisted, so a run
-  // started elsewhere — or before navigating away — appeared frozen until
-  // it finished. connectAgent attaches to the thread's stream instead:
-  // the server replays the run so far and then follows it live.
-  //
-  // Only for threads that could have one: a chat created in this browser
-  // has no run behind it, and asking would leave the agent looking busy
-  // before the user has typed anything.
-  useEffect(() => {
-    if (!agent || !active.resumable) return;
-    let cancelled = false;
-
-    // After hydration, so a replayed run doesn't race setMessages above.
-    const t = setTimeout(() => {
-      if (cancelled) return;
-      agent.connectAgent().catch((e: unknown) => {
-        // Nothing to attach to is the common case, not a failure worth
-        // showing: the run finished, or never started.
-        console.debug("no run to rejoin", e);
-      });
-    }, 100);
-
-    return () => {
-      cancelled = true;
-      clearTimeout(t);
-      // Detach without ending the run: it belongs to the thread, not to
-      // this view of it.
-      void agent.detachActiveRun?.();
-    };
-  }, [agent, active.resumable]);
+  // Rejoining a run in flight is CopilotChat's own doing: it connects to
+  // the thread whenever it is given an explicit threadId, and the server
+  // replays the run so far before following it live. Nothing to start from
+  // here — the agent only has to survive the clear that connect does first
+  // (see StoppableHttpAgent), which is why history is handed to it above
+  // rather than pushed in with setMessages after mount.
 
   // Refresh the sidebar after each run finishes — that's when the
   // thread row is created/updated server-side. Also surface run errors:
@@ -161,6 +130,18 @@ export default function App() {
   // Clear a stale run error when the user switches thread or agent.
   useEffect(() => setRunError(null), [active.threadId, agentName]);
 
+  // Steering: a turn typed while the agent is working folds into the run
+  // in flight (see StoppableHttpAgent.steer). Memoised so the composer
+  // isn't remounted on every render.
+  const steer = useCallback((text: string) => void agent?.steer(text), [agent]);
+  // Cast: the slot type expects CopilotChatInput's own static sub-slots on
+  // whatever it is handed. This wrapper only changes behaviour and renders
+  // the real composer, so it has none of them and needs none.
+  const inputSlot = useMemo(
+    () => ((p: any) => <SteerableInput {...p} onSteer={steer} />) as any,
+    [steer]
+  );
+
   const selectThread = useCallback(
     async (t: ThreadInfo) => {
       if (t.thread_id === active.threadId) return;
@@ -169,7 +150,6 @@ export default function App() {
         setActive({
           threadId: t.thread_id,
           initialMessages: messages,
-          resumable: true,
         });
       } catch (e) {
         setError(String(e));
@@ -231,12 +211,48 @@ export default function App() {
                 agentId={agentName}
                 threadId={active.threadId}
                 labels={{ chatInputPlaceholder: "Talk to the agent…" }}
+                input={inputSlot}
               />
             </div>
           </div>
         </CopilotKitProvider>
       )}
     </div>
+  );
+}
+
+// ── Composer ───────────────────────────────────────────────
+
+// SteerableInput is the composer with one change: while a run is in
+// flight, typing turns Send back into Send — the text folds into the
+// running turn instead of stopping it. With an empty box the button stays
+// Stop, so nothing is taken away.
+//
+// Done by telling CopilotChatInput the run isn't in flight rather than by
+// intercepting the click: `isProcessing` is what makes it draw the square
+// AND what routes both the button and the Enter key to onStop, so flipping
+// it fixes the icon and the keyboard in one move. onSubmitMessage then
+// routes the text to the run that is actually running.
+function SteerableInput(props: any) {
+  // onSteer is ours; CopilotChatInput spreads what it doesn't recognise
+  // onto its DOM node.
+  const { onSteer, ...inputProps } = props;
+
+  const hasText = ((props.value ?? "") as string).trim().length > 0;
+  const steering = !!props.isRunning && !!onSteer && hasText;
+
+  return (
+    <CopilotChatInput
+      {...inputProps}
+      isRunning={props.isRunning && !steering}
+      onSubmitMessage={(text: string) => {
+        if (props.isRunning && onSteer && text.trim()) {
+          onSteer(text);
+          return;
+        }
+        props.onSubmitMessage?.(text);
+      }}
+    />
   );
 }
 

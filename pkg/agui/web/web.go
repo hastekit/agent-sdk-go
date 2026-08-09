@@ -34,6 +34,17 @@
 //	POST /api/agui/agents/{name}/stop → stop a run in flight
 //	GET  /api/agui/agents/{name}/threads                   → conversation list
 //	GET  /api/agui/agents/{name}/threads/{thread}/messages → thread history
+//	GET  /api/agui/agents/{name}/threads/{thread}/stream   → rejoin a run in flight
+//
+// A thread streams on the same channel every turn, so the stream endpoint
+// finds a run without the client having kept anything: it replays the run
+// so far and then follows it live, which is how a client that reloaded or
+// navigated away picks one back up.
+//
+// A run posted for a thread that is already running folds into it: the
+// server answers 204 and the reply appears on that run's stream. That is
+// how a client steers a run in flight — send the new turn and keep reading
+// the stream it already has.
 //
 // The stop endpoint takes the stream id the run returned (the
 // X-Stream-Id header, or the streamId CUSTOM event) as {"streamId": …}
