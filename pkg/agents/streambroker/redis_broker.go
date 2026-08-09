@@ -25,13 +25,14 @@ import (
 //   - Multiple independent readers per channel (no coordination needed)
 //   - TTL-based automatic cleanup after a stream terminates
 type RedisStreamBroker struct {
-	client    *redis.Client
-	prefix    string
-	activeTTL time.Duration
-	replayTTL time.Duration
-	maxLen    int64
-	readCount int64
-	blockTime time.Duration
+	client       *redis.Client
+	prefix       string
+	activeTTL    time.Duration
+	replayTTL    time.Duration
+	maxLen       int64
+	readCount    int64
+	blockTime    time.Duration
+	stopPollTime time.Duration
 }
 
 // RedisStreamBrokerOptions configures the Redis stream broker.
@@ -63,6 +64,11 @@ type RedisStreamBrokerOptions struct {
 	// MaxLen caps the approximate number of entries retained per stream
 	// (XADD MAXLEN ~). Default 2000.
 	MaxLen int64
+
+	// StopPollInterval is how often WatchStop re-reads the stop flag,
+	// bounding how long a stop takes to interrupt a running tool.
+	// Default 500ms, and only paid while a tool is executing.
+	StopPollInterval time.Duration
 }
 
 const (
@@ -71,6 +77,7 @@ const (
 	defaultMaxLen    = int64(2000)
 	defaultReadCount = int64(500)
 	defaultBlock     = 5 * time.Second
+	defaultStopPoll  = 500 * time.Millisecond
 
 	// streamEndType is the sentinel event type written by Close so
 	// Subscribe loops can terminate without relying on a status key.
@@ -113,15 +120,20 @@ func NewRedisStreamBroker(opts RedisStreamBrokerOptions) (*RedisStreamBroker, er
 	if maxLen <= 0 {
 		maxLen = defaultMaxLen
 	}
+	stopPoll := opts.StopPollInterval
+	if stopPoll <= 0 {
+		stopPoll = defaultStopPoll
+	}
 
 	return &RedisStreamBroker{
-		client:    client,
-		prefix:    prefix,
-		activeTTL: activeTTL,
-		replayTTL: replayTTL,
-		maxLen:    maxLen,
-		readCount: defaultReadCount,
-		blockTime: defaultBlock,
+		client:       client,
+		prefix:       prefix,
+		activeTTL:    activeTTL,
+		replayTTL:    replayTTL,
+		maxLen:       maxLen,
+		readCount:    defaultReadCount,
+		blockTime:    defaultBlock,
+		stopPollTime: stopPoll,
 	}, nil
 }
 
@@ -312,6 +324,36 @@ func (b *RedisStreamBroker) IsStopped(ctx context.Context, channel string) (bool
 		return false, fmt.Errorf("failed to read stop flag: %w", err)
 	}
 	return n > 0, nil
+}
+
+// WatchStop implements StopWatcher. The flag is usually set by another
+// process, so polling is the only way to learn of it promptly — and only
+// for the lifetime of the watch, i.e. while a tool call is in flight.
+// Transient Redis errors are ignored so a blip doesn't drop the watch.
+func (b *RedisStreamBroker) WatchStop(ctx context.Context, channel string) (<-chan struct{}, func()) {
+	out := make(chan struct{})
+	watchCtx, cancel := context.WithCancel(ctx)
+
+	go func() {
+		ticker := time.NewTicker(b.stopPollTime)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-watchCtx.Done():
+				return
+			case <-ticker.C:
+				stopped, err := b.IsStopped(watchCtx, channel)
+				if err != nil || !stopped {
+					continue
+				}
+				close(out)
+				return
+			}
+		}
+	}()
+
+	return out, cancel
 }
 
 // EnqueueOrStart implements RunClaimBroker. The claim is an atomic SETNX

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/hastekit/hastekit-sdk-go/pkg/agents"
 	"github.com/hastekit/hastekit-sdk-go/pkg/agents/agentstate"
@@ -183,9 +184,15 @@ func messagesText(msgs []responses.InputMessageUnion) string {
 				}
 			}
 		case m.OfInputMessage != nil:
+			// An input message carries user text as OfInputText and
+			// assistant text as OfOutputText — the loop's own cancellation
+			// notice is the latter.
 			for _, c := range m.OfInputMessage.Content {
 				if c.OfInputText != nil {
 					b.WriteString(c.OfInputText.Text)
+				}
+				if c.OfOutputText != nil {
+					b.WriteString(c.OfOutputText.Text)
 				}
 			}
 		case m.OfEasyInput != nil && m.OfEasyInput.Content.OfString != nil:
@@ -331,6 +338,364 @@ func TestAgentLoop_StopSignalEndsRun(t *testing.T) {
 	}
 	if text := messagesText(out.Output); !strings.Contains(text, "Cancelled by user") {
 		t.Fatalf("output missing cancellation message, got:\n%s", text)
+	}
+}
+
+func TestAgentLoop_StopCancelsInFlightToolCall(t *testing.T) {
+	const streamID = "stop-mid-tool-stream"
+	broker := streambroker.NewMemoryStreamBroker()
+
+	llm := &scriptedLLM{script: []*responses.Response{
+		// Only one response scripted: the loop must not reach the LLM
+		// again after the stop.
+		toolCallResponse("call_slow", "slow", "{}"),
+	}}
+
+	started := make(chan struct{})
+	slow := newFakeTool("slow", false, "slow done")
+	slow.execute = func(ctx context.Context, params *agents.ToolCall) (*agents.ToolCallResponse, error) {
+		// A long-running tool that honours its context. Without mid-tool
+		// cancellation this blocks until the test times out.
+		close(started)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	agent := newScriptedAgent("main", llm, nil, broker, []agents.Tool{slow}, nil)
+
+	go func() {
+		<-started
+		_ = broker.Stop(context.Background(), streamID)
+	}()
+
+	out := runAgent(t, agent, &agents.AgentInput{
+		Namespace: "test",
+		ThreadID:  "thread-stop-mid-tool",
+		StreamID:  streamID,
+		Message:   userMessage("start something slow"),
+	})
+
+	requireStatus(t, out, agentstate.RunStatusCompleted)
+	if llm.callCount() != 1 {
+		t.Fatalf("LLM called %d times after stop, want 1", llm.callCount())
+	}
+	text := messagesText(out.Output)
+	if !strings.Contains(text, "while this tool was running") {
+		t.Fatalf("output missing cancelled tool result, got:\n%s", text)
+	}
+	if !strings.Contains(text, "Cancelled by user") {
+		t.Fatalf("output missing cancellation message, got:\n%s", text)
+	}
+	requirePairedToolResults(t, out.Output)
+}
+
+func TestAgentLoop_StopAbandonsToolThatIgnoresContext(t *testing.T) {
+	const streamID = "ignores-ctx-stream"
+	broker := streambroker.NewMemoryStreamBroker()
+
+	llm := &scriptedLLM{script: []*responses.Response{
+		toolCallResponse("call_stubborn", "stubborn", "{}"),
+	}}
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	// Released only at the end: nothing may depend on this tool returning.
+	defer close(release)
+
+	stubborn := newFakeTool("stubborn", false, "stubborn done")
+	stubborn.execute = func(ctx context.Context, params *agents.ToolCall) (*agents.ToolCallResponse, error) {
+		close(started)
+		<-release
+		return nil, nil
+	}
+
+	agent := agents.NewAgent(&agents.AgentOptions{
+		Name:         "main",
+		StreamBroker: broker,
+		Tools:        []agents.Tool{stubborn},
+		ToolExecutor: &agents.DefaultToolExecutor{CancelGracePeriod: 50 * time.Millisecond},
+	}).WithLLM(llm)
+
+	go func() {
+		<-started
+		_ = broker.Stop(context.Background(), streamID)
+	}()
+
+	handle, err := agent.Execute(context.Background(), &agents.AgentInput{
+		Namespace: "test",
+		ThreadID:  "thread-ignores-ctx",
+		StreamID:  streamID,
+		Message:   userMessage("start something stubborn"),
+	})
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+
+	// Assertions stay on the test goroutine.
+	type runResult struct {
+		out *agents.AgentOutput
+		err error
+	}
+	done := make(chan runResult, 1)
+	go func() {
+		out, err := handle.Result()
+		done <- runResult{out, err}
+	}()
+
+	var res runResult
+	select {
+	case res = <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("run never finished — a tool ignoring ctx held the stop open")
+	}
+	if res.err != nil {
+		t.Fatalf("run failed: %v", res.err)
+	}
+	out := res.out
+
+	requireStatus(t, out, agentstate.RunStatusCompleted)
+	text := messagesText(out.Output)
+	if !strings.Contains(text, "while this tool was running") {
+		t.Fatalf("abandoned call not reported as cancelled, got:\n%s", text)
+	}
+	requirePairedToolResults(t, out.Output)
+}
+
+func TestAgentLoop_StopLeavesUnrelatedToolFailureIntact(t *testing.T) {
+	const streamID = "mixed-failure-stream"
+	broker := streambroker.NewMemoryStreamBroker()
+
+	// One round, two calls: one fails on its own, one is abandoned by the
+	// stop — each reported for what it was.
+	llm := &scriptedLLM{script: []*responses.Response{{
+		Output: []responses.OutputMessageUnion{
+			{OfFunctionCall: &responses.FunctionCallMessage{ID: "fc_broken", CallID: "call_broken", Name: "broken", Arguments: "{}"}},
+			{OfFunctionCall: &responses.FunctionCallMessage{ID: "fc_slow", CallID: "call_slow", Name: "slow", Arguments: "{}"}},
+		},
+	}}}
+
+	broken := newFakeTool("broken", false, "")
+	broken.execute = func(ctx context.Context, params *agents.ToolCall) (*agents.ToolCallResponse, error) {
+		return nil, fmt.Errorf("disk on fire")
+	}
+
+	started := make(chan struct{})
+	slow := newFakeTool("slow", false, "slow done")
+	slow.execute = func(ctx context.Context, params *agents.ToolCall) (*agents.ToolCallResponse, error) {
+		close(started)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+
+	agent := newScriptedAgent("main", llm, nil, broker, []agents.Tool{broken, slow}, nil)
+
+	go func() {
+		<-started
+		_ = broker.Stop(context.Background(), streamID)
+	}()
+
+	out := runAgent(t, agent, &agents.AgentInput{
+		Namespace: "test",
+		ThreadID:  "thread-mixed-failure",
+		StreamID:  streamID,
+		Message:   userMessage("run both"),
+	})
+
+	requireStatus(t, out, agentstate.RunStatusCompleted)
+
+	results := map[string]string{}
+	for _, m := range out.Output {
+		if m.OfFunctionCallOutput != nil && m.OfFunctionCallOutput.Output.OfString != nil {
+			results[m.OfFunctionCallOutput.CallID] = *m.OfFunctionCallOutput.Output.OfString
+		}
+	}
+	if got := results["call_broken"]; !strings.Contains(got, "disk on fire") {
+		t.Fatalf("unrelated failure was relabelled as a cancellation: %q", got)
+	}
+	if got := results["call_slow"]; !strings.Contains(got, "while this tool was running") {
+		t.Fatalf("abandoned call not reported as cancelled: %q", got)
+	}
+}
+
+func TestAgentLoop_SuppliedExecutorGetsBrokerInjected(t *testing.T) {
+	const streamID = "supplied-executor-stream"
+	broker := streambroker.NewMemoryStreamBroker()
+
+	llm := &scriptedLLM{script: []*responses.Response{
+		toolCallResponse("call_slow", "slow", "{}"),
+	}}
+
+	started := make(chan struct{})
+	slow := newFakeTool("slow", false, "slow done")
+	slow.execute = func(ctx context.Context, params *agents.ToolCall) (*agents.ToolCallResponse, error) {
+		close(started)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+
+	// Caller-constructed, so it must still be bound to the agent's broker
+	// or the stop silently waits for the tool.
+	agent := agents.NewAgent(&agents.AgentOptions{
+		Name:         "main",
+		StreamBroker: broker,
+		Tools:        []agents.Tool{slow},
+		ToolExecutor: &agents.DefaultToolExecutor{},
+	}).WithLLM(llm)
+
+	go func() {
+		<-started
+		_ = broker.Stop(context.Background(), streamID)
+	}()
+
+	out := runAgent(t, agent, &agents.AgentInput{
+		Namespace: "test",
+		ThreadID:  "thread-supplied-executor",
+		StreamID:  streamID,
+		Message:   userMessage("start something slow"),
+	})
+
+	requireStatus(t, out, agentstate.RunStatusCompleted)
+	if text := messagesText(out.Output); !strings.Contains(text, "while this tool was running") {
+		t.Fatalf("supplied executor did not interrupt the tool, got:\n%s", text)
+	}
+}
+
+// plainToolExecutor runs tools with no stop handling of its own.
+type plainToolExecutor struct{}
+
+func (plainToolExecutor) ExecuteAll(ctx context.Context, executions []agents.ExecutableToolCall) []agents.ToolExecutionResult {
+	results := make([]agents.ToolExecutionResult, len(executions))
+	for i, ex := range executions {
+		results[i].Response, results[i].Err = ex.Tool.Execute(ctx, ex.ToolCall)
+	}
+	return results
+}
+
+func TestAgentLoop_NonInterruptibleExecutorRunsToolsToCompletion(t *testing.T) {
+	const streamID = "non-interruptible-stream"
+	broker := streambroker.NewMemoryStreamBroker()
+
+	llm := &scriptedLLM{script: []*responses.Response{
+		toolCallResponse("call_work", "work", "{}"),
+	}}
+
+	var cancelledMidFlight bool
+	work := newFakeTool("work", false, "work done")
+	innerExecute := work.execute
+	work.execute = func(ctx context.Context, params *agents.ToolCall) (*agents.ToolCallResponse, error) {
+		if err := broker.Stop(ctx, streamID); err != nil {
+			return nil, err
+		}
+		// An interruptible executor would cancel this context within
+		// microseconds of the Stop above. This one can't, so the tool runs
+		// to completion and the stop is honoured at the next iteration
+		// boundary instead. Give any would-be watcher room to fire so the
+		// assertion doesn't just win a race.
+		select {
+		case <-ctx.Done():
+			cancelledMidFlight = true
+		case <-time.After(200 * time.Millisecond):
+		}
+		return innerExecute(ctx, params)
+	}
+
+	agent := agents.NewAgent(&agents.AgentOptions{
+		Name:         "main",
+		StreamBroker: broker,
+		Tools:        []agents.Tool{work},
+		ToolExecutor: plainToolExecutor{},
+	}).WithLLM(llm)
+
+	out := runAgent(t, agent, &agents.AgentInput{
+		Namespace: "test",
+		ThreadID:  "thread-non-interruptible",
+		StreamID:  streamID,
+		Message:   userMessage("do some work"),
+	})
+
+	if cancelledMidFlight {
+		t.Fatal("tool context was cancelled by a non-interruptible executor")
+	}
+	requireStatus(t, out, agentstate.RunStatusCompleted)
+	text := messagesText(out.Output)
+	if !strings.Contains(text, "work done") {
+		t.Fatalf("tool result was not preserved, got:\n%s", text)
+	}
+	if !strings.Contains(text, "Cancelled by user") {
+		t.Fatalf("stop not honoured at the iteration boundary, got:\n%s", text)
+	}
+}
+
+// unrecordedStopBroker fires its stop watch without recording the stop:
+// a signal observed off the ledger. It may cancel a tool's context, but
+// only the recorded flag may end the run.
+type unrecordedStopBroker struct {
+	*streambroker.MemoryStreamBroker
+}
+
+func (b *unrecordedStopBroker) WatchStop(ctx context.Context, channel string) (<-chan struct{}, func()) {
+	ch := make(chan struct{})
+	close(ch)
+	return ch, func() {}
+}
+
+func TestAgentLoop_UnrecordedStopDoesNotCancelRun(t *testing.T) {
+	const streamID = "unrecorded-stop-stream"
+	broker := &unrecordedStopBroker{streambroker.NewMemoryStreamBroker()}
+
+	llm := &scriptedLLM{script: []*responses.Response{
+		toolCallResponse("call_slow", "slow", "{}"),
+		textResponse("carried on"),
+	}}
+
+	slow := newFakeTool("slow", false, "slow done")
+	slow.execute = func(ctx context.Context, params *agents.ToolCall) (*agents.ToolCallResponse, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	agent := newScriptedAgent("main", llm, nil, broker, []agents.Tool{slow}, nil)
+
+	out := runAgent(t, agent, &agents.AgentInput{
+		Namespace: "test",
+		ThreadID:  "thread-unrecorded-stop",
+		StreamID:  streamID,
+		Message:   userMessage("start something slow"),
+	})
+
+	// Reporting the abandoned call is fine; ending the run is not — the
+	// stop was never recorded, so the loop keeps going.
+	requireStatus(t, out, agentstate.RunStatusCompleted)
+	if llm.callCount() != 2 {
+		t.Fatalf("LLM called %d times, want 2 — an unrecorded signal ended the run", llm.callCount())
+	}
+	text := messagesText(out.Output)
+	if strings.Contains(text, "Cancelled by user") {
+		t.Fatalf("run cancelled on an unrecorded stop signal, got:\n%s", text)
+	}
+	if !strings.Contains(text, "carried on") {
+		t.Fatalf("loop did not continue past the abandoned call, got:\n%s", text)
+	}
+	requirePairedToolResults(t, out.Output)
+}
+
+// requirePairedToolResults asserts the invariant a cancellation must keep:
+// every function_call in the output has a matching function_call_output.
+func requirePairedToolResults(t *testing.T, msgs []responses.InputMessageUnion) {
+	t.Helper()
+	calls := map[string]bool{}
+	for _, m := range msgs {
+		if m.OfFunctionCall != nil {
+			calls[m.OfFunctionCall.CallID] = false
+		}
+	}
+	for _, m := range msgs {
+		if m.OfFunctionCallOutput != nil {
+			calls[m.OfFunctionCallOutput.CallID] = true
+		}
+	}
+	for callID, paired := range calls {
+		if !paired {
+			t.Fatalf("function_call %q has no matching function_call_output", callID)
+		}
 	}
 }
 

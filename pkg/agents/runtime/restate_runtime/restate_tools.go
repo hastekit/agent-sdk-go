@@ -11,18 +11,28 @@ import (
 type RestateTool struct {
 	restateCtx  restate.WorkflowContext
 	wrappedTool agents.Tool
+
+	// broker is how the run step learns the run was stopped — the raw
+	// broker, not the workflow-side proxy, since the watch runs inside
+	// the step.
+	broker agents.StreamBroker
 }
 
-func NewRestateTool(restateCtx restate.WorkflowContext, wrappedTool agents.Tool) *RestateTool {
+func NewRestateTool(restateCtx restate.WorkflowContext, wrappedTool agents.Tool, broker agents.StreamBroker) *RestateTool {
 	return &RestateTool{
 		restateCtx:  restateCtx,
 		wrappedTool: wrappedTool,
+		broker:      broker,
 	}
 }
 
 func (t *RestateTool) Execute(ctx context.Context, params *agents.ToolCall) (*agents.ToolCallResponse, error) {
 	return restate.Run(t.restateCtx, func(runCtx restate.RunContext) (*agents.ToolCallResponse, error) {
-		return agents.ExecuteWithTrace(runCtx, t.wrappedTool, params, t.wrappedTool.Execute)
+		resp, err := agents.RunStoppableTool(runCtx, agents.StopWatcherFrom(t.broker), 0, params,
+			func(callCtx context.Context, p *agents.ToolCall) (*agents.ToolCallResponse, error) {
+				return agents.ExecuteWithTrace(callCtx, t.wrappedTool, p, t.wrappedTool.Execute)
+			})
+		return resp, cancellationError(err)
 	}, restate.WithName(params.Name+"_ToolCall"))
 }
 

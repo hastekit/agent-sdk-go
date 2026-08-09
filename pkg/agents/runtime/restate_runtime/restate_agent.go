@@ -71,12 +71,12 @@ func (w *AgentWorkflow) newRestateAgentProxy(restateCtx restate.WorkflowContext,
 
 	var restateTools []agents.Tool
 	for _, tool := range agentOptions.Tools {
-		restateTools = append(restateTools, NewRestateTool(restateCtx, tool))
+		restateTools = append(restateTools, NewRestateTool(restateCtx, tool, w.broker))
 	}
 
 	var mcpClients []agents.MCPToolset
 	for _, mcpClient := range agentOptions.McpServers {
-		mcpClients = append(mcpClients, NewRestateMCPServer(restateCtx, mcpClient))
+		mcpClients = append(mcpClients, NewRestateMCPServer(restateCtx, mcpClient, w.broker))
 	}
 
 	opts := &agents.AgentOptions{

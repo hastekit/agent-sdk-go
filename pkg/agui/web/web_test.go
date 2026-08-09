@@ -59,3 +59,38 @@ func TestHandlerServesEmbeddedUIAndAPI(t *testing.T) {
 	defer res.Body.Close()
 	assert.Equal(t, http.StatusOK, res.StatusCode)
 }
+
+// The UI bundle is built from ui/src and committed, so source and
+// artefact can drift apart silently — a `go build` never notices. This
+// asserts the bundle that actually ships still carries the stop wiring:
+// the CUSTOM event it reads the stream id from, and a call to the stop
+// endpoint. Rebuild with `pnpm build` in ui/ if it fails.
+func TestEmbeddedBundleCallsStopEndpoint(t *testing.T) {
+	agent := agents.NewAgent(&agents.AgentOptions{Name: "Helper"})
+	server := httptest.NewServer(Handler(registry{"Helper": agent}))
+	defer server.Close()
+
+	res, err := http.Get(server.URL + "/")
+	require.NoError(t, err)
+	defer res.Body.Close()
+	index, err := io.ReadAll(res.Body)
+	require.NoError(t, err)
+
+	// Follow the module script tag the page actually loads.
+	_, after, found := strings.Cut(string(index), `src="./assets/`)
+	require.True(t, found, "index.html should load a bundle from assets/")
+	asset, _, found := strings.Cut(after, `"`)
+	require.True(t, found)
+
+	res, err = http.Get(server.URL + "/assets/" + asset)
+	require.NoError(t, err)
+	defer res.Body.Close()
+	require.Equal(t, http.StatusOK, res.StatusCode)
+	bundle, err := io.ReadAll(res.Body)
+	require.NoError(t, err)
+
+	assert.Contains(t, string(bundle), "hastekit.stream_id",
+		"bundle should read the run's stream id from the CUSTOM event")
+	assert.Contains(t, string(bundle), "/stop",
+		"bundle should call the stop endpoint rather than only aborting the stream")
+}

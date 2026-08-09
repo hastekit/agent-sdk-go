@@ -31,8 +31,16 @@
 //	GET  /basic.html                  → offline (no-CDN) fallback UI
 //	GET  /api/agui/agents             → registered agent names
 //	POST /api/agui/agents/{name}/run  → AG-UI run endpoint (SSE)
+//	POST /api/agui/agents/{name}/stop → stop a run in flight
 //	GET  /api/agui/agents/{name}/threads                   → conversation list
 //	GET  /api/agui/agents/{name}/threads/{thread}/messages → thread history
+//
+// The stop endpoint takes the stream id the run returned (the
+// X-Stream-Id header, or the streamId CUSTOM event) as {"streamId": …}
+// or ?streamId=…, and answers 202 once the stop is recorded. The run ends
+// on its own SSE connection with RUN_FINISHED. It travels via the agent's
+// broker, so with a shared broker it need not reach the replica streaming
+// that run.
 //
 // The /api/agui/* endpoints speak the canonical AG-UI protocol, so
 // external clients (CopilotKit, raw @ag-ui/client) can target them

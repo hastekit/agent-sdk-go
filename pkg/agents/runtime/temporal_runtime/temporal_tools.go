@@ -39,7 +39,13 @@ func NewTemporalTool(wrappedTool agents.Tool, broker agents.StreamBroker) *Tempo
 
 func (t *TemporalTool) Execute(ctx context.Context, params *agents.ToolCall) (*agents.ToolCallResponse, error) {
 	injectProgressReporter(ctx, t.broker, params)
-	return agents.ExecuteWithTrace(ctx, t.wrappedTool, params, t.wrappedTool.Execute)
+
+	resp, err := agents.RunStoppableTool(ctx, agents.StopWatcherFrom(t.broker), 0, params,
+		func(callCtx context.Context, p *agents.ToolCall) (*agents.ToolCallResponse, error) {
+			return agents.ExecuteWithTrace(callCtx, t.wrappedTool, p, t.wrappedTool.Execute)
+		})
+
+	return resp, cancellationError(err)
 }
 
 type TemporalToolProxy struct {

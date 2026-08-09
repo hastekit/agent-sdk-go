@@ -116,6 +116,12 @@ func NewAgent(opts *AgentOptions) *Agent {
 		streamBroker = streambroker.NewMemoryStreamBroker()
 	}
 
+	// Hand the executor the same broker the loop uses, so it can watch the
+	// stop flag. Executors with no such need don't implement this.
+	if aware, ok := toolExecutor.(BrokerAwareToolExecutor); ok {
+		toolExecutor = aware.WithStreamBroker(streamBroker)
+	}
+
 	return &Agent{
 		Name:          opts.Name,
 		output:        opts.Output,
@@ -212,6 +218,24 @@ func (e *Agent) GetRunID(ctx context.Context) string {
 // persistence adapter implements history.ThreadLister.
 func (e *Agent) History() *history.CommonConversationManager {
 	return e.history
+}
+
+// Stop asks the run on streamID to stop — the same request
+// AgentHandle.Stop makes, for callers that don't hold the handle.
+//
+// It goes to the broker, so with a shared broker any process holding this
+// agent can stop a run streaming in another. Returning means the request
+// was recorded, not that a run was there to receive it: stopping a
+// finished run, or an unknown stream id, is not an error.
+func (e *Agent) Stop(ctx context.Context, streamID string) error {
+	return e.streamBroker.Stop(ctx, streamID)
+}
+
+// StreamBroker returns the broker the agent streams through, for callers
+// that need the run's channel directly — rejoining a stream in flight, or
+// folding a turn into a live run (see RunClaimBroker).
+func (e *Agent) StreamBroker() StreamBroker {
+	return e.streamBroker
 }
 
 type AgentInput struct {
@@ -495,7 +519,7 @@ func (e *Agent) ExecuteWithRun(ctx context.Context, in *AgentInput, run *history
 				cancelledCalls := append([]responses.FunctionCallMessage{}, run.RunState.PendingToolCalls...)
 				cancelledCalls = append(cancelledCalls, run.RunState.ToolsAwaitingApproval...)
 				for _, tc := range cancelledCalls {
-					result := toolResponse(tc, "Tool call cancelled: the run was interrupted by the user before this tool executed.")
+					result := toolResponse(tc, toolCancelledBeforeExec)
 
 					// Publish once (durable step) so streaming clients don't see
 					// a dangling tool call either.
@@ -516,7 +540,7 @@ func (e *Agent) ExecuteWithRun(ctx context.Context, in *AgentInput, run *history
 					OfInputMessage: &responses.InputMessage{
 						Role: constants.RoleAssistant,
 						Content: responses.InputContent{
-							{OfInputText: &responses.InputTextContent{Text: "Cancelled by user"}},
+							{OfOutputText: &responses.OutputTextContent{Text: "Cancelled by user"}},
 						},
 					},
 				}
@@ -719,6 +743,7 @@ func (e *Agent) ExecuteWithRun(ctx context.Context, in *AgentInput, run *history
 							Namespace:           in.Namespace,
 							SessionID:           in.SessionID,
 							ThreadID:            in.ThreadID,
+							StreamID:            in.StreamID,
 							RunContext:          in.RunContext,
 							State:               run.State,
 							ShouldResume:        resuming,
@@ -729,27 +754,45 @@ func (e *Agent) ExecuteWithRun(ctx context.Context, in *AgentInput, run *history
 				}
 			}
 
-			// Execute tools in parallel
+			// Execute tools. Calls the stop unwound come back flagged
+			// cancelled; the loop keeps history consistent for those and
+			// ends the run at the next boundary, where the journaled stop
+			// check decides.
 			if len(executableToolCalls) > 0 {
 				results := e.toolExecutor.ExecuteAll(ctx, executableToolCalls)
 
 				for j, pe := range executableToolCalls {
 					result := results[j]
-					if result.Err != nil {
-						if ctx.Err() != nil {
-							// Context cancelled — abort the run
-							return &AgentOutput{Status: agentstate.RunStatusError, RunID: runId}, result.Err
-						}
-						// Tool error — report to LLM as error result
-						slog.ErrorContext(ctx, "tool execution failed", slog.String("tool_name", pe.ToolCall.Name), slog.Any("error", result.Err))
-						toolResults[pe.Index] = toolResponse(*pe.ToolCall.FunctionCallMessage, fmt.Sprintf("Tool execution failed: %v", result.Err))
-					} else {
+					switch {
+					case result.Err == nil && result.Response != nil:
 						toolResults[pe.Index] = result.Response
 
 						// If the tool response has interrupts process it
 						if len(result.Response.Interrupts) > 0 {
 							run.ProcessInterrupts(*pe.ToolCall.FunctionCallMessage, result.Response.Interrupts)
 						}
+
+					case result.Err != nil && ctx.Err() != nil:
+						// The caller's context went away (not a user stop) —
+						// abort the run.
+						return &AgentOutput{Status: agentstate.RunStatusError, RunID: runId}, result.Err
+
+					case result.Cancelled:
+						// Record a synthetic result so the function_call
+						// already in history keeps its matching output.
+						slog.InfoContext(ctx, "tool execution cancelled by stop signal", slog.String("tool_name", pe.ToolCall.Name))
+						toolResults[pe.Index] = toolResponse(*pe.ToolCall.FunctionCallMessage, toolCancelledDuringExec)
+
+					case result.Err != nil:
+						// Tool error — report to LLM as error result
+						slog.ErrorContext(ctx, "tool execution failed", slog.String("tool_name", pe.ToolCall.Name), slog.Any("error", result.Err))
+						toolResults[pe.Index] = toolResponse(*pe.ToolCall.FunctionCallMessage, fmt.Sprintf("Tool execution failed: %v", result.Err))
+
+					default:
+						// No response and no error — still needs an output to
+						// keep the call/result pairing intact.
+						slog.ErrorContext(ctx, "tool returned no response", slog.String("tool_name", pe.ToolCall.Name))
+						toolResults[pe.Index] = toolResponse(*pe.ToolCall.FunctionCallMessage, "Tool execution failed: tool returned no response")
 					}
 				}
 			}
@@ -949,10 +992,20 @@ type AgentHandle struct {
 	err    error
 }
 
-// Stop signals the agent to stop. The agent transitions to completed
-// state at the next iteration boundary (after any in-flight LLM call or
-// tool execution finishes). Use Wait or Result to block until the run
-// finishes.
+// Stop signals the agent to stop and transition to completed state.
+//
+// A tool call already running has its context cancelled, and is abandoned
+// after a grace period if it ignores that — it keeps running in the
+// background, unobserved. Each cancelled call gets a synthetic result so
+// history keeps its call/result pairing. An in-flight LLM call always
+// finishes streaming, so a stop during one lands at the next boundary.
+//
+// Reaching a running tool needs a broker implementing StopWatcher (the
+// memory and Redis brokers do); the tool wrapper watches that flag
+// wherever the tool runs. With a plain broker the stop still lands, at
+// the loop's next iteration boundary.
+//
+// Use Wait or Result to block until the run finishes.
 func (h *AgentHandle) Stop(ctx context.Context) error {
 	return h.broker.Stop(ctx, h.StreamID)
 }

@@ -70,6 +70,13 @@ func (c *McpTool) Execute(ctx context.Context, params *agents.ToolCall) (*agents
 
 	res, err := c.Session.CallTool(ctx, callParams)
 	if err != nil {
+		// A cancelled call is not a failed tool: report it as an error so
+		// the loop records it as cancelled, rather than handing the model
+		// "context canceled" as the tool's answer.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+
 		return &agents.ToolCallResponse{
 			FunctionCallOutputMessage: &responses.FunctionCallOutputMessage{
 				ID:     params.ID,
@@ -182,6 +189,14 @@ func (c *LazyMcpTool) Execute(ctx context.Context, params *agents.ToolCall) (*ag
 
 	res, err := cli.CallTool(ctx, callParams)
 	if err != nil {
+		// The caller gave up — not a broken connection. Treating it as one
+		// would drop the session that carries the notifications/cancelled
+		// for this request, and the retry below would start the tool again
+		// on the server.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+
 		// Connection might be dead — remove from pool and retry once
 		globalPool.Remove(c.endpoint, c.transportType, c.resolvedHeaders)
 		cli, retryErr := globalPool.Checkout(ctx, c.endpoint, c.transportType, c.resolvedHeaders, c.disableStandaloneSSE)

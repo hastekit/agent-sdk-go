@@ -85,6 +85,12 @@ func buildOptions(opts []Option) options {
 //
 //	http.ListenAndServe(":8080", agui.NewHandler(client))
 //
+// The stop endpoint (POST /agents/{agent}/stop) ends a run already
+// streaming, identified by its stream id — a separate request, since the
+// run's own connection is busy streaming by then. It goes through the
+// agent's broker, so it works from any replica, not only the one holding
+// the SSE connection.
+//
 // The threads endpoints power conversation pickers. Listing requires
 // the agent's persistence adapter to implement history.ThreadLister
 // (the SDK's in-memory and file adapters do); when it doesn't, the
@@ -105,6 +111,24 @@ func NewHandler(registry Registry, opts ...Option) http.Handler {
 			return
 		}
 		serveRun(w, r, agent, o)
+	})
+
+	mux.HandleFunc("POST /agents/{agent}/stop", func(w http.ResponseWriter, r *http.Request) {
+		agent, ok := registry.Agent(r.PathValue("agent"))
+		if !ok {
+			writeJSONError(w, http.StatusNotFound, "agent not found")
+			return
+		}
+		serveStop(w, r, agent)
+	})
+
+	mux.HandleFunc("GET /agents/{agent}/threads/{thread}/stream", func(w http.ResponseWriter, r *http.Request) {
+		agent, ok := registry.Agent(r.PathValue("agent"))
+		if !ok {
+			writeJSONError(w, http.StatusNotFound, "agent not found")
+			return
+		}
+		serveStream(w, r, agent, r.PathValue("thread"), o)
 	})
 
 	mux.HandleFunc("GET /agents/{agent}/threads", func(w http.ResponseWriter, r *http.Request) {
@@ -184,6 +208,10 @@ func threadLister(agent *agents.Agent) history.ThreadLister {
 // anywhere on an existing mux:
 //
 //	mux.Handle("POST /my-agent/run", agui.AgentHandler(agent))
+//
+// It has no stop endpoint: every POST here starts a run, leaving no path
+// to carry one. Mount NewHandler for that, or call agent.Stop with the
+// run's stream id from a route of your own.
 func AgentHandler(agent *agents.Agent, opts ...Option) http.Handler {
 	o := buildOptions(opts)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -193,6 +221,166 @@ func AgentHandler(agent *agents.Agent, opts ...Option) http.Handler {
 		}
 		serveRun(w, r, agent, o)
 	})
+}
+
+// serveStop stops a run, identified by the stream id the run endpoint
+// returned (the X-Stream-Id header, or the streamId CUSTOM event), taken
+// from a {"streamId": …} body or a ?streamId= query parameter.
+//
+// The stopping run ends on its own SSE connection with RUN_FINISHED,
+// which is where a client should watch for the outcome.
+//
+// The agent in the path selects whose broker to ask, which matters when
+// agents use different brokers. It is not an ownership check: the stream
+// id is the capability, and only the client that started the run has it.
+func serveStop(w http.ResponseWriter, r *http.Request, agent *agents.Agent) {
+	var body struct {
+		StreamID string `json:"streamId"`
+	}
+	// An empty body is fine when the stream id is in the query string.
+	if r.Body != nil {
+		_ = json.NewDecoder(r.Body).Decode(&body)
+	}
+	streamID := body.StreamID
+	if streamID == "" {
+		streamID = r.URL.Query().Get("streamId")
+	}
+	if streamID == "" {
+		writeJSONError(w, http.StatusBadRequest, "streamId is required: pass the stream id the run endpoint returned")
+		return
+	}
+
+	if err := agent.Stop(r.Context(), streamID); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "unable to stop run: "+err.Error())
+		return
+	}
+
+	// Accepted, not OK: the run winds down on its own connection, and a
+	// stream id with no run behind it is recorded just the same.
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	_ = json.NewEncoder(w).Encode(map[string]any{"streamId": streamID, "stopping": true})
+}
+
+// serveStream attaches to a thread's run without starting one, and
+// follows it to completion. It is how a client that navigated away — or
+// one that never held the run's stream id — picks the run back up: the
+// channel is derived from the thread, and the broker replays what the run
+// has emitted so far before live chunks continue.
+//
+// A thread with no run in flight answers 204, so a client can attach
+// without checking first and without being left holding a stream that
+// nothing will ever publish to.
+func serveStream(w http.ResponseWriter, r *http.Request, agent *agents.Agent, threadID string, o options) {
+	if threadID == "" {
+		writeJSONError(w, http.StatusBadRequest, "thread id is required")
+		return
+	}
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeJSONError(w, http.StatusInternalServerError, "streaming unsupported")
+		return
+	}
+
+	ctx := r.Context()
+	streamID := agents.StreamIDForThread(o.namespace, threadID)
+
+	// Subscribing to a channel with no run behind it would block until the
+	// client gives up: nothing publishes to it and nothing closes it.
+	active, err := agent.StreamBroker().IsActive(ctx, streamID)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "unable to check run: "+err.Error())
+		return
+	}
+	if !active {
+		w.Header().Set("X-Stream-Id", streamID)
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	chunks, err := agent.StreamBroker().Subscribe(ctx, streamID)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "unable to join run: "+err.Error())
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no") // nginx
+	w.Header().Set("X-Stream-Id", streamID)
+	w.Header().Set("X-Agui-Thread-Id", threadID)
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+
+	enc := NewEncoder(w)
+
+	// The run id comes off the replayed run.created chunk, so the events
+	// this stream emits carry the same ids as the run's own connection.
+	// Until then the translator has nothing to attribute events to, which
+	// is why chunks are translated only once a run is seen.
+	var translator *Translator
+
+	keepalive := time.NewTicker(o.keepalive)
+	defer keepalive.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-keepalive.C:
+			if err := enc.Comment("keepalive"); err != nil {
+				return
+			}
+		case chunk, ok := <-chunks:
+			if !ok {
+				if translator != nil {
+					_ = enc.EncodeAll(ctx, translator.Finish())
+				}
+				return
+			}
+
+			if translator == nil {
+				runID := runIDOf(chunk)
+				if runID == "" {
+					// Nothing to attribute this to yet — the run's opening
+					// chunk hasn't been replayed.
+					continue
+				}
+				translator = NewTranslator(threadID, runID)
+				if err := enc.EncodeAll(ctx, translator.Start()); err != nil {
+					return
+				}
+			}
+
+			if events := translator.Translate(chunk); len(events) > 0 {
+				if err := enc.EncodeAll(ctx, events); err != nil {
+					return
+				}
+			}
+			if chunk.OfRunCompleted != nil || chunk.OfRunPaused != nil {
+				return
+			}
+		}
+	}
+}
+
+// runIDOf returns the run id a lifecycle chunk carries, or "" for chunks
+// that belong to no run yet.
+func runIDOf(chunk *responses.ResponseChunk) string {
+	switch {
+	case chunk.OfRunCreated != nil:
+		return chunk.OfRunCreated.RunState.Id
+	case chunk.OfRunInProgress != nil:
+		return chunk.OfRunInProgress.RunState.Id
+	case chunk.OfRunCompleted != nil:
+		return chunk.OfRunCompleted.RunState.Id
+	case chunk.OfRunPaused != nil:
+		return chunk.OfRunPaused.RunState.Id
+	}
+	return ""
 }
 
 // serveRun decodes a RunAgentInput, executes the agent, and pumps the
@@ -217,8 +405,7 @@ func serveRun(w http.ResponseWriter, r *http.Request, agent *agents.Agent, o opt
 	}
 
 	// runID identifies the AG-UI logical run, used in AG-UI event
-	// payloads. Distinct from the broker StreamID, which Execute
-	// generates per invocation.
+	// payloads. Distinct from the broker stream id below.
 	runID := input.RunID
 	if runID == "" {
 		runID = uuid.NewString()
@@ -234,10 +421,33 @@ func serveRun(w http.ResponseWriter, r *http.Request, agent *agents.Agent, o opt
 	// addition to exposing it to prompt templates via RunContext below.
 	appendContextBlock(sdkMessages, input.Context)
 
+	// A thread always streams on the same channel, so a client that
+	// reconnects can find the run without having kept the id.
+	streamID := agents.StreamIDForThread(o.namespace, input.ThreadID)
+	turn := messages.New(o.senderID, sdkMessages)
+
+	// A turn arriving while the thread is already running folds into that
+	// run rather than starting a second one on the same channel. 204: the
+	// caller gets no stream of its own — the live run's stream, which it
+	// can rejoin, is where the answer appears.
+	if claimer, ok := agent.StreamBroker().(agents.RunClaimBroker); ok {
+		started, err := claimer.EnqueueOrStart(r.Context(), streamID, []history.Message{turn})
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "unable to start run: "+err.Error())
+			return
+		}
+		if !started {
+			w.Header().Set("X-Stream-Id", streamID)
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+	}
+
 	in := &agents.AgentInput{
 		Namespace: o.namespace,
 		ThreadID:  input.ThreadID,
-		Message:   messages.New(o.senderID, sdkMessages),
+		StreamID:  streamID,
+		Message:   turn,
 		// Fold AG-UI context into the prompt RunContext. forwardedProps
 		// and state land at top-level keys so prompt templates can
 		// reach them via {{State.x}} / {{ForwardedProps.y}}.

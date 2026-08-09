@@ -3,17 +3,39 @@ package agents
 import (
 	"context"
 
+	"github.com/google/uuid"
 	"github.com/hastekit/hastekit-sdk-go/pkg/agents/history"
 	"github.com/hastekit/hastekit-sdk-go/pkg/agents/streambroker"
 	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/responses"
 )
 
 // The built-in brokers implement the optional run-claim capability used
-// for deterministic per-thread stream ids.
+// for deterministic per-thread stream ids, and the optional stop-watch
+// capability used to cancel tool calls that are already in flight.
 var (
 	_ RunClaimBroker = (*streambroker.MemoryStreamBroker)(nil)
 	_ RunClaimBroker = (*streambroker.RedisStreamBroker)(nil)
+
+	_ StopWatcher = (*streambroker.MemoryStreamBroker)(nil)
+	_ StopWatcher = (*streambroker.RedisStreamBroker)(nil)
 )
+
+// StreamIDForThread returns the broker channel a thread's runs stream on.
+//
+// It is deterministic, so a client that reconnects — or one that never
+// held the id — can derive the same channel and rejoin the run in flight.
+// The namespace is folded in so the same thread id in two namespaces
+// never collides.
+//
+// A run with no thread to key on gets a random id: nothing could rejoin
+// it anyway, and sharing one channel between unrelated runs would mix
+// their transcripts.
+func StreamIDForThread(namespace, threadID string) string {
+	if threadID == "" {
+		return uuid.NewString()
+	}
+	return uuid.NewSHA1(uuid.NameSpaceURL, []byte("hastekit:stream:"+namespace+"\x00"+threadID)).String()
+}
 
 // StreamBroker provides an abstraction for streaming response chunks
 // between activities/workers and clients. This enables streaming support
@@ -55,6 +77,27 @@ type StreamBroker interface {
 	// stream and starting a fresh one. A channel is active once
 	// Subscribe has been called and stays active until Close.
 	IsActive(ctx context.Context, channel string) (bool, error)
+}
+
+// StopWatcher is an optional StreamBroker capability that turns the
+// poll-based stop flag into something to wait on. Tool wrappers use it to
+// cancel a call mid-flight, so a stop lands during a long-running tool
+// instead of only at the loop's next iteration boundary.
+//
+// Remote-backed brokers implement it by polling their own flag;
+// in-process brokers close the channel directly from Stop. The
+// durable-runtime proxies deliberately do not implement it — a poll
+// goroutine is not something a workflow can journal — so under those
+// runtimes the watch runs in the activity or run step instead.
+type StopWatcher interface {
+	// WatchStop returns a channel closed once Stop has been called for the
+	// channel (immediately, if it already has), plus a release func the
+	// caller must invoke.
+	//
+	// Implementations must not close it for any other reason, nor before
+	// the stop is durably recorded: a subsequent IsStopped read has to
+	// agree, since that read is what ends the run.
+	WatchStop(ctx context.Context, channel string) (<-chan struct{}, func())
 }
 
 // RunClaimBroker is an optional StreamBroker capability that enables
