@@ -548,6 +548,40 @@ func NativeMessagesToMessage(in responses2.InputUnion) []MessageUnion {
 	return out
 }
 
+// anthropicUsage is the inverse of nativeUsage: it splits the native
+// cache-inclusive InputTokens back into the shape Anthropic's wire format
+// expects, where input_tokens is only the uncached remainder and the cached
+// portion is reported beside it. Emitting InputTokens as-is would double-count
+// the cached tokens for any client that sums the three fields, as Anthropic's
+// own accounting does.
+//
+// Cache *writes* cannot be recovered on the way back — the native contract
+// folds them into InputTokens without a separate detail field — so they are
+// emitted as ordinary uncached prompt tokens. That keeps the prompt total
+// exact and makes the round-trip lossless for InputTokens and TotalTokens,
+// at the cost of the read/write split.
+func anthropicUsage(in *responses2.Usage) *ChunkMessageUsage {
+	if in == nil {
+		return nil
+	}
+
+	cacheRead := in.InputTokensDetails.CachedTokens
+	uncached := in.InputTokens - cacheRead
+	if uncached < 0 {
+		// CachedTokens is meant to be a subset of InputTokens; if a provider
+		// ever violates that, keep the reported total rather than emitting a
+		// negative count.
+		uncached = 0
+		cacheRead = in.InputTokens
+	}
+
+	return &ChunkMessageUsage{
+		InputTokens:          uncached,
+		CacheReadInputTokens: cacheRead,
+		OutputTokens:         in.OutputTokens,
+	}
+}
+
 func NativeResponseToResponse(in *responses2.Response) *Response {
 	contents := Contents{}
 
@@ -701,16 +735,9 @@ func NativeResponseToResponse(in *responses2.Response) *Response {
 		Content:      contents,
 		StopReason:   stopReason,
 		StopSequence: stopSequence,
-		Usage: &ChunkMessageUsage{
-			InputTokens:              in.Usage.InputTokens,
-			CacheCreationInputTokens: in.Usage.InputTokensDetails.CachedTokens,
-			CacheReadInputTokens:     in.Usage.InputTokensDetails.CachedTokens,
-			OutputTokens:             in.Usage.OutputTokens,
-			CacheCreation:            nil,
-			ServiceTier:              "",
-		},
-		ServiceTier: in.ServiceTier,
-		Error:       nil,
+		Usage:        anthropicUsage(in.Usage),
+		ServiceTier:  in.ServiceTier,
+		Error:        nil,
 	}
 }
 
@@ -1154,11 +1181,7 @@ func (c *NativeResponseChunkToResponseChunkConverter) buildMessageDelta(stopReas
 				StopReason:   stopReason,
 				StopSequence: nil,
 			},
-			Usage: &ChunkMessageUsage{
-				InputTokens:          usage.InputTokens,
-				CacheReadInputTokens: usage.InputTokensDetails.CachedTokens,
-				OutputTokens:         usage.OutputTokens,
-			},
+			Usage: anthropicUsage(&usage),
 		},
 	}
 }

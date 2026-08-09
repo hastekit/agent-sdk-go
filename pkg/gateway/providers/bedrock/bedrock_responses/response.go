@@ -26,6 +26,35 @@ type ConverseUsage struct {
 	CacheWriteInputTokens int `json:"cacheWriteInputTokens,omitempty"`
 }
 
+// nativeUsage normalizes Converse token accounting onto the native Usage
+// contract, where InputTokens is the whole prompt and CachedTokens a subset of
+// it.
+//
+// Converse uses split cache accounting for every model family: inputTokens
+// counts only the tokens that were neither read from nor written to the cache,
+// and AWS documents the real prompt as
+//
+//	inputTokens + cacheReadInputTokens + cacheWriteInputTokens
+//
+// The reported totalTokens is no help here — it is inputTokens+outputTokens and
+// excludes the cache counts just as inputTokens does, so it cannot be used to
+// detect whether they are already folded in. Add them unconditionally; they are
+// zero when caching is off, which makes this a no-op for uncached requests.
+//
+// https://docs.aws.amazon.com/bedrock/latest/userguide/prompt-caching.html
+func nativeUsage(u ConverseUsage) *responses.Usage {
+	input := u.InputTokens + u.CacheReadInputTokens + u.CacheWriteInputTokens
+
+	out := &responses.Usage{
+		InputTokens:  input,
+		OutputTokens: u.OutputTokens,
+		TotalTokens:  input + u.OutputTokens,
+	}
+	out.InputTokensDetails.CachedTokens = u.CacheReadInputTokens
+
+	return out
+}
+
 type ConverseMetrics struct {
 	LatencyMs int `json:"latencyMs"`
 }
@@ -91,12 +120,7 @@ func (r *ConverseResponse) ToNativeResponse(model string) *responses.Response {
 		}
 	}
 
-	usage := &responses.Usage{
-		InputTokens:  r.Usage.InputTokens,
-		OutputTokens: r.Usage.OutputTokens,
-		TotalTokens:  r.Usage.TotalTokens,
-	}
-	usage.InputTokensDetails.CachedTokens = r.Usage.CacheReadInputTokens
+	usage := nativeUsage(r.Usage)
 
 	return &responses.Response{
 		ID:     responses.NewOutputItemMessageID(),

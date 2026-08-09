@@ -575,7 +575,10 @@ func (e *Agent) ExecuteWithRun(ctx context.Context, in *AgentInput, run *history
 				inputMsgs = append(inputMsgs, inputMsg)
 			}
 
-			run.AddMessages(ctx, messages.New(e.Name, inputMsgs))
+			// AlreadyMeasured: TrackUsage above counted this reply against the
+			// context window as part of the call's reported total, so
+			// estimating it here would count it twice.
+			run.AddMessages(ctx, messages.New(e.Name, inputMsgs), history.AlreadyMeasured())
 			finalOutput = append(finalOutput, inputMsgs...)
 
 			// Extract tool calls

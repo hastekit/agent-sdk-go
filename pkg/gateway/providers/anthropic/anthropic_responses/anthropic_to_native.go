@@ -512,19 +512,7 @@ func (in *Response) ToNativeResponse() *responses2.Response {
 		ID:     in.Id,
 		Model:  in.Model,
 		Output: output,
-		Usage: &responses2.Usage{
-			InputTokens: in.Usage.InputTokens,
-			InputTokensDetails: struct {
-				CachedTokens int `json:"cached_tokens"`
-			}{
-				CachedTokens: in.Usage.CacheReadInputTokens,
-			},
-			OutputTokens: in.Usage.OutputTokens,
-			OutputTokensDetails: struct {
-				ReasoningTokens int `json:"reasoning_tokens"`
-			}{},
-			TotalTokens: in.Usage.InputTokens + in.Usage.OutputTokens,
-		},
+		Usage:  nativeUsage(in.Usage),
 		Error: &responses2.Error{
 			Type:    "",
 			Message: "",
@@ -1392,32 +1380,119 @@ func (c *ResponseChunkToNativeResponseChunkConverter) buildOutputItemDoneWebSear
 }
 
 func (c *ResponseChunkToNativeResponseChunkConverter) buildResponseCompleted() *responses2.ResponseChunk {
-	msg := c.messageStart.Message
-	usage := c.messageDelta.Usage
+	var msgID, model string
+	if c.messageStart != nil && c.messageStart.Message != nil {
+		msgID = c.messageStart.Message.Id
+		model = c.messageStart.Message.Model
+	}
+
+	var usage *responses2.Usage
+	if u := c.streamUsage(); u != nil {
+		usage = u
+	} else {
+		usage = &responses2.Usage{}
+	}
 
 	return &responses2.ResponseChunk{
 		OfResponseCompleted: &responses2.ChunkResponse[constants.ChunkTypeResponseCompleted]{
 			Type:           constants.ChunkTypeResponseCompleted(""),
 			SequenceNumber: c.nextSeqNum(),
 			Response: responses2.ChunkResponseData{
-				Id:        msg.Id,
+				Id:        msgID,
 				Object:    "response",
 				CreatedAt: int(time.Now().Unix()),
 				Status:    "completed",
 				Output:    c.completedOutputs,
-				Usage: responses2.Usage{
-					InputTokens: usage.InputTokens,
-					InputTokensDetails: struct {
-						CachedTokens int `json:"cached_tokens"`
-					}{CachedTokens: usage.CacheReadInputTokens},
-					OutputTokens: usage.OutputTokens,
-					TotalTokens:  usage.InputTokens + usage.OutputTokens,
-					OutputTokensDetails: struct {
-						ReasoningTokens int `json:"reasoning_tokens"`
-					}{ReasoningTokens: 0},
-				},
-				Request: responses2.Request{Model: msg.Model},
+				Usage:     *usage,
+				Request:   responses2.Request{Model: model},
 			},
 		},
 	}
+}
+
+// streamUsage reconciles the two events that carry usage in an Anthropic
+// stream. message_start reports the prompt counts (input_tokens plus the
+// cache_creation/cache_read splits) up front and leaves output_tokens at an
+// initial placeholder; message_delta reports the final output_tokens once
+// generation ends.
+//
+// Reading message_delta alone — as this did — is wrong for the shape the agent
+// loop actually produces: on a plain text or tool-use turn that event carries
+// *only* output_tokens, so the entire prompt was missing from the accounting
+// and ContextTokens was really just the output count. Some turns (server tool
+// use) do echo the full prompt counts on message_delta, and some (thinking)
+// omit usage from both events entirely — so neither event can be treated as
+// the sole source.
+//
+// Take the larger of the two for every field: whichever event carries a real
+// value wins, and an event that repeats it is idempotent. message_delta's
+// counts are documented as cumulative rather than incremental, so max is the
+// right combiner — summing would double-count the echoed turns.
+func (c *ResponseChunkToNativeResponseChunkConverter) streamUsage() *responses2.Usage {
+	var start, delta *ChunkMessageUsage
+	if c.messageStart != nil && c.messageStart.Message != nil {
+		start = c.messageStart.Message.Usage
+	}
+	if c.messageDelta != nil {
+		delta = c.messageDelta.Usage
+	}
+
+	if start == nil && delta == nil {
+		return nil
+	}
+
+	merged := ChunkMessageUsage{}
+	for _, u := range []*ChunkMessageUsage{start, delta} {
+		if u == nil {
+			continue
+		}
+		merged.InputTokens = max(merged.InputTokens, u.InputTokens)
+		merged.CacheCreationInputTokens = max(merged.CacheCreationInputTokens, u.CacheCreationInputTokens)
+		merged.CacheReadInputTokens = max(merged.CacheReadInputTokens, u.CacheReadInputTokens)
+		merged.OutputTokens = max(merged.OutputTokens, u.OutputTokens)
+	}
+
+	return nativeUsage(&merged)
+}
+
+// nativeUsage normalizes Anthropic's token accounting onto the native Usage
+// contract. Anthropic reports input_tokens as only the portion of the prompt
+// that was neither read from nor written to the cache, with
+// cache_read_input_tokens and cache_creation_input_tokens counted separately —
+// so the real prompt size is the sum of all three.
+func nativeUsage(u *ChunkMessageUsage) *responses2.Usage {
+	if u == nil {
+		return nil
+	}
+
+	out := UsageWithSplitCacheTokens(
+		u.InputTokens,
+		u.CacheReadInputTokens,
+		u.CacheCreationInputTokens,
+		u.OutputTokens,
+		0,
+	)
+
+	return &out
+}
+
+// UsageWithSplitCacheTokens normalizes usage from a provider that reports
+// cache tokens *alongside* its prompt token count rather than inside it.
+// Anthropic is the case in point: input_tokens counts only what was neither
+// read from nor written to the cache, so the real prompt size is the sum of
+// all three fields. Both cache counts are prompt tokens the model processed,
+// so both fold into InputTokens; only the read portion is "cached" for
+// reporting, since a cache write did the full work of processing those tokens.
+func UsageWithSplitCacheTokens(uncachedPrompt, cacheRead, cacheWrite, output, reasoning int) responses2.Usage {
+	input := uncachedPrompt + cacheRead + cacheWrite
+
+	u := responses2.Usage{
+		InputTokens:  input,
+		OutputTokens: output,
+		TotalTokens:  input + output,
+	}
+	u.InputTokensDetails.CachedTokens = cacheRead
+	u.OutputTokensDetails.ReasoningTokens = reasoning
+
+	return u
 }

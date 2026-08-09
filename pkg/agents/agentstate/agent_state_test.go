@@ -136,3 +136,30 @@ func TestContextTokensRoundTrip(t *testing.T) {
 		t.Fatalf("ContextTokens not preserved: got %d, want 12345", out.ContextTokens)
 	}
 }
+
+// TestRunStateRoundTripWithoutJSONHop covers the other persistence shape: an
+// adapter that keeps the meta map in process (the in-memory and file adapters
+// within a process lifetime) hands ToMeta's values straight back, so numbers
+// are Go ints and usage is still a responses.Usage struct — not the float64s
+// and maps a JSON hop produces. The loader must read both.
+func TestRunStateRoundTripWithoutJSONHop(t *testing.T) {
+	in := NewRunState()
+	in.CurrentStep = StepComplete
+	in.ContextTokens = 12345
+	in.LoopIteration = 7
+	in.Usage = responses.Usage{InputTokens: 900, OutputTokens: 100, TotalTokens: 1000}
+
+	out := LoadRunStateFromMeta(in.ToMeta())
+	if out == nil {
+		t.Fatal("LoadRunStateFromMeta returned nil")
+	}
+	if out.ContextTokens != 12345 {
+		t.Errorf("ContextTokens = %d, want 12345", out.ContextTokens)
+	}
+	if out.LoopIteration != 7 {
+		t.Errorf("LoopIteration = %d, want 7", out.LoopIteration)
+	}
+	if out.Usage.TotalTokens != 1000 || out.Usage.InputTokens != 900 {
+		t.Errorf("Usage = %+v, want input=900 total=1000", out.Usage)
+	}
+}

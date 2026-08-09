@@ -11,7 +11,8 @@ import (
 // message list the LLM consumes. When attribution is enabled it rewrites
 // messages from other senders with "(Agent)/(Human) <sender> said:" prefixes
 // based on each bundle's sender_id and the running agent's id; otherwise
-// bundles are flattened as-is.
+// bundles are flattened as-is. A bundle that arrived mid-run is followed by a
+// steering notice saying so.
 func (cm *ConversationRunManager) attributeMessages(msgList []Message, agentID string) []responses.InputMessageUnion {
 	out := make([]responses.InputMessageUnion, 0, len(msgList))
 	for _, bundle := range msgList {
@@ -32,8 +33,42 @@ func (cm *ConversationRunManager) attributeMessages(msgList []Message, agentID s
 				out = append(out, msg)
 			}
 		}
+
+		if _, steered := cm.steeredIDs[bundle.ID]; steered {
+			out = append(out, steeringNotice())
+		}
 	}
 	return out
+}
+
+// steeringNotice is the ephemeral note that follows a message which reached the
+// run after it had started working, rather than opening it.
+//
+// Without it the two are the same message in the same position, and the model
+// has no way to tell a correction shouted mid-task from the instruction it is
+// already carrying out — so it tends to finish the original plan and address
+// the interruption afterwards, if at all.
+//
+// It follows the message rather than prefixing it, so the user's own text is
+// never altered: a prefix woven into the content would also be a prefix any
+// message could forge for itself.
+//
+// Like budgetReminder, this is added to the outgoing list only. It is never
+// stored, so history keeps exactly the turn the user sent.
+func steeringNotice() responses.InputMessageUnion {
+	return responses.InputMessageUnion{
+		OfInputMessage: &responses.InputMessage{
+			Role: constants.RoleUser,
+			Content: responses.InputContent{
+				{OfInputText: &responses.InputTextContent{
+					Text: "[The message above arrived from the user while this run was already in " +
+						"progress, rather than at the start of it. Treat it as their most recent " +
+						"instruction: account for it before deciding the next step, and let it " +
+						"override earlier instructions where the two conflict.]",
+				}},
+			},
+		},
+	}
 }
 
 // isAssistantMessage reports whether msg is an assistant turn — a provider

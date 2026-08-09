@@ -1,6 +1,7 @@
 package agentstate
 
 import (
+	"encoding/json"
 	"sort"
 
 	"github.com/bytedance/sonic"
@@ -33,7 +34,19 @@ type RunState struct {
 	CurrentStep   Step            `json:"current_step"`
 	LoopIteration int             `json:"loop_iteration"`
 	Usage         responses.Usage `json:"usage"`
-	ContextTokens int             `json:"context_tokens"` // ContextTokens is the total token count of the most recent LLM call (input + output of a single response)
+	// ContextTokens is the measured half of the context-occupancy signal: the
+	// most recent call's reported total, being the prompt it was given plus the
+	// reply it produced. Both are in the next prompt, and both are numbers the
+	// provider supplied — nothing here is inferred.
+	ContextTokens int `json:"context_tokens"`
+
+	// PendingContextTokens is the estimated half: everything appended since
+	// that call — tool results, user turns, queued messages — which no usage
+	// report has covered yet. It holds estimates only, and is cleared the
+	// moment the next call reports a real number that supersedes it.
+	//
+	// The summarizer triggers on the sum. See ConversationRunManager.
+	PendingContextTokens int `json:"pending_context_tokens"`
 
 	QueuedApprovals  []string           `json:"queued_approvals,omitempty"`
 	QueuedRejections []string           `json:"queued_rejections,omitempty"`
@@ -185,12 +198,13 @@ func NewRunState() *RunState {
 // ToMeta converts RunState to a map for storage in messages.meta
 func (s *RunState) ToMeta() map[string]any {
 	runStateMap := map[string]any{
-		"status":         s.getStatus(),
-		"current_step":   string(s.CurrentStep),
-		"loop_iteration": s.LoopIteration,
-		"usage":          s.Usage,
-		"context_tokens": s.ContextTokens,
-		"traceid":        s.TraceID,
+		"status":                 s.getStatus(),
+		"current_step":           string(s.CurrentStep),
+		"loop_iteration":         s.LoopIteration,
+		"usage":                  s.Usage,
+		"context_tokens":         s.ContextTokens,
+		"pending_context_tokens": s.PendingContextTokens,
+		"traceid":                s.TraceID,
 	}
 
 	// pending_interrupts is the single canonical representation of a paused
@@ -251,6 +265,31 @@ func (s *RunState) getStatus() RunStatus {
 	}
 }
 
+// metaInt reads an integer out of a meta value. ToMeta stores Go ints, so a
+// persistence adapter that keeps the meta map in process returns an int, while
+// one that round-trips it through JSON returns a float64 (or a json.Number
+// under a decoder configured for it). Accept all of them — asserting only
+// float64 silently dropped the field for in-process adapters.
+func metaInt(v any) (int, bool) {
+	switch n := v.(type) {
+	case int:
+		return n, true
+	case int32:
+		return int(n), true
+	case int64:
+		return int(n), true
+	case float32:
+		return int(n), true
+	case float64:
+		return int(n), true
+	case json.Number:
+		i, err := n.Int64()
+		return int(i), err == nil
+	default:
+		return 0, false
+	}
+}
+
 // LoadRunStateFromMeta loads RunState from messages.meta
 func LoadRunStateFromMeta(meta map[string]any) *RunState {
 	if meta == nil {
@@ -270,16 +309,24 @@ func LoadRunStateFromMeta(meta map[string]any) *RunState {
 		state.CurrentStep = Step(currentStep)
 	}
 
-	if loopIteration, ok := runStateData["loop_iteration"].(float64); ok {
-		state.LoopIteration = int(loopIteration)
+	if loopIteration, ok := metaInt(runStateData["loop_iteration"]); ok {
+		state.LoopIteration = loopIteration
 	}
 
-	if contextTokens, ok := runStateData["context_tokens"].(float64); ok {
-		state.ContextTokens = int(contextTokens)
+	if contextTokens, ok := metaInt(runStateData["context_tokens"]); ok {
+		state.ContextTokens = contextTokens
 	}
 
-	if usageData, ok := runStateData["usage"].(map[string]any); ok {
-		// Parse usage from meta using JSON marshaling for proper type conversion
+	if pending, ok := metaInt(runStateData["pending_context_tokens"]); ok {
+		state.PendingContextTokens = pending
+	}
+
+	if usageData, ok := runStateData["usage"]; ok {
+		// Parse usage from meta using JSON marshaling for proper type
+		// conversion. Marshal the value as-is rather than asserting it to
+		// map[string]any: an adapter that has round-tripped the meta through
+		// JSON hands back a map, but one that kept it in process hands back
+		// the responses.Usage struct ToMeta stored.
 		usageBytes, err := sonic.Marshal(usageData)
 		if err == nil {
 			sonic.Unmarshal(usageBytes, &state.Usage)

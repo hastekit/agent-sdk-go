@@ -58,12 +58,18 @@ type CommonConversationManager struct {
 	// bundles are flattened into the provider message list as-is.
 	MessageAttribution bool
 
+	// SteeringNotices controls whether a message that arrived mid-run is
+	// followed by a note saying so. On by default; see WithoutSteeringNotices
+	// for when to turn it off.
+	SteeringNotices bool
+
 	Options []ConversationManagerOptions
 }
 
 func NewConversationManager(p ConversationPersistenceAdapter, opts ...ConversationManagerOptions) *CommonConversationManager {
 	cm := &CommonConversationManager{
 		ConversationPersistenceAdapter: p,
+		SteeringNotices:                true,
 	}
 
 	for _, o := range opts {
@@ -96,6 +102,21 @@ func WithMessageAttribution() ConversationManagerOptions {
 	}
 }
 
+// WithoutSteeringNotices suppresses the note that normally follows a message
+// which arrived mid-run, leaving such messages indistinguishable from one that
+// opened the turn.
+//
+// Turn it off only when something upstream already conveys the distinction, or
+// when an agent's prompt depends on the exact message sequence. The note costs
+// a few dozen tokens per interjection and is otherwise worth keeping: without
+// it the model cannot tell a correction shouted mid-task from the instruction
+// it is already carrying out.
+func WithoutSteeringNotices() ConversationManagerOptions {
+	return func(cm *CommonConversationManager) {
+		cm.SteeringNotices = false
+	}
+}
+
 type ConversationRunManager struct {
 	ConversationPersistenceAdapter
 
@@ -124,6 +145,14 @@ type ConversationRunManager struct {
 	summaries          *SummaryResult
 	messageFilter      MessageFilter
 	messageAttribution bool
+
+	steeringNotices bool
+	// steeredIDs holds the bundles this run drained off the queue — the ones
+	// the user sent while the run was already working. It is deliberately not
+	// persisted: the note it drives is about *when* a message arrived relative
+	// to the run that received it, which stops being useful once that run ends
+	// and the message is simply part of the thread's history.
+	steeredIDs map[string]struct{}
 }
 
 func NewRun(ctx context.Context, cm *CommonConversationManager, namespace string, threadID string, previousMessageID string, options ...RunOption) (*ConversationRunManager, error) {
@@ -132,6 +161,7 @@ func NewRun(ctx context.Context, cm *CommonConversationManager, namespace string
 		summarizer:                     cm.Summarizer,
 		messageFilter:                  cm.MessageFilter,
 		messageAttribution:             cm.MessageAttribution,
+		steeringNotices:                cm.SteeringNotices,
 		msgIdToRunId:                   make(map[string]string),
 		State:                          make(map[string]string),
 	}
@@ -152,12 +182,32 @@ func NewRun(ctx context.Context, cm *CommonConversationManager, namespace string
 		// new turn can resume where the previous one left off (sticky
 		// handoff). Nothing else reads LastAgentName, so this is inert
 		// unless an agent opts into sticky routing.
+		//
+		// ContextTokens carries forward too: it measures how full the
+		// context window already is, which is a property of the thread, not
+		// of a single run. Resetting it to zero would make the first
+		// GetMessages of every turn see "no context yet" and skip
+		// summarization — so an agent that answers in one LLM call per turn
+		// (no tool loop) would never summarize at all.
 		var lastAgent string
+		var contextTokens, pendingContextTokens int
 		if cr.RunState != nil {
 			lastAgent = cr.RunState.LastAgentName
+			contextTokens = cr.RunState.ContextTokens
+			// The estimate carries too, though it is usually zero here: a run
+			// that ends normally does so straight after an LLM call, and that
+			// call's usage report cleared it. The exception is a cancelled run,
+			// which appends synthetic tool results and a cancellation notice
+			// and then completes without calling the model again — leaving real
+			// messages in history that nothing has measured. Carrying a zero
+			// costs nothing; dropping a non-zero one would under-count the next
+			// turn.
+			pendingContextTokens = cr.RunState.PendingContextTokens
 		}
 		cr.RunState = agentstate.NewRunState()
 		cr.RunState.LastAgentName = lastAgent
+		cr.RunState.ContextTokens = contextTokens
+		cr.RunState.PendingContextTokens = pendingContextTokens
 	} else {
 		// Continuing the previous run
 		runID = cr.previousMsgId
@@ -200,48 +250,189 @@ func WithRunContext(rc map[string]any) RunOption {
 	}
 }
 
-func (cm *ConversationRunManager) AddMessages(ctx context.Context, message Message) {
-	cm.ProcessIncomingMessages(message, false)
+// AddMessageOption adjusts how an appended message is accounted for.
+type AddMessageOption func(*addMessageConfig)
+
+type addMessageConfig struct {
+	estimate bool
+}
+
+// AlreadyMeasured marks a bundle whose tokens the most recent usage report
+// already covers, so it is appended without being estimated on top.
+//
+// Exactly one thing qualifies: the model's own reply, appended straight after
+// TrackUsage, which counted it as part of that call's reported total. Anything
+// else added during a run — tool results, user turns, synthetic messages — has
+// not been weighed by any provider yet and must be estimated, so it takes the
+// default.
+func AlreadyMeasured() AddMessageOption {
+	return func(c *addMessageConfig) { c.estimate = false }
+}
+
+func (cm *ConversationRunManager) AddMessages(ctx context.Context, message Message, opts ...AddMessageOption) {
+	cfg := addMessageConfig{estimate: true}
+	for _, o := range opts {
+		o(&cfg)
+	}
+	cm.processIncoming(message, false, cfg.estimate)
 }
 
 func (cm *ConversationRunManager) AddMessagesToQueue(ctx context.Context, msgs []Message) {
 	for _, m := range msgs {
-		cm.ProcessIncomingMessages(m, true)
+		cm.processIncoming(m, true, true)
 	}
 }
 
 func (cm *ConversationRunManager) GetMessages(ctx context.Context, agentName string) ([]responses.InputMessageUnion, error) {
 	cm.RunState.LastAgentName = agentName
 
-	// Process messages with summarizer if available
 	if cm.summarizer != nil {
-		summaryResult, err := cm.summarizer.Summarize(ctx, cm.msgIdToRunId, cm.oldMessages, cm.RunState.ContextTokens)
-		if err != nil {
+		if err := cm.summarize(ctx); err != nil {
 			return nil, err
-		}
-
-		// If a summary was created, track it for saving later and apply it to messages
-		if summaryResult != nil {
-			cm.summaries = summaryResult
-			if summaryResult.Summary == nil {
-				cm.oldMessages = summaryResult.MessagesToKeep
-			} else {
-				cm.oldMessages = append([]Message{*summaryResult.Summary}, summaryResult.MessagesToKeep...)
-			}
 		}
 	}
 
-	// Add queued messages to the new messages
+	// Queued messages join this run's messages after summarization. Draining
+	// earlier would let the summarizer see them, but it could not act on them:
+	// they belong to the run in flight, which every summarizer keeps whole. They
+	// already carry this run's id from when they were queued — QueuedMessages is
+	// not carried into a fresh RunState, so a queued message is only ever
+	// drained by the same run that queued it.
 	if len(cm.RunState.QueuedMessages) > 0 {
+		// Everything on the queue arrived after this run started working —
+		// that is what the queue is for. Record the bundles so the outgoing
+		// list can say so; they are otherwise indistinguishable from the turn
+		// that opened the run.
+		for _, m := range cm.RunState.QueuedMessages {
+			cm.markSteered(m)
+		}
 		cm.newMessages = append(cm.newMessages, cm.RunState.QueuedMessages...)
 		cm.RunState.QueuedMessages = nil
 	}
 
-	msgList := append(cm.oldMessages, cm.newMessages...)
+	// Build the outgoing list into its own backing array. `append(cm.oldMessages,
+	// ...)` writes the run's messages into oldMessages' spare capacity whenever
+	// it has any, so the filter below would mutate the history it was handed.
+	msgList := make([]Message, 0, len(cm.oldMessages)+len(cm.newMessages))
+	msgList = append(msgList, cm.oldMessages...)
+	msgList = append(msgList, cm.newMessages...)
+
 	if cm.messageFilter != nil {
 		msgList = cm.messageFilter.Filter(ctx, msgList, agentName)
 	}
 	return cm.attributeMessages(msgList, agentName), nil
+}
+
+// summarize hands the summarizer the whole outgoing conversation — the history
+// loaded from persistence *and* everything this run has produced so far — and
+// applies what it decides to trim.
+//
+// Passing both halves changes the decision, not just the bookkeeping. A run's
+// own output is the fastest-growing part of the request: each loop iteration
+// appends an assistant turn plus its tool results, and none of it reaches
+// persistence until the run reaches a terminal step. A summarizer shown only
+// the loaded history sees a conversation that has stopped growing, and declines
+// to act while the request it is being asked about keeps expanding.
+//
+// Only the loaded half is reshaped by the result. cm.newMessages is also the
+// save buffer — SaveMessages persists exactly those messages — so dropping from
+// it here would leave a hole in the thread's history. Both shipped summarizers
+// keep the most recent run whole and every in-flight message belongs to it, so
+// the partition below defends an invariant rather than changing behaviour.
+func (cm *ConversationRunManager) summarize(ctx context.Context) error {
+	candidates := make([]Message, 0, len(cm.oldMessages)+len(cm.newMessages))
+	candidates = append(candidates, cm.oldMessages...)
+	candidates = append(candidates, cm.newMessages...)
+
+	result, err := cm.summarizer.Summarize(ctx, cm.msgIdToRunId, candidates, cm.contextTokens())
+	if err != nil {
+		return err
+	}
+	if result == nil {
+		return nil
+	}
+
+	// Bill what the summary cost, without touching ContextTokens — the size of a
+	// summarization request says nothing about the agent's context window.
+	cm.TrackAuxiliaryUsage(result.Usage)
+
+	// A summary is persisted as "history up to and including run X is covered",
+	// and a boundary naming the run still being written is not a claim this
+	// manager should make. No summarizer here produces one — both floor their
+	// keep window at one run, so the boundary always stops short of the most
+	// recent — and the bundled persistence adapter would ignore it anyway: it
+	// applies a summary only when the named run is strictly older than the row
+	// being loaded, which by then is a run that finished saving. Neither of
+	// those is guaranteed by an interface a caller can implement, so refuse the
+	// claim rather than rely on both holding. Clearing it leaves the summary row
+	// saved but inert on reload.
+	if result.LastSummarizedMessageID == cm.msgId {
+		slog.WarnContext(ctx, "summarizer covered the in-flight run; not persisting the summary boundary",
+			"run_id", cm.msgId)
+		result.LastSummarizedMessageID = ""
+	}
+
+	cm.summaries = result
+
+	inFlight := make(map[string]struct{}, len(cm.newMessages))
+	for _, m := range cm.newMessages {
+		if m.ID != "" {
+			inFlight[m.ID] = struct{}{}
+		}
+	}
+
+	kept := make([]Message, 0, len(result.MessagesToKeep))
+	for _, m := range result.MessagesToKeep {
+		if _, ok := inFlight[m.ID]; ok {
+			// Already held in the save buffer; GetMessages appends it after
+			// oldMessages, so keeping it here too would send it twice.
+			continue
+		}
+		kept = append(kept, m)
+	}
+
+	if result.Summary != nil {
+		// Register the summary under its own run id, the same way LoadMessages
+		// does when it reads the summary row back. Without this the summary is
+		// unplaced for the rest of this run and groups with whatever unplaced
+		// message sits next to it, so the run the summarizer sees in memory
+		// differs from the one it sees after a reload.
+		if result.Summary.ID != "" {
+			cm.msgIdToRunId[result.Summary.ID] = result.SummaryID
+		}
+		cm.oldMessages = append([]Message{*result.Summary}, kept...)
+	} else {
+		cm.oldMessages = kept
+	}
+
+	return nil
+}
+
+// markSteered records that a bundle reached this run mid-flight rather than
+// opening it.
+func (cm *ConversationRunManager) markSteered(m Message) {
+	if m.ID == "" || !cm.steeringNotices {
+		return
+	}
+	if cm.steeredIDs == nil {
+		cm.steeredIDs = map[string]struct{}{}
+	}
+	cm.steeredIDs[m.ID] = struct{}{}
+}
+
+// trackRun records which run a bundle belongs to. LoadMessages does this for
+// persisted history; without the same for messages produced during the run,
+// every in-flight bundle looks up to the empty run id and the summarizer groups
+// them into one nameless pseudo-run — pooled with the re-injected summary, whose
+// id is also empty.
+func (cm *ConversationRunManager) trackRun(m Message) {
+	if m.ID == "" {
+		return
+	}
+	if cm.msgIdToRunId == nil {
+		cm.msgIdToRunId = map[string]string{}
+	}
+	cm.msgIdToRunId[m.ID] = cm.msgId
 }
 
 func (cm *ConversationRunManager) LoadMessages(ctx context.Context, namespace string, threadID string, previousMessageID string) error {
@@ -367,17 +558,57 @@ func (cm *ConversationRunManager) SaveMessages(ctx context.Context) error {
 	return nil
 }
 
+// TrackUsage records a call made *as* the agent — one whose input was the
+// conversation itself. It bills the tokens and refreshes the measured half of
+// the context-occupancy signal.
+//
+// TotalTokens, because the signal predicts the size of the *next* prompt, and
+// both halves of the total are in it: the prompt just sent, plus the reply,
+// which is appended to history a moment later. Both are numbers the provider
+// gave us, so neither belongs in the estimate — and the reply least of all,
+// since a reasoning-heavy one is mostly opaque thinking blocks the estimator
+// cannot see inside and would score near zero.
 func (cm *ConversationRunManager) TrackUsage(usage *responses.Usage) {
 	if usage == nil {
 		return
 	}
+	cm.accumulateUsage(usage)
+
+	// Everything up to and including the reply is now measured, so the running
+	// estimate that stood in for it has served its purpose. The reply is
+	// appended with AlreadyMeasured so it is not counted a second time.
+	cm.RunState.ContextTokens = usage.TotalTokens
+	cm.RunState.PendingContextTokens = 0
+}
+
+// contextTokens is what the summarizer triggers on: the last measured prompt
+// plus an estimate of everything appended since. Neither half is sufficient
+// alone — the measurement is always at least one call stale, and the estimate
+// only covers the delta.
+func (cm *ConversationRunManager) contextTokens() int {
+	return cm.RunState.ContextTokens + cm.RunState.PendingContextTokens
+}
+
+// TrackAuxiliaryUsage bills a call made *on behalf of* the run against some
+// other prompt — summarization being the one that exists today. Those tokens
+// are real spend and belong in the run's total, but their size says nothing
+// about how full the agent's context window is: a summarization request is its
+// own instruction plus a flattened transcript, with none of the agent's tools or
+// system prompt. Folding it into ContextTokens would hand the summarizer a
+// reading of a conversation that is not the one it is deciding about.
+func (cm *ConversationRunManager) TrackAuxiliaryUsage(usage *responses.Usage) {
+	if usage == nil {
+		return
+	}
+	cm.accumulateUsage(usage)
+}
+
+func (cm *ConversationRunManager) accumulateUsage(usage *responses.Usage) {
 	cm.RunState.Usage.InputTokens += usage.InputTokens
 	cm.RunState.Usage.OutputTokens += usage.OutputTokens
 	cm.RunState.Usage.InputTokensDetails.CachedTokens += usage.InputTokensDetails.CachedTokens
+	cm.RunState.Usage.OutputTokensDetails.ReasoningTokens += usage.OutputTokensDetails.ReasoningTokens
 	cm.RunState.Usage.TotalTokens += usage.TotalTokens
-
-	// ContextTokens tracks the most recent call's size
-	cm.RunState.ContextTokens = usage.TotalTokens
 }
 
 func (cm *ConversationRunManager) loadSubAgentContext(ctx context.Context) {
@@ -399,7 +630,14 @@ func (cm *ConversationRunManager) loadSubAgentContext(ctx context.Context) {
 	}
 }
 
+// ProcessIncomingMessages appends an inbound message, estimating its size
+// against the context window. Use AddMessages with AlreadyMeasured to append
+// one the provider has already counted.
 func (cm *ConversationRunManager) ProcessIncomingMessages(message Message, queue bool) {
+	cm.processIncoming(message, queue, true)
+}
+
+func (cm *ConversationRunManager) processIncoming(message Message, queue, estimate bool) {
 	// Process incoming message, and extract tool approvals and user messages
 	hasNewApproval := false
 	var stored []responses.InputMessageUnion
@@ -444,6 +682,17 @@ func (cm *ConversationRunManager) ProcessIncomingMessages(message Message, queue
 		if len(stored) != len(message.Messages) {
 			bundle.Messages = stored
 		}
+		cm.trackRun(bundle)
+
+		// Unless a usage report already covers this message, it reaches the
+		// provider unweighed on the next call. Estimate it so the summarizer is
+		// not deciding against a reading that predates it. Queued messages count
+		// from the moment they are queued: draining only moves them between
+		// slices.
+		if estimate {
+			cm.RunState.PendingContextTokens += estimateBundleTokens(bundle)
+		}
+
 		if queue {
 			cm.RunState.QueuedMessages = append(cm.RunState.QueuedMessages, bundle)
 		} else {

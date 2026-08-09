@@ -163,6 +163,18 @@ func (u *OutputContentUnion) MarshalJSON() ([]byte, error) {
 	return nil, nil
 }
 
+// Usage follows OpenAI's token accounting, since the OpenAI and xAI providers
+// decode straight onto this struct. Every provider must normalize to it:
+//
+//   - InputTokens is the *entire* prompt, cached portions included.
+//   - InputTokensDetails.CachedTokens is a *subset* of InputTokens — the part
+//     served from a prompt cache. It is never additional to it.
+//   - TotalTokens == InputTokens + OutputTokens.
+//
+// The subset rule matters: callers gauge how full the context window is from
+// InputTokens (see the history summarizer's trigger). A provider that reports
+// only the uncached remainder there makes a nearly-full context look empty
+// whenever prompt caching is on.
 type Usage struct {
 	InputTokens        int `json:"input_tokens"`
 	InputTokensDetails struct {

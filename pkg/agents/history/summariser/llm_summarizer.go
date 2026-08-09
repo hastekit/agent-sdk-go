@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"slices"
 	"strings"
 
 	"github.com/google/uuid"
@@ -82,25 +81,35 @@ type Run struct {
 	Messages []messages.Message
 }
 
-func (s *LLMHistorySummarizer) Summarize(ctx context.Context, msgIdToRunId map[string]string, msgs []messages.Message, contextTokens int) (*history.SummaryResult, error) {
-	// Group messages using their run id
-	runs := []Run{}
-	runIdsSeen := []string{}
+// groupIntoRuns splits messages into the runs that produced them, preserving
+// order. A run is a *contiguous* block: a run id that reappears later starts a
+// new group rather than reopening the earlier one.
+//
+// This used to ask whether an id had been seen anywhere before and, if so,
+// append to whatever group happened to be last — so an id appearing out of
+// order filed its messages under an unrelated run, and the trimming boundary
+// then cut in the wrong place. Ids absent from the map resolve to "", which
+// under the same rule pooled every unplaced message into one group no matter
+// where they sat in the conversation. Adjacent unplaced messages still group
+// together, which is the conservative reading: fewer runs means the keep window
+// covers more, not less.
+func groupIntoRuns(msgIdToRunId map[string]string, msgs []messages.Message) []Run {
+	runs := make([]Run, 0, len(msgs))
 	for _, msg := range msgs {
-		runId := msgIdToRunId[msg.ID]
+		runID := msgIdToRunId[msg.ID]
 
-		if !slices.Contains(runIdsSeen, runId) {
-			runs = append(runs, Run{
-				RunID:    runId,
-				Messages: []messages.Message{msg},
-			})
-			runIdsSeen = append(runIdsSeen, runId)
+		if n := len(runs); n > 0 && runs[n-1].RunID == runID {
+			runs[n-1].Messages = append(runs[n-1].Messages, msg)
 			continue
 		}
 
-		run := &runs[len(runs)-1]
-		run.Messages = append(run.Messages, msg)
+		runs = append(runs, Run{RunID: runID, Messages: []messages.Message{msg}})
 	}
+	return runs
+}
+
+func (s *LLMHistorySummarizer) Summarize(ctx context.Context, msgIdToRunId map[string]string, msgs []messages.Message, contextTokens int) (*history.SummaryResult, error) {
+	runs := groupIntoRuns(msgIdToRunId, msgs)
 
 	shouldSummarize, keepFromIndex := s.shouldSummarize(ctx, runs, contextTokens)
 	if !shouldSummarize {
@@ -252,9 +261,20 @@ func (s *LLMHistorySummarizer) Summarize(ctx context.Context, msgIdToRunId map[s
 	summaryID := uuid.NewString()
 
 	return &history.SummaryResult{
-		Summary:                 &messages.Message{Messages: []responses.InputMessageUnion{summaryMessage}},
+		// Built through messages.New so the bundle carries an id. A bare
+		// messages.Message leaves it empty, and LoadMessages keys the run map by
+		// bundle id — so on the next turn the summary registered under "" and
+		// every other unplaced message resolved to the summary's run.
+		//
+		// The sender stays empty on purpose: attributeMessages treats an empty
+		// SenderID as the running agent's own, so the summary is passed through
+		// as-is instead of being rewritten as "(Agent) … said:".
+		Summary:                 utils.Ptr(messages.New("", []responses.InputMessageUnion{summaryMessage})),
 		LastSummarizedMessageID: lastSummarizedMessageID,
 		SummaryID:               summaryID,
 		MessagesToKeep:          messagesToKeep,
+		// Summarizing costs real tokens. Reporting them here is what keeps the
+		// run's usage total from silently excluding the work done to shrink it.
+		Usage: resp.Usage,
 	}, nil
 }
