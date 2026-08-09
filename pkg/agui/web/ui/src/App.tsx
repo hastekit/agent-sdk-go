@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   CopilotKitProvider,
   CopilotChat,
@@ -51,6 +51,7 @@ export default function App() {
   // surface them as a banner in the chat pane. Cleared when a new run
   // starts or the thread/agent changes.
   const [runError, setRunError] = useState<string | null>(null);
+  const [sidebarOpen, setSidebarOpen] = useState(true);
 
   // Load the agent list once.
   useEffect(() => {
@@ -172,15 +173,16 @@ export default function App() {
     // The chat gets its own scope from CopilotKitProvider; setting it here
     // too means the sidebar — which lives OUTSIDE the provider — sees the
     // same --sidebar/--background/--border/... tokens and matches the chat.
-    <div className="dark app" data-copilotkit>
+    <div
+      className={"dark app" + (sidebarOpen ? "" : " sidebar-hidden")}
+      data-copilotkit
+    >
       <Sidebar
-        agents={agents}
-        agentName={agentName}
-        onAgentChange={onAgentChange}
         threads={threads}
         activeThreadId={active.threadId}
         onSelect={selectThread}
         onNew={startNewChat}
+        onCollapse={() => setSidebarOpen(false)}
         listingSupported={listingSupported}
         error={error}
       />
@@ -191,6 +193,22 @@ export default function App() {
           showDevConsole={false}
         >
           <div className="chat-pane">
+            <header className="topbar">
+              {!sidebarOpen && (
+                <button
+                  className="icon-btn"
+                  onClick={() => setSidebarOpen(true)}
+                  aria-label="Show sidebar"
+                >
+                  <PanelIcon />
+                </button>
+              )}
+              <AgentMenu
+                agents={agents}
+                agentName={agentName}
+                onAgentChange={onAgentChange}
+              />
+            </header>
             <InterruptHandler agentName={agentName} />
             <InlineToolRenderer agentName={agentName} />
             {runError && (
@@ -210,7 +228,11 @@ export default function App() {
               <CopilotChat
                 agentId={agentName}
                 threadId={active.threadId}
-                labels={{ chatInputPlaceholder: "Talk to the agent…" }}
+                labels={{
+                  chatInputPlaceholder: "Ask anything",
+                  chatDisclaimerText:
+                    "The agent can make mistakes. Check important info.",
+                }}
                 input={inputSlot}
               />
             </div>
@@ -258,47 +280,49 @@ function SteerableInput(props: any) {
 
 // ── Sidebar ────────────────────────────────────────────────
 
+// Where the logo lives at runtime. public/ is copied to the build output
+// as-is, and BASE_URL keeps the reference relative so the UI still finds
+// it when the Go server is mounted under a sub-path.
+const LOGO = `${import.meta.env.BASE_URL}hastekit-logo.svg`;
+
 function Sidebar({
-  agents,
-  agentName,
-  onAgentChange,
   threads,
   activeThreadId,
   onSelect,
   onNew,
+  onCollapse,
   listingSupported,
   error,
 }: {
-  agents: string[];
-  agentName: string;
-  onAgentChange: (name: string) => void;
   threads: ThreadInfo[];
   activeThreadId: string;
   onSelect: (t: ThreadInfo) => void;
   onNew: () => void;
+  onCollapse: () => void;
   listingSupported: boolean;
   error: string | null;
 }) {
   return (
     <aside className="sidebar">
-      <div className="brand">
-        <span className="mark">⚡</span> HasteKit <span className="sub">AG-UI</span>
-      </div>
-      <div className="side-controls">
-        {agents.length > 1 && (
-          <select value={agentName} onChange={(e) => onAgentChange(e.target.value)}>
-            {agents.map((n) => (
-              <option key={n} value={n}>
-                {n}
-              </option>
-            ))}
-          </select>
-        )}
-        <button className="primary" onClick={onNew}>
-          + New chat
+      <div className="side-head">
+        <span className="brand">
+          <img className="logo" src={LOGO} alt="" />
+          HasteKit
+        </span>
+        <button className="icon-btn" onClick={onCollapse} aria-label="Hide sidebar">
+          <PanelIcon />
         </button>
       </div>
+
+      <nav className="side-nav">
+        <button className="nav-item" onClick={onNew}>
+          <ComposeIcon />
+          New chat
+        </button>
+      </nav>
+
       <div className="thread-list">
+        <div className="section-label">Recents</div>
         {error && <div className="hint error">{error}</div>}
         {!listingSupported && (
           <div className="hint">Conversation history is not available for this agent.</div>
@@ -311,13 +335,130 @@ function Sidebar({
             key={t.thread_id}
             className={"thread-item" + (t.thread_id === activeThreadId ? " selected" : "")}
             onClick={() => onSelect(t)}
+            title={`${t.title || "Untitled"} · ${relativeTime(t.updated_at)}`}
           >
-            <div className="title">{t.title || "Untitled"}</div>
-            <div className="time">{relativeTime(t.updated_at)}</div>
+            {t.title || "Untitled"}
           </button>
         ))}
       </div>
     </aside>
+  );
+}
+
+// ── Agent selector ─────────────────────────────────────────
+
+// The title-bar dropdown: the agent the chat is pointed at. A menu rather
+// than a <select> so it can carry the same weight as the rest of the bar —
+// and so a single registered agent reads as a heading, not a control.
+function AgentMenu({
+  agents,
+  agentName,
+  onAgentChange,
+}: {
+  agents: string[];
+  agentName: string;
+  onAgentChange: (name: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const wrap = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      if (!wrap.current?.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  const single = agents.length < 2;
+
+  return (
+    <div className="agent-menu" ref={wrap}>
+      <button
+        className="agent-trigger"
+        onClick={() => !single && setOpen((v) => !v)}
+        aria-haspopup={single ? undefined : "menu"}
+        aria-expanded={single ? undefined : open}
+        disabled={single}
+      >
+        {agentName || "No agent"}
+        {!single && <ChevronIcon />}
+      </button>
+
+      {open && (
+        <div className="agent-pop" role="menu">
+          {agents.map((n) => (
+            <button
+              key={n}
+              role="menuitem"
+              className={"agent-opt" + (n === agentName ? " selected" : "")}
+              onClick={() => {
+                setOpen(false);
+                if (n !== agentName) onAgentChange(n);
+              }}
+            >
+              <span className="nm">{n}</span>
+              {n === agentName && <CheckIcon />}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Icons ──────────────────────────────────────────────────
+
+const svg = {
+  width: 18,
+  height: 18,
+  viewBox: "0 0 24 24",
+  fill: "none",
+  stroke: "currentColor",
+  strokeWidth: 1.6,
+  strokeLinecap: "round" as const,
+  strokeLinejoin: "round" as const,
+};
+
+function PanelIcon() {
+  return (
+    <svg {...svg}>
+      <rect x="3" y="4" width="18" height="16" rx="2" />
+      <path d="M9 4v16" />
+    </svg>
+  );
+}
+
+function ComposeIcon() {
+  return (
+    <svg {...svg}>
+      <path d="M12 4H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-6" />
+      <path d="M18.5 3.5a2.1 2.1 0 0 1 3 3L12 16l-4 1 1-4z" />
+    </svg>
+  );
+}
+
+function ChevronIcon() {
+  return (
+    <svg {...svg} width={16} height={16}>
+      <path d="m6 9 6 6 6-6" />
+    </svg>
+  );
+}
+
+function CheckIcon() {
+  return (
+    <svg {...svg} width={16} height={16}>
+      <path d="m5 13 4 4L19 7" />
+    </svg>
   );
 }
 

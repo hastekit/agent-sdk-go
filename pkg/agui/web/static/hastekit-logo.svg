@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" aria-label="HasteKit mark">
+  
+  <rect x="6" y="10" width="10" height="80" rx="3" fill="#10a37f"></rect>
+  <rect x="84" y="10" width="10" height="80" rx="3" fill="#10a37f"></rect>
+  
+  <path d="M 56 12 L 28 56 L 50 56 L 38 88 L 70 44 L 50 44 L 60 12 Z" fill="#10a37f"></path>
+</svg>
