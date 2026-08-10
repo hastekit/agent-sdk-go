@@ -536,14 +536,44 @@ func (e *Agent) ExecuteWithRun(ctx context.Context, in *AgentInput, run *history
 					finalOutput = append(finalOutput, toolResultMsg...)
 				}
 
+				// The stop notice is streamed as well as stored, so a client
+				// watching the run sees the turn end rather than finding out
+				// on the next reload. These are the same three chunks the LLM
+				// emits for a message, so every translator downstream already
+				// knows what to do with them. The id comes from the run, which
+				// keeps it stable when a durable runtime replays the loop —
+				// and matches the id history hands back afterwards.
+				cancelID := "msg_" + runId + "-cancelled"
 				cancelMsg := responses.InputMessageUnion{
 					OfInputMessage: &responses.InputMessage{
+						ID:   cancelID,
 						Role: constants.RoleAssistant,
 						Content: responses.InputContent{
-							{OfOutputText: &responses.OutputTextContent{Text: "Cancelled by user"}},
+							{OfOutputText: &responses.OutputTextContent{Text: runCancelledNotice}},
 						},
 					},
 				}
+
+				e.durableStep.Do(func() {
+					item := responses.ChunkOutputItemData{
+						Type: "message",
+						Id:   cancelID,
+						Role: constants.RoleAssistant,
+					}
+					publish(&responses.ResponseChunk{
+						OfOutputItemAdded: &responses.ChunkOutputItem[constants.ChunkTypeOutputItemAdded]{Item: item},
+					})
+					publish(&responses.ResponseChunk{
+						OfOutputTextDelta: &responses.ChunkOutputText[constants.ChunkTypeOutputTextDelta]{
+							ItemId: cancelID,
+							Delta:  runCancelledNotice,
+						},
+					})
+					publish(&responses.ResponseChunk{
+						OfOutputItemDone: &responses.ChunkOutputItem[constants.ChunkTypeOutputItemDone]{Item: item},
+					})
+				})
+
 				run.AddMessages(ctx, messages.New(in.Message.SenderID, []responses.InputMessageUnion{cancelMsg}))
 				finalOutput = append(finalOutput, cancelMsg)
 				run.RunState.ToolsAwaitingApproval = nil

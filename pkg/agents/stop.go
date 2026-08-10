@@ -11,6 +11,10 @@ import (
 const (
 	toolCancelledBeforeExec = "Tool call cancelled: the run was interrupted by the user before this tool executed."
 	toolCancelledDuringExec = "Tool call cancelled: the run was stopped by the user while this tool was running."
+
+	// The assistant turn a stopped run ends on — what the transcript shows
+	// in place of the answer the user cut short.
+	runCancelledNotice = "Cancelled by user"
 )
 
 // ErrToolCancelled reports a call the stop unwound. Executors turn it
