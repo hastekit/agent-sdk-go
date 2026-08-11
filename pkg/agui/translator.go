@@ -191,17 +191,29 @@ func (t *Translator) Translate(chunk *responses.ResponseChunk) []Event {
 		//      need to read code to wire the resume.
 		//   4. RUN_FINISHED last with result.status=paused so
 		//      clients that track run state see the transition.
-		pending := projectPendingToolCalls(approvalCalls(chunk.OfRunPaused.RunState.PendingInterrupts))
+		interrupts := chunk.OfRunPaused.RunState.PendingInterrupts
+		pending := projectPendingToolCalls(approvalCalls(interrupts))
+		projected := projectInterrupts(interrupts)
 		out := t.closeOpenItems()
 		out = append(out,
 			&StateSnapshotEvent{
 				BaseEvent: baseNow(),
 				Snapshot: map[string]any{
-					"status":           "paused",
-					"awaitingApproval": true,
+					"status": "paused",
+					// awaitingApproval reports whether an approve/reject
+					// decision is outstanding, not merely that the run is
+					// paused: a run paused only on an elicitation needs data
+					// or a visited URL, not a verdict. A client that gates an
+					// approval prompt on this flag would otherwise render an
+					// empty prompt for a form pause.
+					"awaitingApproval": len(pending) > 0,
 					"pendingToolCalls": pending,
-					"threadId":         t.threadID,
-					"runId":            t.runID,
+					// interrupts carries every pending pause with its mode and
+					// payload. pendingToolCalls stays approval-only so clients
+					// written against it keep working.
+					"interrupts": projected,
+					"threadId":   t.threadID,
+					"runId":      t.runID,
 				},
 			},
 			&CustomEvent{
@@ -216,22 +228,28 @@ func (t *Translator) Translate(chunk *responses.ResponseChunk) []Event {
 				Value: map[string]any{
 					// "kind" disambiguates our interrupt subtype for
 					// frontends that handle multiple agent types under
-					// the same useInterrupt hook.
-					"kind":             "tool_approval",
+					// the same useInterrupt hook. It stays "tool_approval"
+					// whenever every pause is an approval, so existing
+					// clients are unaffected by elicitation support.
+					"kind":             interruptKind(interrupts),
 					"runId":            t.runID,
 					"threadId":         t.threadID,
 					"pendingToolCalls": pending,
+					"interrupts":       projected,
 					// Self-describing resume contract.
 					// CopilotKit's useInterrupt resolves to whatever
 					// shape the application chooses; we expect an
-					// array of decisions matching pendingToolCalls.
+					// array of decisions matching interrupts.
 					"resume": map[string]any{
 						"method":     "POST",
 						"forwardKey": "command.resume",
 						"shape": map[string]any{
 							"decisions": []map[string]string{{
-								"toolCallId": "string (matches pendingToolCalls[].toolCallId)",
+								"toolCallId": "string (matches interrupts[].toolCallId)",
 								"approved":   "boolean",
+								"content": "object — the answer for a data-carrying interrupt: " +
+									"form fields matching interrupts[].requestedSchema. Omit for " +
+									"plain approvals and for url mode.",
 							}},
 						},
 					},
@@ -738,8 +756,9 @@ func projectPendingToolCalls(calls []responses.FunctionCallMessage) []map[string
 }
 
 // approvalCalls pulls the function calls from the approval-mode interrupts
-// of a paused run — the subset this demo's tool_approval event renders.
-// Non-approval modes (e.g. URL elicitation) are left to other handlers.
+// of a paused run — the subset the pendingToolCalls field carries, which is
+// approve/reject decisions only. Every mode, including these, also appears in
+// the richer projectInterrupts list.
 func approvalCalls(interrupts []responses.Interrupt) []responses.FunctionCallMessage {
 	out := make([]responses.FunctionCallMessage, 0, len(interrupts))
 	for _, it := range interrupts {
@@ -748,4 +767,70 @@ func approvalCalls(interrupts []responses.Interrupt) []responses.FunctionCallMes
 		}
 	}
 	return out
+}
+
+// projectInterrupts converts every pending interrupt into the camelCase shape
+// AG-UI consumers receive, carrying the mode and its payload so a client can
+// render the right thing: an approve/reject prompt, a form built from the
+// requested JSON schema, or a link to visit.
+//
+// An interrupt may carry several elicitations. The first supplies the
+// top-level message/schema/url — the common case is exactly one, and a client
+// that handles more reads the full elicitations list.
+func projectInterrupts(interrupts []responses.Interrupt) []map[string]any {
+	out := make([]map[string]any, 0, len(interrupts))
+	for _, it := range interrupts {
+		mode := it.Mode
+		if mode == "" {
+			mode = responses.InterruptModeApproval
+		}
+		entry := map[string]any{
+			"toolCallId":   it.FunctionCallMessage.CallID,
+			"toolCallName": it.FunctionCallMessage.Name,
+			"arguments":    it.FunctionCallMessage.Arguments,
+			"mode":         string(mode),
+		}
+		if it.IsNested {
+			entry["isNested"] = true
+		}
+		if len(it.Elicitations) > 0 {
+			first := it.Elicitations[0]
+			if first.Message != "" {
+				entry["message"] = first.Message
+			}
+			if first.RequestedSchema != nil {
+				entry["requestedSchema"] = first.RequestedSchema
+			}
+			if first.URL != "" {
+				entry["url"] = first.URL
+			}
+			if len(it.Elicitations) > 1 {
+				entry["elicitations"] = it.Elicitations
+			}
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
+// interruptKind labels the pause for frontends that switch on it. It stays
+// "tool_approval" when every interrupt is an approval so clients written
+// before elicitation support keep matching on the value they know.
+func interruptKind(interrupts []responses.Interrupt) string {
+	var approvals, elicitations int
+	for _, it := range interrupts {
+		if it.Mode == "" || it.Mode == responses.InterruptModeApproval {
+			approvals++
+			continue
+		}
+		elicitations++
+	}
+	switch {
+	case elicitations == 0:
+		return "tool_approval"
+	case approvals == 0:
+		return "elicitation"
+	default:
+		return "mixed"
+	}
 }

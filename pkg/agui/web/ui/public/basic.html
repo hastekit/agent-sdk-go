@@ -86,6 +86,12 @@
   .approval .call:last-of-type { border-bottom: 0; }
   .approval .call .meta { flex: 1; min-width: 0; }
   .approval .call .meta .args { color: var(--muted); white-space: pre-wrap; word-break: break-word; }
+  .approval .call .field { display: flex; flex-direction: column; gap: 3px; margin: 6px 0; font-family: inherit; }
+  .approval .call .field > span { color: var(--muted); font-size: 12px; }
+  .approval .call .field input[type=text], .approval .call .field input[type=number], .approval .call .field select {
+    padding: 6px 8px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: inherit; font: inherit; }
+  .approval .call .field input[type=checkbox] { align-self: flex-start; }
+  .approval .call a { color: var(--accent); word-break: break-all; }
   .approval .call button.sel { border-color: var(--accent); background: var(--accent); color: #0f1115; }
   .approval .actions { margin-top: 10px; text-align: right; }
 
@@ -532,7 +538,8 @@
 
   function handleCustom(state, ev) {
     if (!ev) return;
-    if (ev.name === "on_interrupt" && ev.value?.kind === "tool_approval") {
+    if (ev.name === "on_interrupt" &&
+        (ev.value?.kind === "tool_approval" || ev.value?.kind === "elicitation" || ev.value?.kind === "mixed")) {
       // Render after the SSE pump ends — the run is finished (paused);
       // the approval card drives the resume POST.
       state.pendingApproval = ev.value;
@@ -548,35 +555,116 @@
 
   // ── Human-in-the-loop approval ────────────────────────────
 
+  // A pause asks for one of three things: approve/reject a call, fill in a
+  // form, or visit a URL. They arrive together on one event, so one card
+  // collects them all and resumes the run once.
   function renderApproval(value) {
+    // interrupts carries every mode; pendingToolCalls is the older
+    // approval-only shape, still accepted.
+    const entries = (value.interrupts && value.interrupts.length)
+      ? value.interrupts
+      : (value.pendingToolCalls || []).map(c => Object.assign({}, c, { mode: "approval" }));
+
     const card = el("div", "approval");
     const title = el("h3", "", card);
-    title.textContent = "Approval required";
+    const needsInput = entries.some(e => e.mode === "form" || e.mode === "url");
+    title.textContent = needsInput ? "The agent needs something from you" : "Approval required";
 
-    const decisions = {};
-    for (const call of value.pendingToolCalls || []) {
+    const decisions = {};   // toolCallId → boolean
+    const forms = {};       // toolCallId → { field → value }
+
+    for (const entry of entries) {
       const row = el("div", "call", card);
+
+      if (entry.mode === "form") {
+        const meta = el("div", "meta", row);
+        if (entry.message) {
+          const msg = el("div", "", meta);
+          msg.textContent = entry.message;
+        }
+        forms[entry.toolCallId] = {};
+        const schema = entry.requestedSchema || {};
+        const required = schema.required || [];
+        for (const name of Object.keys(schema.properties || {})) {
+          const prop = schema.properties[name] || {};
+          const label = el("label", "field", meta);
+          const caption = el("span", "", label);
+          caption.textContent = (prop.title || name) + (required.indexOf(name) >= 0 ? " *" : "");
+
+          let input;
+          if (prop.enum) {
+            input = el("select", "", label);
+            const blank = el("option", "", input);
+            blank.value = ""; blank.textContent = "—";
+            for (const opt of prop.enum) {
+              const o = el("option", "", input);
+              o.value = opt; o.textContent = opt;
+            }
+          } else if (prop.type === "boolean") {
+            input = el("input", "", label);
+            input.type = "checkbox";
+          } else {
+            input = el("input", "", label);
+            input.type = (prop.type === "number" || prop.type === "integer") ? "number" : "text";
+          }
+          if (prop.default !== undefined) {
+            if (input.type === "checkbox") input.checked = Boolean(prop.default);
+            else input.value = String(prop.default);
+          }
+          input.onchange = () => {
+            let v;
+            if (input.type === "checkbox") v = input.checked;
+            else if (input.type === "number") v = input.value === "" ? undefined : Number(input.value);
+            else v = input.value;
+            forms[entry.toolCallId][name] = v;
+          };
+          if (prop.description) {
+            const hint = el("div", "args", label);
+            hint.textContent = prop.description;
+          }
+        }
+        decisions[entry.toolCallId] = true;
+        continue;
+      }
+
+      if (entry.mode === "url") {
+        const meta = el("div", "meta", row);
+        if (entry.message) {
+          const msg = el("div", "", meta);
+          msg.textContent = entry.message;
+        }
+        const link = el("a", "", meta);
+        link.href = entry.url; link.target = "_blank"; link.rel = "noreferrer noopener";
+        link.textContent = entry.url || "";
+        const hint = el("div", "args", meta);
+        hint.textContent = "Open the link, then continue below.";
+        decisions[entry.toolCallId] = true;
+        continue;
+      }
+
       const meta = el("div", "meta", row);
       const nm = el("div", "", meta);
-      nm.textContent = call.toolCallName || call.toolCallId;
+      nm.textContent = entry.toolCallName || entry.toolCallId;
       const args = el("div", "args", meta);
-      args.textContent = call.arguments || "";
+      args.textContent = entry.arguments || "";
 
       const yes = el("button", "", row); yes.textContent = "Approve";
       const no = el("button", "", row); no.textContent = "Reject";
-      yes.onclick = () => { decisions[call.toolCallId] = true; yes.classList.add("sel"); no.classList.remove("sel"); };
-      no.onclick = () => { decisions[call.toolCallId] = false; no.classList.add("sel"); yes.classList.remove("sel"); };
+      yes.onclick = () => { decisions[entry.toolCallId] = true; yes.classList.add("sel"); no.classList.remove("sel"); };
+      no.onclick = () => { decisions[entry.toolCallId] = false; no.classList.add("sel"); yes.classList.remove("sel"); };
     }
 
     const actions = el("div", "actions", card);
-    const submit = el("button", "primary", actions);
-    submit.className = "primary";
-    submit.textContent = "Submit decisions";
-    submit.onclick = () => {
-      const list = (value.pendingToolCalls || []).map(c => ({
-        toolCallId: c.toolCallId,
-        approved: decisions[c.toolCallId] === true,
-      }));
+
+    const resume = (approved) => {
+      const list = entries.map(e => {
+        if (!approved) return { toolCallId: e.toolCallId, approved: false };
+        if (e.mode === "form") {
+          return { toolCallId: e.toolCallId, approved: true, content: forms[e.toolCallId] || {} };
+        }
+        if (e.mode === "url") return { toolCallId: e.toolCallId, approved: true };
+        return { toolCallId: e.toolCallId, approved: decisions[e.toolCallId] === true };
+      });
       card.remove();
       run({
         threadId,
@@ -585,6 +673,17 @@
         forwardedProps: { command: { resume: { decisions: list } } },
       });
     };
+
+    if (needsInput) {
+      const cancel = el("button", "", actions);
+      cancel.textContent = "Cancel";
+      cancel.onclick = () => resume(false);
+    }
+
+    const submit = el("button", "primary", actions);
+    submit.className = "primary";
+    submit.textContent = needsInput ? "Continue" : "Submit decisions";
+    submit.onclick = () => resume(true);
     scroll();
   }
 })();

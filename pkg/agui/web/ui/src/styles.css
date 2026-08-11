@@ -393,6 +393,62 @@ body {
   white-space: pre-wrap;
   word-break: break-word;
 }
+/* Elicitation: a form the agent asked the user to fill in, or a URL to
+   visit. Shares the pause card's frame with the approval rows above. */
+.hk-elicit {
+  padding: 10px;
+  border-radius: calc(var(--radius, 10px) - 4px);
+  background: var(--muted, #f5f5f5);
+  margin-bottom: 6px;
+}
+.hk-elicit-msg {
+  margin: 0 0 10px;
+  font-size: 13px;
+}
+.hk-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 10px;
+}
+.hk-field-label {
+  font-size: 12px;
+  color: var(--muted-foreground, #666);
+}
+.hk-field .hk-req {
+  color: var(--hk-warn);
+  font-style: normal;
+}
+.hk-field input[type="text"],
+.hk-field input[type="number"],
+.hk-field select {
+  padding: 7px 9px;
+  font-size: 13px;
+  border-radius: 6px;
+  border: 1px solid var(--border, #e5e5e5);
+  background: var(--card, #fff);
+  color: var(--foreground, #111);
+  font-family: inherit;
+}
+.hk-field input[type="checkbox"] {
+  align-self: flex-start;
+}
+.hk-hint {
+  font-size: 11px;
+  color: var(--muted-foreground, #666);
+  margin: 0;
+}
+.hk-link {
+  display: inline-block;
+  font-family: var(--hk-mono);
+  font-size: 12px;
+  word-break: break-all;
+  color: var(--primary, #0f172a);
+}
+.hk-btn[disabled] {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
 .hk-actions {
   margin-top: 12px;
   display: flex;

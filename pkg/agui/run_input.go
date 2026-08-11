@@ -78,9 +78,67 @@ func (in *RunAgentInput) Validate() error {
 // extension) from the SDK-side shape (FunctionCallInterruptResolutionMessage
 // with action verbs) so the wire contract stays AG-UI-native while the
 // agent loop sees the form it already understands.
+//
+// Content carries the answer to a data-carrying interrupt — the fields of a
+// submitted form elicitation, matching the requestedSchema the pause
+// advertised. It rides through to InterruptResolution.Content, which the
+// agent loop hands to the resuming tool via ToolCall.ResumeMessages. Plain
+// approvals leave it empty.
 type ApprovalDecision struct {
-	ToolCallID string `json:"toolCallId"`
-	Approved   bool   `json:"approved"`
+	ToolCallID string          `json:"toolCallId"`
+	Approved   bool            `json:"approved"`
+	Content    json.RawMessage `json:"content,omitempty"`
+}
+
+// UnmarshalJSON resolves what "approved" means across the shapes clients
+// actually send, because the zero value of a bool is a rejection and
+// silently discarding a submitted form is the worst possible default.
+//
+// Precedence:
+//
+//  1. An explicit "action" verb wins. Both this SDK's approve/reject and
+//     MCP's elicitation verbs (accept/decline/cancel) are accepted, so a
+//     frontend can forward an MCP-shaped answer unchanged.
+//  2. An explicit "approved" boolean.
+//  3. Otherwise, a decision carrying content is a submission, and therefore
+//     an approval. A form arriving with no verdict field means the user
+//     filled it in and pressed submit.
+//  4. Otherwise, a rejection.
+func (d *ApprovalDecision) UnmarshalJSON(b []byte) error {
+	var raw struct {
+		ToolCallID string          `json:"toolCallId"`
+		Approved   *bool           `json:"approved"`
+		Action     string          `json:"action"`
+		Content    json.RawMessage `json:"content"`
+	}
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return err
+	}
+
+	d.ToolCallID = raw.ToolCallID
+	d.Content = nil
+	// A literal null is not content. Treat it as absent so it cannot flip a
+	// missing verdict into an approval below.
+	if len(raw.Content) > 0 && string(raw.Content) != "null" {
+		d.Content = raw.Content
+	}
+
+	switch strings.ToLower(strings.TrimSpace(raw.Action)) {
+	case "approve", "accept":
+		d.Approved = true
+	case "reject", "decline", "cancel":
+		d.Approved = false
+	default:
+		switch {
+		case raw.Approved != nil:
+			d.Approved = *raw.Approved
+		case len(d.Content) > 0:
+			d.Approved = true
+		default:
+			d.Approved = false
+		}
+	}
+	return nil
 }
 
 // ExtractApprovals returns the parsed approval decisions from
@@ -190,9 +248,20 @@ func ApprovalsToMessage(decisions []ApprovalDecision) (*responses.FunctionCallIn
 		msg.Resolutions = append(msg.Resolutions, responses.InterruptResolution{
 			CallID: d.ToolCallID,
 			Action: action,
+			// Only an approval carries data. A rejected form has no answer to
+			// deliver, and passing one through would hand the resuming tool
+			// content the user declined to submit.
+			Content: contentFor(action, d.Content),
 		})
 	}
 	return msg, true
+}
+
+func contentFor(action string, content json.RawMessage) json.RawMessage {
+	if action != responses.InterruptActionApprove {
+		return nil
+	}
+	return content
 }
 
 // NewTurnSDKMessages converts only this turn's NEW messages (plus any

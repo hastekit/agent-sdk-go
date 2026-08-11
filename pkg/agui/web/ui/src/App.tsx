@@ -462,11 +462,17 @@ function CheckIcon() {
   );
 }
 
-// ── HITL approval ──────────────────────────────────────────
+// ── HITL: approvals and elicitations ───────────────────────
+
+// A run pauses in one of three ways, and each needs a different thing from
+// the user: approve/reject a call, fill in a form, or visit a URL. They
+// arrive on the same on_interrupt event and can be mixed in one pause, so
+// one card collects them all and resolves once.
 
 interface ApprovalDecision {
   toolCallId: string;
   approved: boolean;
+  content?: Record<string, unknown>;
 }
 
 interface PendingToolCall {
@@ -475,9 +481,33 @@ interface PendingToolCall {
   arguments: string;
 }
 
+interface SchemaProperty {
+  type?: string;
+  title?: string;
+  description?: string;
+  enum?: string[];
+  default?: unknown;
+}
+
+interface RequestedSchema {
+  properties?: Record<string, SchemaProperty>;
+  required?: string[];
+}
+
+interface InterruptEntry {
+  toolCallId: string;
+  toolCallName?: string;
+  arguments?: string;
+  mode?: string;
+  message?: string;
+  requestedSchema?: RequestedSchema;
+  url?: string;
+}
+
 interface InterruptPayload {
   kind: string;
   pendingToolCalls?: PendingToolCall[];
+  interrupts?: InterruptEntry[];
 }
 
 function InterruptHandler({ agentName }: { agentName: string }) {
@@ -485,13 +515,22 @@ function InterruptHandler({ agentName }: { agentName: string }) {
     agentId: agentName,
     enabled: (event: any) => {
       const v = event?.value as InterruptPayload | undefined;
-      return v?.kind === "tool_approval";
+      return (
+        v?.kind === "tool_approval" ||
+        v?.kind === "elicitation" ||
+        v?.kind === "mixed"
+      );
     },
     render: ({ event, resolve }: any) => {
       const payload = event.value as InterruptPayload;
+      // interrupts carries every mode; pendingToolCalls is the older
+      // approval-only shape, kept working for servers that predate it.
+      const entries: InterruptEntry[] = payload.interrupts?.length
+        ? payload.interrupts
+        : (payload.pendingToolCalls ?? []).map((c) => ({ ...c, mode: "approval" }));
       return (
-        <ApprovalCard
-          calls={payload.pendingToolCalls ?? []}
+        <InterruptCard
+          entries={entries}
           onSubmit={(decisions) => {
             // useInterrupt forwards resolve()'s argument verbatim under
             // forwardedProps.command.resume on the next run. Wrap as
@@ -506,66 +545,172 @@ function InterruptHandler({ agentName }: { agentName: string }) {
   return null;
 }
 
-function ApprovalCard({
-  calls,
+// coerce turns a form input's string back into the type the schema asked
+// for, so a number field does not arrive at the server quoted.
+function coerce(raw: string, prop?: SchemaProperty): unknown {
+  if (prop?.type === "number" || prop?.type === "integer") {
+    if (raw.trim() === "") return undefined;
+    const n = Number(raw);
+    return Number.isNaN(n) ? raw : n;
+  }
+  return raw;
+}
+
+function initialForm(schema?: RequestedSchema): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [name, prop] of Object.entries(schema?.properties ?? {})) {
+    if (prop.default !== undefined) out[name] = prop.default;
+    else if (prop.type === "boolean") out[name] = false;
+  }
+  return out;
+}
+
+function InterruptCard({
+  entries,
   onSubmit,
 }: {
-  calls: PendingToolCall[];
+  entries: InterruptEntry[];
   onSubmit: (decisions: ApprovalDecision[]) => void;
 }) {
-  const [decisions, setDecisions] = useState<Record<string, boolean>>(() => {
+  const approvals = entries.filter((e) => !e.mode || e.mode === "approval");
+  const forms = entries.filter((e) => e.mode === "form");
+  const urls = entries.filter((e) => e.mode === "url");
+
+  const [checked, setChecked] = useState<Record<string, boolean>>(() => {
     const d: Record<string, boolean> = {};
-    for (const c of calls) d[c.toolCallId] = true;
+    for (const e of approvals) d[e.toolCallId] = true;
     return d;
   });
-  const approved = Object.values(decisions).filter(Boolean).length;
+  const [values, setValues] = useState<Record<string, Record<string, unknown>>>(() => {
+    const d: Record<string, Record<string, unknown>> = {};
+    for (const e of forms) d[e.toolCallId] = initialForm(e.requestedSchema);
+    return d;
+  });
+
+  // A required field left empty would be rejected by the server's schema
+  // validation, so catch it here where the user can still see the field.
+  const missing = forms.some((e) =>
+    (e.requestedSchema?.required ?? []).some((name) => {
+      const v = values[e.toolCallId]?.[name];
+      return v === undefined || v === "";
+    })
+  );
+
+  const submit = (approved: boolean) =>
+    onSubmit(
+      entries.map((e) => {
+        if (!approved) return { toolCallId: e.toolCallId, approved: false };
+        if (e.mode === "form") {
+          return {
+            toolCallId: e.toolCallId,
+            approved: true,
+            content: values[e.toolCallId] ?? {},
+          };
+        }
+        if (e.mode === "url") return { toolCallId: e.toolCallId, approved: true };
+        return { toolCallId: e.toolCallId, approved: checked[e.toolCallId] ?? true };
+      })
+    );
+
+  const title =
+    forms.length || urls.length
+      ? forms.length && !urls.length
+        ? "The agent needs some details"
+        : "The agent needs something from you"
+      : `Approve ${approvals.length} pending tool call${approvals.length === 1 ? "" : "s"}`;
 
   return (
     <div className="hk-approval">
-      <h4>
-        ⏸ Approve {calls.length} pending tool call{calls.length === 1 ? "" : "s"}
-      </h4>
-      {calls.map((c) => (
-        <label className="hk-call" key={c.toolCallId}>
+      <h4>⏸ {title}</h4>
+
+      {approvals.map((e) => (
+        <label className="hk-call" key={e.toolCallId}>
           <input
             type="checkbox"
-            checked={decisions[c.toolCallId] ?? true}
-            onChange={(e) =>
-              setDecisions((p) => ({ ...p, [c.toolCallId]: e.target.checked }))
+            checked={checked[e.toolCallId] ?? true}
+            onChange={(ev) =>
+              setChecked((p) => ({ ...p, [e.toolCallId]: ev.target.checked }))
             }
           />
           <div className="meta">
-            <div className="nm">{c.toolCallName}</div>
-            <div className="args" title={c.arguments}>
-              {c.arguments}
+            <div className="nm">{e.toolCallName}</div>
+            <div className="args" title={e.arguments}>
+              {e.arguments}
             </div>
           </div>
         </label>
       ))}
+
+      {forms.map((e) => (
+        <div className="hk-elicit" key={e.toolCallId}>
+          {e.message && <p className="hk-elicit-msg">{e.message}</p>}
+          {Object.entries(e.requestedSchema?.properties ?? {}).map(([name, prop]) => {
+            const required = (e.requestedSchema?.required ?? []).includes(name);
+            const value = values[e.toolCallId]?.[name];
+            const set = (v: unknown) =>
+              setValues((p) => ({
+                ...p,
+                [e.toolCallId]: { ...(p[e.toolCallId] ?? {}), [name]: v },
+              }));
+            return (
+              <label className="hk-field" key={name}>
+                <span className="hk-field-label">
+                  {prop.title || name}
+                  {required && <em className="hk-req"> *</em>}
+                </span>
+                {prop.enum ? (
+                  <select
+                    value={String(value ?? "")}
+                    onChange={(ev) => set(ev.target.value)}
+                  >
+                    <option value="">—</option>
+                    {prop.enum.map((opt) => (
+                      <option key={opt} value={opt}>
+                        {opt}
+                      </option>
+                    ))}
+                  </select>
+                ) : prop.type === "boolean" ? (
+                  <input
+                    type="checkbox"
+                    checked={Boolean(value)}
+                    onChange={(ev) => set(ev.target.checked)}
+                  />
+                ) : (
+                  <input
+                    type={prop.type === "number" || prop.type === "integer" ? "number" : "text"}
+                    value={value === undefined ? "" : String(value)}
+                    onChange={(ev) => set(coerce(ev.target.value, prop))}
+                  />
+                )}
+                {prop.description && <span className="hk-hint">{prop.description}</span>}
+              </label>
+            );
+          })}
+        </div>
+      ))}
+
+      {urls.map((e) => (
+        <div className="hk-elicit" key={e.toolCallId}>
+          {e.message && <p className="hk-elicit-msg">{e.message}</p>}
+          <a className="hk-link" href={e.url} target="_blank" rel="noreferrer noopener">
+            {e.url}
+          </a>
+          <p className="hk-hint">Open the link, then continue below.</p>
+        </div>
+      ))}
+
       <div className="hk-actions">
-        <span className="count">
-          {approved} of {calls.length} approved
-        </span>
-        <button
-          className="hk-btn"
-          onClick={() =>
-            onSubmit(calls.map((c) => ({ toolCallId: c.toolCallId, approved: false })))
-          }
-        >
-          Reject all
+        {approvals.length > 0 && !forms.length && !urls.length && (
+          <span className="count">
+            {Object.values(checked).filter(Boolean).length} of {approvals.length} approved
+          </span>
+        )}
+        <button className="hk-btn" onClick={() => submit(false)}>
+          {forms.length || urls.length ? "Cancel" : "Reject all"}
         </button>
-        <button
-          className="hk-btn primary"
-          onClick={() =>
-            onSubmit(
-              calls.map((c) => ({
-                toolCallId: c.toolCallId,
-                approved: decisions[c.toolCallId] ?? true,
-              }))
-            )
-          }
-        >
-          Submit
+        <button className="hk-btn primary" disabled={missing} onClick={() => submit(true)}>
+          {forms.length || urls.length ? "Continue" : "Submit"}
         </button>
       </div>
     </div>

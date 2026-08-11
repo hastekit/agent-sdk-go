@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/responses"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -164,4 +165,95 @@ func TestToSDKMessagesFullConversion(t *testing.T) {
 	assert.Equal(t, "call_1", out[2].OfFunctionCall.CallID)
 	require.NotNil(t, out[3].OfFunctionCallOutput)
 	assert.Equal(t, "result", *out[3].OfFunctionCallOutput.Output.OfString)
+}
+
+// A form elicitation is resolved by submitting content. Clients that send the
+// answer without an explicit verdict must not have it read as a rejection —
+// that would discard what the user typed and resume the tool with nothing.
+func TestFormSubmissionWithoutVerdictIsAnApproval(t *testing.T) {
+	in := &RunAgentInput{ForwardedProps: map[string]any{
+		"command": map[string]any{
+			"resume": map[string]any{
+				"decisions": []any{
+					map[string]any{
+						"toolCallId": "call_1",
+						"content":    map[string]any{"passport_no": "X1234567"},
+					},
+				},
+			},
+		},
+	}}
+
+	decisions := in.ExtractApprovals()
+	require.Len(t, decisions, 1)
+	assert.True(t, decisions[0].Approved)
+	assert.JSONEq(t, `{"passport_no":"X1234567"}`, string(decisions[0].Content))
+
+	msg, ok := ApprovalsToMessage(decisions)
+	require.True(t, ok)
+	require.Len(t, msg.Resolutions, 1)
+	assert.Equal(t, responses.InterruptActionApprove, msg.Resolutions[0].Action)
+	assert.JSONEq(t, `{"passport_no":"X1234567"}`, string(msg.Resolutions[0].Content))
+}
+
+// MCP states elicitation outcomes as accept/decline/cancel. Accepting those
+// verbs lets a frontend forward an MCP-shaped answer unchanged.
+func TestDecisionAcceptsMCPActionVerbs(t *testing.T) {
+	for _, tc := range []struct {
+		action string
+		want   bool
+	}{
+		{"accept", true},
+		{"approve", true},
+		{"decline", false},
+		{"cancel", false},
+		{"reject", false},
+	} {
+		in := &RunAgentInput{ForwardedProps: map[string]any{
+			"hastekitApprovals": []any{map[string]any{
+				"toolCallId": "call_1",
+				"action":     tc.action,
+				"content":    map[string]any{"answer": "yes"},
+			}},
+		}}
+		decisions := in.ExtractApprovals()
+		require.Len(t, decisions, 1, tc.action)
+		assert.Equal(t, tc.want, decisions[0].Approved, "action %q", tc.action)
+	}
+}
+
+// An explicit verdict always wins over the content heuristic, and a declined
+// interrupt must not deliver content the user chose not to submit.
+func TestRejectedDecisionDropsContent(t *testing.T) {
+	in := &RunAgentInput{ForwardedProps: map[string]any{
+		"hastekitApprovals": []any{map[string]any{
+			"toolCallId": "call_1",
+			"approved":   false,
+			"content":    map[string]any{"passport_no": "X1234567"},
+		}},
+	}}
+
+	decisions := in.ExtractApprovals()
+	require.Len(t, decisions, 1)
+	assert.False(t, decisions[0].Approved)
+
+	msg, ok := ApprovalsToMessage(decisions)
+	require.True(t, ok)
+	assert.Equal(t, responses.InterruptActionReject, msg.Resolutions[0].Action)
+	assert.Empty(t, msg.Resolutions[0].Content)
+}
+
+// A null content field is absent, not a submission, so it cannot promote a
+// decision with no verdict into an approval.
+func TestNullContentIsNotASubmission(t *testing.T) {
+	in := &RunAgentInput{ForwardedProps: map[string]any{
+		"hastekitApprovals": []any{map[string]any{
+			"toolCallId": "call_1",
+			"content":    nil,
+		}},
+	}}
+	decisions := in.ExtractApprovals()
+	require.Len(t, decisions, 1)
+	assert.False(t, decisions[0].Approved)
+	assert.Empty(t, decisions[0].Content)
 }

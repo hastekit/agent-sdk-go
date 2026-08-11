@@ -68,6 +68,10 @@ func (c *McpTool) Execute(ctx context.Context, params *agents.ToolCall) (*agents
 	callParams, cleanup := newCallToolParams(c.Meta, params.Name, args, params)
 	defer cleanup()
 
+	// When resuming, carry the user's answer to the question the server asked
+	// before the run paused.
+	resumeElicitation(callParams, params)
+
 	res, err := c.Session.CallTool(ctx, callParams)
 	if err != nil {
 		// A cancelled call is not a failed tool: report it as an error so
@@ -77,15 +81,17 @@ func (c *McpTool) Execute(ctx context.Context, params *agents.ToolCall) (*agents
 			return nil, ctxErr
 		}
 
-		return &agents.ToolCallResponse{
-			FunctionCallOutputMessage: &responses.FunctionCallOutputMessage{
-				ID:     params.ID,
-				CallID: params.CallID,
-				Output: responses.FunctionCallOutputContentUnion{
-					OfString: utils.Ptr(err.Error()),
-				},
-			},
-		}, nil
+		return toolOutput(params, err.Error()), nil
+	}
+
+	// The server wants something from the user rather than having an answer:
+	// pause the run on it.
+	pause, err := elicitationPause(params, res)
+	if err != nil {
+		return toolOutput(params, err.Error()), nil
+	}
+	if pause != nil {
+		return pause, nil
 	}
 
 	// Return the tool result
@@ -187,6 +193,10 @@ func (c *LazyMcpTool) Execute(ctx context.Context, params *agents.ToolCall) (*ag
 	callParams, cleanup := newCallToolParams(c.meta, params.Name, args, params)
 	defer cleanup()
 
+	// When resuming, carry the user's answer to the question the server asked
+	// before the run paused.
+	resumeElicitation(callParams, params)
+
 	res, err := cli.CallTool(ctx, callParams)
 	if err != nil {
 		// The caller gave up — not a broken connection. Treating it as one
@@ -225,6 +235,16 @@ func (c *LazyMcpTool) Execute(ctx context.Context, params *agents.ToolCall) (*ag
 		}
 	}
 
+	// The server wants something from the user rather than having an answer:
+	// pause the run on it.
+	pause, err := elicitationPause(params, res)
+	if err != nil {
+		return toolOutput(params, err.Error()), nil
+	}
+	if pause != nil {
+		return pause, nil
+	}
+
 	// Return the tool result
 	for _, r := range res.Content {
 		if tc, ok := r.(*mcp.TextContent); ok {
@@ -241,4 +261,17 @@ func (c *LazyMcpTool) Execute(ctx context.Context, params *agents.ToolCall) (*ag
 
 	err = errors.New("missing mcp tool result")
 	return nil, err
+}
+
+// toolOutput wraps text as this call's result, which is how a failure the
+// model should see and work around is reported (as opposed to a Go error,
+// which fails the run).
+func toolOutput(params *agents.ToolCall, text string) *agents.ToolCallResponse {
+	return &agents.ToolCallResponse{
+		FunctionCallOutputMessage: &responses.FunctionCallOutputMessage{
+			ID:     params.ID,
+			CallID: params.CallID,
+			Output: responses.FunctionCallOutputContentUnion{OfString: utils.Ptr(text)},
+		},
+	}
 }

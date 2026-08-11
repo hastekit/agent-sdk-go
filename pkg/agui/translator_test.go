@@ -3,6 +3,8 @@ package agui
 import (
 	"testing"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
 	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/constants"
 	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/responses"
 	"github.com/hastekit/hastekit-sdk-go/pkg/utils"
@@ -304,4 +306,118 @@ func TestImageGenerationEmitsOneMarkdownMessage(t *testing.T) {
 	for _, e := range events {
 		assert.NotEqual(t, EventCustom, e.EventType())
 	}
+}
+
+func runPausedWith(interrupts ...responses.Interrupt) *responses.ResponseChunk {
+	return &responses.ResponseChunk{
+		OfRunPaused: &responses.ChunkRun[constants.ChunkTypeRunPaused]{
+			RunState: responses.ChunkRunData{PendingInterrupts: interrupts},
+		},
+	}
+}
+
+func pauseValue(t *testing.T, chunk *responses.ResponseChunk) (map[string]any, map[string]any) {
+	t.Helper()
+	tr := NewTranslator("thread-1", "run-1")
+	tr.Start()
+	events := tr.Translate(chunk)
+	require.Equal(t, []EventType{EventStateSnapshot, EventCustom, EventRunFinished}, eventTypes(events))
+	return events[0].(*StateSnapshotEvent).Snapshot.(map[string]any),
+		events[1].(*CustomEvent).Value.(map[string]any)
+}
+
+// A form elicitation must reach the client with the schema it has to render.
+// Before this, non-approval interrupts were filtered out entirely: the run
+// paused, the client was told nothing about what was wanted, and the run could
+// never be resumed from a browser.
+func TestRunPausedEmitsFormElicitation(t *testing.T) {
+	snapshot, value := pauseValue(t, runPausedWith(responses.Interrupt{
+		FunctionCallMessage: responses.FunctionCallMessage{
+			CallID: "call_1", Name: "book_flight", Arguments: `{"flight_no":"TP1234"}`,
+		},
+		Mode: responses.InterruptModeForm,
+		Elicitations: []mcp.ElicitParams{{
+			Message:         "Passenger details, as printed on the passport.",
+			RequestedSchema: map[string]any{"type": "object"},
+		}},
+	}))
+
+	// No approve/reject verdict is outstanding, so an approval prompt must not
+	// be raised for this pause.
+	assert.Equal(t, false, snapshot["awaitingApproval"])
+	assert.Empty(t, snapshot["pendingToolCalls"])
+
+	assert.Equal(t, "elicitation", value["kind"])
+	interrupts := value["interrupts"].([]map[string]any)
+	require.Len(t, interrupts, 1)
+	assert.Equal(t, "call_1", interrupts[0]["toolCallId"])
+	assert.Equal(t, "book_flight", interrupts[0]["toolCallName"])
+	assert.Equal(t, "form", interrupts[0]["mode"])
+	assert.Equal(t, "Passenger details, as printed on the passport.", interrupts[0]["message"])
+	assert.NotNil(t, interrupts[0]["requestedSchema"])
+}
+
+func TestRunPausedEmitsURLElicitation(t *testing.T) {
+	_, value := pauseValue(t, runPausedWith(responses.Interrupt{
+		FunctionCallMessage: responses.FunctionCallMessage{CallID: "call_1", Name: "link_loyalty"},
+		Mode:                responses.InterruptModeURL,
+		Elicitations: []mcp.ElicitParams{{
+			Message: "Connect your loyalty account to continue.",
+			URL:     "https://example.test/oauth/start",
+		}},
+	}))
+
+	interrupts := value["interrupts"].([]map[string]any)
+	require.Len(t, interrupts, 1)
+	assert.Equal(t, "url", interrupts[0]["mode"])
+	assert.Equal(t, "https://example.test/oauth/start", interrupts[0]["url"])
+}
+
+// Clients written against the approval-only shape must keep working: an
+// all-approval pause reports the same kind, flag and pendingToolCalls it
+// always did.
+func TestApprovalOnlyPauseKeepsLegacyShape(t *testing.T) {
+	snapshot, value := pauseValue(t, runPaused(responses.FunctionCallMessage{
+		CallID: "call_1", Name: "issue_refund", Arguments: "{}",
+	}))
+
+	assert.Equal(t, true, snapshot["awaitingApproval"])
+	assert.Len(t, snapshot["pendingToolCalls"], 1)
+	assert.Equal(t, "tool_approval", value["kind"])
+	assert.Len(t, value["pendingToolCalls"], 1)
+	assert.Len(t, value["interrupts"], 1)
+}
+
+// A run can pause on both at once. pendingToolCalls stays the approval subset
+// so a legacy client renders exactly the decisions it can actually take.
+func TestMixedPauseSeparatesApprovalsFromElicitations(t *testing.T) {
+	snapshot, value := pauseValue(t, runPausedWith(
+		responses.Interrupt{
+			FunctionCallMessage: responses.FunctionCallMessage{CallID: "call_1", Name: "issue_refund"},
+			Mode:                responses.InterruptModeApproval,
+		},
+		responses.Interrupt{
+			FunctionCallMessage: responses.FunctionCallMessage{CallID: "call_2", Name: "book_flight"},
+			Mode:                responses.InterruptModeForm,
+			Elicitations:        []mcp.ElicitParams{{Message: "Passenger details"}},
+		},
+	))
+
+	assert.Equal(t, true, snapshot["awaitingApproval"])
+	pending := value["pendingToolCalls"].([]map[string]any)
+	require.Len(t, pending, 1)
+	assert.Equal(t, "call_1", pending[0]["toolCallId"])
+
+	assert.Equal(t, "mixed", value["kind"])
+	assert.Len(t, value["interrupts"], 2)
+}
+
+// An interrupt with no mode set is an approval — the synthesized shape older
+// state rows and tool-level RequiresApproval gates produce.
+func TestUnsetModeProjectsAsApproval(t *testing.T) {
+	_, value := pauseValue(t, runPausedWith(responses.Interrupt{
+		FunctionCallMessage: responses.FunctionCallMessage{CallID: "call_1", Name: "t"},
+	}))
+	assert.Equal(t, "tool_approval", value["kind"])
+	assert.Equal(t, "approval", value["interrupts"].([]map[string]any)[0]["mode"])
 }

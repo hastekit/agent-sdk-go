@@ -2,11 +2,17 @@ package agents_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/bytedance/sonic"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/hastekit/hastekit-sdk-go/pkg/agents"
 	"github.com/hastekit/hastekit-sdk-go/pkg/agents/agentstate"
@@ -339,6 +345,84 @@ func TestAgentLoop_StopSignalEndsRun(t *testing.T) {
 	if text := messagesText(out.Output); !strings.Contains(text, "Cancelled by user") {
 		t.Fatalf("output missing cancellation message, got:\n%s", text)
 	}
+}
+
+// The stop notice has to reach the stream, not just history: the chat is
+// watching the run, so a notice that only lands in storage shows up on the
+// next reload instead of when the user pressed stop.
+func TestAgentLoop_StopNoticeIsStreamed(t *testing.T) {
+	const streamID = "stop-stream-notice"
+	broker := streambroker.NewMemoryStreamBroker()
+
+	llm := &scriptedLLM{script: []*responses.Response{
+		toolCallResponse("call_stop", "stopper", "{}"),
+	}}
+	stopper := newFakeTool("stopper", false, "stopper done")
+	innerExecute := stopper.execute
+	stopper.execute = func(ctx context.Context, params *agents.ToolCall) (*agents.ToolCallResponse, error) {
+		if err := broker.Stop(ctx, streamID); err != nil {
+			return nil, err
+		}
+		return innerExecute(ctx, params)
+	}
+	agent := newScriptedAgent("main", llm, nil, broker, []agents.Tool{stopper}, nil)
+
+	out := runAgent(t, agent, &agents.AgentInput{
+		Namespace: "test",
+		ThreadID:  "thread-stop-notice",
+		StreamID:  streamID,
+		Message:   userMessage("start working"),
+	})
+	requireStatus(t, out, agentstate.RunStatusCompleted)
+
+	// The run has ended, so this replays the whole transcript and closes —
+	// the same events a client watching live would have received.
+	chunks, err := broker.Subscribe(context.Background(), streamID)
+	if err != nil {
+		t.Fatalf("subscribe failed: %v", err)
+	}
+
+	var streamed strings.Builder
+	var opened, closed string
+	for chunk := range chunks {
+		switch {
+		case chunk.OfOutputItemAdded != nil && chunk.OfOutputItemAdded.Item.Type == "message":
+			opened = chunk.OfOutputItemAdded.Item.Id
+		case chunk.OfOutputTextDelta != nil:
+			streamed.WriteString(chunk.OfOutputTextDelta.Delta)
+		case chunk.OfOutputItemDone != nil && chunk.OfOutputItemDone.Item.Type == "message":
+			closed = chunk.OfOutputItemDone.Item.Id
+		}
+	}
+
+	if !strings.Contains(streamed.String(), "Cancelled by user") {
+		t.Fatalf("cancellation never reached the stream, got:\n%s", streamed.String())
+	}
+	// Opened and closed, so a client renders one finished message rather
+	// than a text message left hanging open.
+	if opened == "" || opened != closed {
+		t.Fatalf("message not opened and closed as a pair: added=%q done=%q", opened, closed)
+	}
+	// Same id as the stored turn, so replacing the stream with history on
+	// reload shows the same message rather than a second copy.
+	if stored := assistantMessageID(out.Output, "Cancelled by user"); stored != opened {
+		t.Fatalf("streamed id %q, stored id %q", opened, stored)
+	}
+}
+
+// assistantMessageID returns the id of the message carrying text, or "".
+func assistantMessageID(msgs []responses.InputMessageUnion, text string) string {
+	for _, m := range msgs {
+		if m.OfInputMessage == nil {
+			continue
+		}
+		for _, c := range m.OfInputMessage.Content {
+			if c.OfOutputText != nil && strings.Contains(c.OfOutputText.Text, text) {
+				return m.OfInputMessage.ID
+			}
+		}
+	}
+	return ""
 }
 
 func TestAgentLoop_StopCancelsInFlightToolCall(t *testing.T) {
@@ -1248,4 +1332,162 @@ func TestAgentLoop_SingleTurn_ReturnsText(t *testing.T) {
 	if text := messagesText(out.Output); !strings.Contains(text, "sunny") {
 		t.Fatalf("single turn output missing the model's text, got:\n%s", text)
 	}
+}
+
+// elicitingTool asks for structured input on its first call and completes on
+// the resume, reading the user's answer out of ResumeMessages. It is the
+// shape any tool raising a form elicitation takes: ask, then use.
+type elicitingTool struct {
+	*agents.BaseTool
+	mu      sync.Mutex
+	calls   int
+	gotName string
+	resumed bool
+	schema  map[string]any
+}
+
+func newElicitingTool(name string) *elicitingTool {
+	schema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"passenger_name": map[string]any{"type": "string"},
+		},
+		"required": []string{"passenger_name"},
+	}
+	return &elicitingTool{
+		BaseTool: &agents.BaseTool{
+			ToolUnion: responses.ToolUnion{
+				OfFunction: &responses.FunctionTool{
+					Name:        name,
+					Description: utils.Ptr("books a flight, needs passenger details"),
+					Parameters:  map[string]any{"type": "object", "properties": map[string]any{}},
+				},
+			},
+		},
+		schema: schema,
+	}
+}
+
+func (t *elicitingTool) Execute(ctx context.Context, params *agents.ToolCall) (*agents.ToolCallResponse, error) {
+	t.mu.Lock()
+	t.calls++
+	t.mu.Unlock()
+
+	if !params.ShouldResume {
+		return &agents.ToolCallResponse{
+			Interrupts: []responses.Interrupt{{
+				FunctionCallMessage: *params.FunctionCallMessage,
+				Mode:                responses.InterruptModeForm,
+				Elicitations: []mcp.ElicitParams{{
+					Message:         "Passenger details, as printed on the passport.",
+					RequestedSchema: t.schema,
+				}},
+			}},
+		}, nil
+	}
+
+	t.mu.Lock()
+	t.resumed = true
+	t.mu.Unlock()
+
+	// The filled form arrives as the resolution's Content.
+	for _, msg := range params.ResumeMessages {
+		if msg.OfFunctionCallInterruptResolution == nil {
+			continue
+		}
+		for _, res := range msg.OfFunctionCallInterruptResolution.Resolutions {
+			if len(res.Content) == 0 {
+				continue
+			}
+			var form struct {
+				PassengerName string `json:"passenger_name"`
+			}
+			if err := sonic.Unmarshal(res.Content, &form); err != nil {
+				return nil, err
+			}
+			t.mu.Lock()
+			t.gotName = form.PassengerName
+			t.mu.Unlock()
+		}
+	}
+
+	t.mu.Lock()
+	name := t.gotName
+	t.mu.Unlock()
+	return &agents.ToolCallResponse{
+		FunctionCallOutputMessage: &responses.FunctionCallOutputMessage{
+			ID:     params.ID,
+			CallID: params.CallID,
+			Output: responses.FunctionCallOutputContentUnion{
+				OfString: utils.Ptr("booked for " + name),
+			},
+		},
+	}, nil
+}
+
+func (t *elicitingTool) state() (calls int, resumed bool, name string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.calls, t.resumed, t.gotName
+}
+
+// elicitationMessage is approvalMessage's data-carrying counterpart: the
+// resolution a submitted form produces.
+func elicitationMessage(callID string, content string) history.Message {
+	return messages.New("user", []responses.InputMessageUnion{{
+		OfFunctionCallInterruptResolution: &responses.FunctionCallInterruptResolutionMessage{
+			Resolutions: []responses.InterruptResolution{{
+				CallID:  callID,
+				Action:  responses.InterruptActionApprove,
+				Content: json.RawMessage(content),
+			}},
+		},
+	}})
+}
+
+// A tool that needs structured input pauses the run with a form elicitation,
+// and the answer submitted against that pause reaches the tool on resume.
+func TestAgentLoop_FormElicitationRoundTrip(t *testing.T) {
+	llm := &scriptedLLM{script: []*responses.Response{
+		toolCallResponse("call_book", "book_flight", "{}"),
+		textResponse("booked"),
+	}}
+	book := newElicitingTool("book_flight")
+	agent := newScriptedAgent("main", llm, nil, nil, []agents.Tool{book}, nil)
+
+	out := runAgent(t, agent, &agents.AgentInput{
+		Namespace: "test",
+		ThreadID:  "thread-elicit",
+		Message:   userMessage("book me on TP1234"),
+	})
+
+	requireStatus(t, out, agentstate.RunStatusPaused)
+
+	// The pause carries the mode and the schema the client has to render.
+	require.Len(t, out.Interrupts, 1)
+	intr := out.Interrupts[0]
+	assert.Equal(t, responses.InterruptModeForm, intr.Mode)
+	assert.Equal(t, "call_book", intr.FunctionCallMessage.CallID)
+	require.Len(t, intr.Elicitations, 1)
+	assert.Equal(t, "Passenger details, as printed on the passport.", intr.Elicitations[0].Message)
+	assert.NotNil(t, intr.Elicitations[0].RequestedSchema)
+
+	if calls, resumed, _ := book.state(); calls != 1 || resumed {
+		t.Fatalf("tool state before resume = (calls %d, resumed %v), want (1, false)", calls, resumed)
+	}
+
+	// Submit the form.
+	out = runAgent(t, agent, &agents.AgentInput{
+		Namespace:         "test",
+		ThreadID:          "thread-elicit",
+		PreviousMessageID: out.RunID,
+		Message:           elicitationMessage("call_book", `{"passenger_name":"Ada Lovelace"}`),
+	})
+
+	requireStatus(t, out, agentstate.RunStatusCompleted)
+	calls, resumed, name := book.state()
+	assert.Equal(t, 2, calls, "tool should run again on resume")
+	assert.True(t, resumed, "resumed call must be flagged ShouldResume")
+	assert.Equal(t, "Ada Lovelace", name, "the submitted form must reach the tool")
+	assert.Contains(t, messagesText(out.Output), "booked for Ada Lovelace")
 }

@@ -16,6 +16,24 @@ var sdkClient = mcp.NewClient(&mcp.Implementation{
 	Version: "0.1.0",
 }, &mcp.ClientOptions{
 	ProgressNotificationHandler: handleProgressNotification,
+	// The multi-round-trip middleware answers a server's input request from a
+	// callback and retries the call immediately. An agent cannot: the answer
+	// comes from a person, on a later request, after the run has paused. So
+	// the tool drives the exchange itself — see elicitation.go.
+	MultiRoundTrip: &mcp.MultiRoundTripOptions{Disabled: true},
+	// Capabilities are declared rather than inferred. Inference keys off an
+	// ElicitationHandler, which is only that middleware's callback and so is
+	// not registered, and it advertises form elicitation only — a server
+	// refuses url mode unless it is declared.
+	// Roots is carried over unchanged from the SDK default so declaring
+	// these does not quietly drop it.
+	Capabilities: &mcp.ClientCapabilities{
+		Elicitation: &mcp.ElicitationCapabilities{
+			Form: &mcp.FormElicitationCapabilities{},
+			URL:  &mcp.URLElicitationCapabilities{},
+		},
+		RootsV2: &mcp.RootCapabilities{ListChanged: true},
+	},
 })
 
 // headerRoundTripper injects a fixed set of headers onto every outgoing
