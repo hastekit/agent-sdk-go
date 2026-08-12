@@ -6,7 +6,7 @@ import {
   useDefaultRenderTool,
   useInterrupt,
 } from "@copilotkit/react-core/v2";
-import { StoppableHttpAgent } from "./stoppable-agent";
+import { StoppableHttpAgent, type PermissionMode } from "./stoppable-agent";
 import type { Message as AGUIMessage } from "@ag-ui/core";
 import {
   fetchAgents,
@@ -52,6 +52,9 @@ export default function App() {
   // starts or the thread/agent changes.
   const [runError, setRunError] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  // How much the agent may do unattended. Kept out of the agent's useMemo
+  // deps below on purpose — see the effect that pushes it onto the agent.
+  const [permissionMode, setPermissionMode] = useState<PermissionMode>("default");
 
   // Load the agent list once.
   useEffect(() => {
@@ -101,6 +104,15 @@ export default function App() {
       history: active.initialMessages,
     });
   }, [agentName, active.threadId, active.initialMessages]);
+
+  // Set on the agent rather than passed to its constructor: rebuilding the
+  // agent re-keys the provider below, which tears the chat down and drops any
+  // run in flight. The agent reads the field when each run starts, so
+  // assigning it here is enough — and it applies from the next turn on, not
+  // retroactively to one already going.
+  useEffect(() => {
+    if (agent) agent.permissionMode = permissionMode;
+  }, [agent, permissionMode]);
 
   // Rejoining a run in flight is CopilotChat's own doing: it connects to
   // the thread whenever it is given an explicit threadId, and the server
@@ -208,6 +220,7 @@ export default function App() {
                 agentName={agentName}
                 onAgentChange={onAgentChange}
               />
+              <PermissionMenu mode={permissionMode} onChange={setPermissionMode} />
             </header>
             <InterruptHandler agentName={agentName} />
             <InlineToolRenderer agentName={agentName} />
@@ -415,6 +428,95 @@ function AgentMenu({
   );
 }
 
+// ── Permission mode ────────────────────────────────────────
+
+const PERMISSION_MODES: {
+  value: PermissionMode;
+  label: string;
+  hint: string;
+}[] = [
+  {
+    value: "default",
+    label: "Ask before risky tools",
+    hint: "Pause for tools that need approval or say they are destructive.",
+  },
+  {
+    value: "allow_all",
+    label: "Allow everything",
+    hint: "Never pause. Tools you have refused on this thread stay refused.",
+  },
+];
+
+// PermissionMenu picks how much the agent may do unattended. The mode rides
+// on each run rather than being stored on the thread, so it can be turned up
+// for one errand and back down after.
+function PermissionMenu({
+  mode,
+  onChange,
+}: {
+  mode: PermissionMode;
+  onChange: (mode: PermissionMode) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const wrap = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      if (!wrap.current?.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  const current = PERMISSION_MODES.find((m) => m.value === mode) ?? PERMISSION_MODES[0];
+
+  return (
+    <div className="agent-menu perm-menu" ref={wrap}>
+      <button
+        className={"agent-trigger perm-trigger" + (mode === "allow_all" ? " loose" : "")}
+        onClick={() => setOpen((v) => !v)}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        title={current.hint}
+      >
+        <ShieldIcon />
+        <span className="perm-label">{current.label}</span>
+        <ChevronIcon />
+      </button>
+
+      {open && (
+        <div className="agent-pop perm-pop" role="menu">
+          {PERMISSION_MODES.map((m) => (
+            <button
+              key={m.value}
+              role="menuitem"
+              className={"agent-opt perm-opt" + (m.value === mode ? " selected" : "")}
+              onClick={() => {
+                setOpen(false);
+                if (m.value !== mode) onChange(m.value);
+              }}
+            >
+              <span className="nm">
+                <span className="perm-opt-label">{m.label}</span>
+                <span className="hk-hint">{m.hint}</span>
+              </span>
+              {m.value === mode && <CheckIcon />}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Icons ──────────────────────────────────────────────────
 
 const svg = {
@@ -427,6 +529,14 @@ const svg = {
   strokeLinecap: "round" as const,
   strokeLinejoin: "round" as const,
 };
+
+function ShieldIcon() {
+  return (
+    <svg {...svg} width={15} height={15}>
+      <path d="M12 3l7 3v6c0 4.4-3 7.8-7 9-4-1.2-7-4.6-7-9V6l7-3z" />
+    </svg>
+  );
+}
 
 function PanelIcon() {
   return (
@@ -473,6 +583,9 @@ interface ApprovalDecision {
   toolCallId: string;
   approved: boolean;
   content?: Record<string, unknown>;
+  // remember makes the verdict standing for the thread: approve and the
+  // tool stops asking, reject and it is refused outright from then on.
+  remember?: boolean;
 }
 
 interface PendingToolCall {
@@ -502,6 +615,9 @@ interface InterruptEntry {
   message?: string;
   requestedSchema?: RequestedSchema;
   url?: string;
+  // canRemember says the server will hold this verdict for the whole
+  // thread if asked. Absent on elicitations, and on servers predating it.
+  canRemember?: boolean;
 }
 
 interface InterruptPayload {
@@ -586,6 +702,9 @@ function InterruptCard({
     for (const e of forms) d[e.toolCallId] = initialForm(e.requestedSchema);
     return d;
   });
+  // "Don't ask me again", per call. Off by default: a standing decision is
+  // the kind of thing a user should have to reach for.
+  const [remember, setRemember] = useState<Record<string, boolean>>({});
 
   // A required field left empty would be rejected by the server's schema
   // validation, so catch it here where the user can still see the field.
@@ -596,10 +715,18 @@ function InterruptCard({
     })
   );
 
+  // remembering only rides along where the server offered it, so a checkbox
+  // left over from a previous render can never turn into a standing decision
+  // about something else.
+  const withRemember = (e: InterruptEntry, decision: ApprovalDecision): ApprovalDecision =>
+    e.canRemember && remember[e.toolCallId]
+      ? { ...decision, remember: true }
+      : decision;
+
   const submit = (approved: boolean) =>
     onSubmit(
       entries.map((e) => {
-        if (!approved) return { toolCallId: e.toolCallId, approved: false };
+        if (!approved) return withRemember(e, { toolCallId: e.toolCallId, approved: false });
         if (e.mode === "form") {
           return {
             toolCallId: e.toolCallId,
@@ -608,7 +735,10 @@ function InterruptCard({
           };
         }
         if (e.mode === "url") return { toolCallId: e.toolCallId, approved: true };
-        return { toolCallId: e.toolCallId, approved: checked[e.toolCallId] ?? true };
+        return withRemember(e, {
+          toolCallId: e.toolCallId,
+          approved: checked[e.toolCallId] ?? true,
+        });
       })
     );
 
@@ -624,21 +754,45 @@ function InterruptCard({
       <h4>⏸ {title}</h4>
 
       {approvals.map((e) => (
-        <label className="hk-call" key={e.toolCallId}>
-          <input
-            type="checkbox"
-            checked={checked[e.toolCallId] ?? true}
-            onChange={(ev) =>
-              setChecked((p) => ({ ...p, [e.toolCallId]: ev.target.checked }))
-            }
-          />
-          <div className="meta">
-            <div className="nm">{e.toolCallName}</div>
-            <div className="args" title={e.arguments}>
-              {e.arguments}
+        // The remember control is a sibling of the call's label, not a child:
+        // nesting labels would make clicking "don't ask again" toggle the
+        // approval itself.
+        <div className="hk-call-row" key={e.toolCallId}>
+          <label className="hk-call">
+            <input
+              type="checkbox"
+              checked={checked[e.toolCallId] ?? true}
+              onChange={(ev) =>
+                setChecked((p) => ({ ...p, [e.toolCallId]: ev.target.checked }))
+              }
+            />
+            <div className="meta">
+              <div className="nm">{e.toolCallName}</div>
+              <div className="args" title={e.arguments}>
+                {e.arguments}
+              </div>
             </div>
-          </div>
-        </label>
+          </label>
+          {e.canRemember && (
+            // Deliberately neutral about direction: the verdict this binds is
+            // whichever button gets pressed, and "Reject all" overrides the
+            // checkboxes above. Promising "always allow" here would be a trap
+            // for anyone who then rejects the batch.
+            <label
+              className="hk-remember"
+              title={`Remember this answer for ${e.toolCallName} for the rest of this conversation`}
+            >
+              <input
+                type="checkbox"
+                checked={remember[e.toolCallId] ?? false}
+                onChange={(ev) =>
+                  setRemember((p) => ({ ...p, [e.toolCallId]: ev.target.checked }))
+                }
+              />
+              <span>Don't ask again</span>
+            </label>
+          )}
+        </div>
       ))}
 
       {forms.map((e) => (
@@ -699,6 +853,13 @@ function InterruptCard({
           <p className="hk-hint">Open the link, then continue below.</p>
         </div>
       ))}
+
+      {approvals.some((e) => e.canRemember && remember[e.toolCallId]) && (
+        <p className="hk-hint hk-remember-note">
+          Whichever answer you give below will be remembered for those tools for
+          the rest of this conversation.
+        </p>
+      )}
 
       <div className="hk-actions">
         {approvals.length > 0 && !forms.length && !urls.length && (

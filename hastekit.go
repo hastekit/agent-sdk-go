@@ -19,6 +19,14 @@ var (
 type Agent = agents.Agent
 type ModelParameters = responses.Parameters
 
+// PermissionMode is the tool gating a turn runs under — see AgentInput.
+type PermissionMode = agents.PermissionMode
+
+const (
+	PermissionModeDefault  = agents.PermissionModeDefault
+	PermissionModeAllowAll = agents.PermissionModeAllowAll
+)
+
 type AgentConfig struct {
 	Name          string
 	LLM           llm.Provider

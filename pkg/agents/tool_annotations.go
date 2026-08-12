@@ -58,6 +58,18 @@ func (a *ToolAnnotations) IsDestructive() bool {
 	return *a.DestructiveHint
 }
 
+// IsDeclaredDestructive reports whether the tool actually said it may destroy
+// or overwrite state, as opposed to IsDestructive's "assume the worst when
+// nothing was said". This is the one a permission check wants: an unannotated
+// tool has made no claim, and gating on the absence of a claim would put every
+// tool that predates annotations behind a prompt.
+func (a *ToolAnnotations) IsDeclaredDestructive() bool {
+	if a == nil || a.DestructiveHint == nil {
+		return false
+	}
+	return *a.DestructiveHint && !a.IsReadOnly()
+}
+
 // IsIdempotent reports whether repeating the call is harmless. Read-only tools
 // are idempotent by definition; otherwise an unset hint reads as false.
 func (a *ToolAnnotations) IsIdempotent() bool {

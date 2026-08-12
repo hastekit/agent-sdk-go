@@ -104,6 +104,30 @@ func (s *RunState) PendingInterrupts() []responses.Interrupt {
 	return out
 }
 
+// ToolNameForCall resolves the tool a paused call was going to run. A
+// resolution names only the call it answers, so this is how an answer about
+// one call becomes a decision about a tool. Returns "" when the id belongs to
+// no call this run is holding.
+func (s *RunState) ToolNameForCall(callID string) string {
+	if intr, ok := s.Interrupts[callID]; ok {
+		return intr.FunctionCallMessage.Name
+	}
+	if tc, ok := s.PausedToolCalls[callID]; ok {
+		return tc.Name
+	}
+	for _, tc := range s.PendingToolCalls {
+		if tc.CallID == callID {
+			return tc.Name
+		}
+	}
+	for _, tc := range s.ToolsAwaitingApproval {
+		if tc.CallID == callID {
+			return tc.Name
+		}
+	}
+	return ""
+}
+
 // NextStep returns what the agent should do next
 func (s *RunState) NextStep() Step {
 	return s.CurrentStep

@@ -49,6 +49,7 @@ func (w *AgentWorkflow) Run(restateCtx restate.WorkflowContext, input *WorkflowI
 		Message:           input.Message,
 		RunContext:        input.RunContext,
 		StreamID:          streamID,
+		PermissionMode:    input.PermissionMode,
 	})
 }
 

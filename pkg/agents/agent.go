@@ -252,6 +252,19 @@ type AgentInput struct {
 
 	// This is the conversation ID shared by the parent agent and the sub-agent.
 	SessionID string `json:"shared_session_id"`
+
+	// PermissionMode decides how much tool gating this turn is subject to.
+	// Empty means PermissionModeDefault: tools declared as requiring approval,
+	// and tools annotated as destructive, pause the run for the user.
+	// PermissionModeAllowAll runs everything unattended.
+	//
+	// It is per-turn and travels with the run into sub-agents, so a caller
+	// that starts an unattended turn doesn't have it pause three tools deep.
+	//
+	// Standing per-tool decisions ("always allow this", "never do that") are
+	// not part of the turn: they live in the thread's meta and outrank this
+	// mode. See history.ToolPermissions.
+	PermissionMode PermissionMode `json:"permission_mode,omitempty"`
 }
 
 // AgentOutput represents the result of agent execution
@@ -400,6 +413,12 @@ func (e *Agent) ExecuteWithRun(ctx context.Context, in *AgentInput, run *history
 		in.SessionID = run.GetConversationID()
 	}
 
+	// What may run unattended this turn: the thread's standing allow/deny
+	// decisions over the turn's mode. Rebuilt each iteration, because a
+	// "never do this" answer can arrive mid-run — on the message queue, or on
+	// the resume that woke a paused run — and has to bind the call it answers.
+	permissions := newPermissionPolicy(in.PermissionMode, run.ToolPermissions())
+
 	handoffTools := e.PrepareHandoffTools(ctx)
 	tools := append(e.tools, handoffTools...)
 
@@ -499,6 +518,9 @@ func (e *Agent) ExecuteWithRun(ctx context.Context, in *AgentInput, run *history
 			queued, _ := e.streamBroker.DrainMessages(context.Background(), in.StreamID)
 			run.AddMessagesToQueue(ctx, queued)
 		}
+
+		// Pick up any standing decision the messages above carried.
+		permissions = newPermissionPolicy(in.PermissionMode, run.ToolPermissions())
 
 		// Honor an external stop signal at iteration boundaries.
 		// The caller (typically via ExecuteAsync's handle.Stop) sets a
@@ -652,15 +674,23 @@ func (e *Agent) ExecuteWithRun(ctx context.Context, in *AgentInput, run *history
 				// No tools = done
 				run.RunState.TransitionToComplete()
 			} else {
-				// Partition tools by approval requirement
-				needsApproval, immediate := partitionByApproval(ctx, tools, toolCalls)
+				// Partition tools by what this thread permits
+				needsApproval, immediate, denied := partitionByPermission(ctx, tools, toolCalls, permissions)
+
+				// Denied calls run alongside the immediate ones, but only so
+				// the execution step can answer them with a refusal — they are
+				// never marked approved, and the deny check there stops them
+				// before anything executes.
+				executable := make([]responses.FunctionCallMessage, 0, len(immediate)+len(denied))
+				executable = append(executable, immediate...)
+				executable = append(executable, denied...)
 
 				// Execute immediate tools first (if any), then handle approval
-				if len(immediate) > 0 {
+				if len(executable) > 0 {
 					for _, tc := range immediate {
 						run.RunState.QueuedApprovals = append(run.RunState.QueuedApprovals, tc.CallID)
 					}
-					run.RunState.TransitionToExecuteTools(immediate)
+					run.RunState.TransitionToExecuteTools(executable)
 					// Store tools needing approval for after immediate execution
 					if len(needsApproval) > 0 {
 						run.RunState.ToolsAwaitingApproval = needsApproval
@@ -695,6 +725,15 @@ func (e *Agent) ExecuteWithRun(ctx context.Context, in *AgentInput, run *history
 			for i, toolCall := range pendingToolCalls {
 				if rejected := slices.Contains(run.RunState.QueuedRejections, toolCall.CallID); rejected {
 					toolResults[i] = toolResponse(toolCall, "User has declined the request to call this tool")
+					continue
+				}
+
+				// Re-checked here rather than trusted from the partition: a run
+				// that paused for approval resumes a turn later, possibly after
+				// the tool was denied, still carrying the approval queued while
+				// it was allowed.
+				if permissions.Denies(toolCall.Name) {
+					toolResults[i] = toolResponse(toolCall, toolDeniedByPolicy)
 					continue
 				}
 
@@ -776,6 +815,7 @@ func (e *Agent) ExecuteWithRun(ctx context.Context, in *AgentInput, run *history
 							StreamID:            in.StreamID,
 							RunContext:          in.RunContext,
 							State:               run.State,
+							PermissionMode:      permissions.Mode,
 							ShouldResume:        resuming,
 							ResumeMessages:      resumeMessages,
 							Progress:            e.progressReporter(in.StreamID, toolCall.CallID, toolCall.Name),

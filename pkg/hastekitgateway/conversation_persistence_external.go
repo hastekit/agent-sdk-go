@@ -95,6 +95,49 @@ func (p *ExternalConversationPersistence) LoadMessages(ctx context.Context, name
 	return data.Data, nil
 }
 
+// LoadTranscript implements history.TranscriptReader: the thread as written,
+// for display.
+//
+// It reads /messages, which is a plain ordered select over the thread's turns.
+// The sibling /messages/summary that LoadMessages uses answers a different
+// question — it substitutes a summary for the turns the summary covers, which
+// is what keeps a long thread inside the context window and what would make a
+// chat UI lose its own early turns. Note that endpoint fills an empty
+// previous_message_id with the thread's last message, so asking it for "the
+// whole thread" is exactly when the substitution kicks in.
+func (p *ExternalConversationPersistence) LoadTranscript(ctx context.Context, namespace, threadID string) ([]history.ConversationMessage, error) {
+	ctx, span := tracer.Start(ctx, "ExternalConversationPersistence.LoadTranscript")
+	defer span.End()
+
+	span.SetAttributes(
+		attribute.String("namespace", namespace),
+		attribute.String("thread_id", threadID),
+	)
+
+	if threadID == "" {
+		return []history.ConversationMessage{}, nil
+	}
+
+	endpoint := fmt.Sprintf("%s/messages?namespace=%s&thread_id=%s",
+		projectBasePath(p.Endpoint, p.orgName, p.projectName),
+		url.QueryEscape(namespace), url.QueryEscape(threadID))
+
+	resp, err := p.httpClient.Get(endpoint)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	data := Response[[]history.ConversationMessage]{}
+	if err := utils.DecodeJSON(resp.Body, &data); err != nil {
+		return nil, err
+	}
+
+	span.SetAttributes(attribute.Int("conversation_messages_count", len(data.Data)))
+
+	return data.Data, nil
+}
+
 type AddMessageRequest struct {
 	ProjectID         uuid.UUID         `json:"project_id"`
 	Namespace         string            `json:"namespace"`

@@ -17,6 +17,12 @@ type ToolCall struct {
 	RunContext   map[string]any    `json:"run_context"`
 	State        map[string]string `json:"state,omitempty"`
 
+	// PermissionMode is the gating the caller asked for on this turn. It
+	// matters to tools that run an agent of their own (agent-as-tool): an
+	// unattended turn must stay unattended inside the sub-agent, or the run
+	// pauses somewhere nobody is watching. Tools that don't nest ignore it.
+	PermissionMode PermissionMode `json:"permission_mode,omitempty"`
+
 	// ShouldResume tells Execute to continue an in-flight call
 	// instead of starting a fresh one. The tool implementation reads
 	// this flag and switches to its resume code path — typically
@@ -80,19 +86,6 @@ func (t *BaseTool) IsDeferred() bool {
 
 func (t *BaseTool) Tool(ctx context.Context) *responses.ToolUnion {
 	return &t.ToolUnion
-}
-
-// partitionByApproval splits tool calls into those needing approval and those that can execute immediately
-func partitionByApproval(ctx context.Context, tools []Tool, toolCalls []responses.FunctionCallMessage) (needsApproval []responses.FunctionCallMessage, immediate []responses.FunctionCallMessage) {
-	for _, toolCall := range toolCalls {
-		tool := findTool(ctx, tools, toolCall.Name)
-		if tool != nil && tool.NeedApproval() {
-			needsApproval = append(needsApproval, toolCall)
-		} else {
-			immediate = append(immediate, toolCall)
-		}
-	}
-	return needsApproval, immediate
 }
 
 // findTool finds a tool by name

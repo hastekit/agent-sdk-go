@@ -178,7 +178,10 @@ func serveThreadMessages(w http.ResponseWriter, r *http.Request, agent *agents.A
 		writeJSONError(w, http.StatusNotImplemented, "the agent has no conversation persistence")
 		return
 	}
-	rows, err := manager.ConversationPersistenceAdapter.LoadMessages(r.Context(), o.namespace, threadID, "")
+	// The transcript, not the model's view of it: LoadMessages returns a
+	// summary in place of the turns it covers, which is right for a prompt and
+	// wrong for a chat window the user is scrolling back through.
+	rows, err := manager.LoadTranscript(r.Context(), o.namespace, threadID)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "unable to load messages: "+err.Error())
 		return
@@ -448,6 +451,10 @@ func serveRun(w http.ResponseWriter, r *http.Request, agent *agents.Agent, o opt
 		ThreadID:  input.ThreadID,
 		StreamID:  streamID,
 		Message:   turn,
+		// How much this turn is allowed to do unattended. Per-turn on
+		// purpose: the same thread can be driven by someone watching and
+		// later by something that isn't.
+		PermissionMode: input.ExtractPermissionMode(),
 		// Fold AG-UI context into the prompt RunContext. forwardedProps
 		// and state land at top-level keys so prompt templates can
 		// reach them via {{State.x}} / {{ForwardedProps.y}}.
