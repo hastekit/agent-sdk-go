@@ -91,6 +91,10 @@ func (w *AgentWorkflow) newRestateAgentProxy(restateCtx restate.WorkflowContext,
 		Tools:        restateTools,
 		McpServers:   mcpClients,
 		ToolExecutor: NewRestateToolExecutor(restateCtx),
+		// The agent's hooks apply to every tool, and each of their methods runs
+		// as its own step.
+		// The real hooks, each wrapped so its methods run as their own steps.
+		Hooks:        restateHooks(restateCtx, agentOptions.Hooks),
 		StreamBroker: NewRestateStreamBroker(restateCtx, w.broker),
 		DurableStep:  NewRestateDurableStep(restateCtx),
 	}

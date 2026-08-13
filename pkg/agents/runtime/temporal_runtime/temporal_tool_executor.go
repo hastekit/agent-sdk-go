@@ -41,10 +41,23 @@ func wasCancelled(err error) bool {
 // result, so a replay decides the same way.
 type TemporalToolExecutor struct {
 	workflowCtx workflow.Context
+
+	// hooks run here, in the workflow, so each of their methods is its own
+	// activity — see TemporalToolCallHookProxy.
+	hooks []agents.ToolCallHook
 }
 
 func NewTemporalToolExecutor(workflowCtx workflow.Context) *TemporalToolExecutor {
 	return &TemporalToolExecutor{workflowCtx: workflowCtx}
+}
+
+var _ agents.HookAwareToolExecutor = (*TemporalToolExecutor)(nil)
+
+// WithToolCallHooks implements agents.HookAwareToolExecutor.
+func (e *TemporalToolExecutor) WithToolCallHooks(hooks []agents.ToolCallHook) agents.ToolExecutor {
+	bound := *e
+	bound.hooks = hooks
+	return &bound
 }
 
 func (e *TemporalToolExecutor) ExecuteAll(ctx context.Context, executions []agents.ExecutableToolCall) []agents.ToolExecutionResult {
@@ -57,7 +70,7 @@ func (e *TemporalToolExecutor) ExecuteAll(ctx context.Context, executions []agen
 			continue
 		}
 
-		resp, err := exec.Tool.Execute(ctx, exec.ToolCall)
+		resp, err := agents.RunWithToolCallHooks(ctx, e.hooks, exec.ToolCall, exec.Tool.Execute)
 		results[i] = agents.ToolExecutionResult{
 			Response:  resp,
 			Err:       err,

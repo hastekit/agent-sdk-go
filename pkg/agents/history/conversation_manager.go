@@ -603,6 +603,13 @@ func (cm *ConversationRunManager) contextTokens() int {
 	return cm.RunState.ContextTokens + cm.RunState.PendingContextTokens
 }
 
+// ContextTokens reports how full the context window is by that same reckoning,
+// for callers outside this package — a pre-call budget check, say, which wants
+// the estimate the next prompt will be built from.
+func (cm *ConversationRunManager) ContextTokens() int {
+	return cm.contextTokens()
+}
+
 // TrackAuxiliaryUsage bills a call made *on behalf of* the run against some
 // other prompt — summarization being the one that exists today. Those tokens
 // are real spend and belong in the run's total, but their size says nothing

@@ -25,10 +25,6 @@ type MCPClient struct {
 	CacheTTL              time.Duration      `json:"-"`
 	DisableStandaloneSSE  bool               `json:"-"`
 	schemaCache           SchemaCache        // injected cache (required for caching)
-
-	// beforeToolCall gates every call this client makes — see
-	// WithBeforeToolCall.
-	beforeToolCall []ToolCallHook
 }
 
 func NewClient(ctx context.Context, endpoint string, options ...McpServerOption) (*MCPClient, error) {
@@ -108,68 +104,6 @@ func (srv *MCPClient) GetName() string {
 	return "MCPClient"
 }
 
-func (srv *MCPClient) GetClient(ctx context.Context, runContext map[string]any) (*MCPClient, error) {
-	// resolve the headers with run context
-	headers := map[string]string{}
-	for k, v := range srv.Headers {
-		headers[k] = utils.TryAndParseAsTemplate(v, runContext)
-	}
-
-	session, err := connect(ctx, srv.Endpoint, srv.Transport, headers, srv.DisableStandaloneSSE)
-	if err != nil {
-		return nil, err
-	}
-
-	tools, err := session.ListTools(ctx, &mcp.ListToolsParams{})
-	if err != nil {
-		return nil, err
-	}
-
-	return &MCPClient{
-		Endpoint:              srv.Endpoint,
-		Headers:               headers,
-		Session:               session,
-		Tools:                 tools.Tools,
-		Meta:                  srv.Meta,
-		ToolFilter:            srv.ToolFilter,
-		ApprovalRequiredTools: srv.ApprovalRequiredTools,
-		DeferredTools:         srv.DeferredTools,
-		DisableStandaloneSSE:  srv.DisableStandaloneSSE,
-		beforeToolCall:        srv.beforeToolCall,
-	}, nil
-}
-
-func (srv *MCPClient) GetTools(opts ...McpServerOption) []agents.Tool {
-	mcpTools := []agents.Tool{}
-
-	for _, o := range opts {
-		o(srv)
-	}
-
-	for _, tool := range srv.Tools {
-		// Filter tools
-		if len(srv.ToolFilter) > 0 && !slices.Contains(srv.ToolFilter, tool.Name) {
-			continue
-		}
-
-		// Check if tool requires approval
-		requiresApproval := false
-		if len(srv.ApprovalRequiredTools) > 0 && slices.Contains(srv.ApprovalRequiredTools, tool.Name) {
-			requiresApproval = true
-		}
-
-		// Check if tool is deferred
-		deferred := false
-		if len(srv.DeferredTools) > 0 && slices.Contains(srv.DeferredTools, tool.Name) {
-			deferred = true
-		}
-
-		mcpTools = append(mcpTools, NewMcpTool(tool, srv.Session, srv.Meta, requiresApproval, deferred, srv.beforeToolCall...))
-	}
-
-	return mcpTools
-}
-
 func (srv *MCPClient) ListTools(ctx context.Context, runContext map[string]any) ([]agents.Tool, error) {
 	resolvedHeaders := srv.resolveHeaders(runContext)
 
@@ -205,13 +139,10 @@ func (srv *MCPClient) ListTools(ctx context.Context, runContext map[string]any) 
 func (srv *MCPClient) CallToolDirect(ctx context.Context, runContext map[string]any, params *agents.ToolCall) (*agents.ToolCallResponse, error) {
 	resolvedHeaders := srv.resolveHeaders(runContext)
 
-	// This is the path a durable runtime takes — the workflow holds only a
-	// serialized tool definition and calls back here to execute — so the hooks
-	// have to be attached here too, or the gate would apply on the local
-	// runtime and silently not on Temporal or Restate.
-	//
-	// The run context comes in as its own argument on this path. Put it on the
-	// call so a hook reads it in the one place it reads it everywhere else.
+	// The run context comes in as its own argument on this path — a durable
+	// runtime's workflow holds only a serialized tool definition and calls back
+	// here to execute. Put it on the call so anything downstream reads it in
+	// the one place it reads it everywhere else.
 	if params != nil && params.RunContext == nil {
 		params.RunContext = runContext
 	}
@@ -223,7 +154,6 @@ func (srv *MCPClient) CallToolDirect(ctx context.Context, runContext map[string]
 		meta:                 srv.Meta,
 		toolName:             params.Name,
 		disableStandaloneSSE: srv.DisableStandaloneSSE,
-		beforeToolCall:       srv.beforeToolCall,
 	}
 	return tool.Execute(ctx, params)
 }
@@ -307,7 +237,7 @@ func (srv *MCPClient) buildLazyTools(tools []*mcp.Tool, meta mcp.Meta, resolvedH
 		requiresApproval := len(srv.ApprovalRequiredTools) > 0 && slices.Contains(srv.ApprovalRequiredTools, tool.Name)
 		deferred := len(srv.DeferredTools) > 0 && (slices.Contains(srv.DeferredTools, tool.Name) || slices.Contains(srv.DeferredTools, "*"))
 
-		result = append(result, NewLazyMcpTool(tool, srv.Endpoint, srv.Transport, resolvedHeaders, meta, srv.DisableStandaloneSSE, requiresApproval, deferred, srv.beforeToolCall...))
+		result = append(result, NewLazyMcpTool(tool, srv.Endpoint, srv.Transport, resolvedHeaders, meta, srv.DisableStandaloneSSE, requiresApproval, deferred))
 	}
 	return result
 }

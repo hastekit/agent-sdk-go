@@ -15,11 +15,6 @@ type McpTool struct {
 	*agents.BaseTool
 	Session *mcp.ClientSession `json:"-"`
 	Meta    mcp.Meta           `json:"-"`
-
-	// beforeToolCall gates each call. Not serialized: a hook is a function,
-	// and under a durable runtime the call is executed by the client that was
-	// registered in-process, which has its own copy.
-	beforeToolCall []ToolCallHook `json:"-"`
 }
 
 // toolAnnotations converts a server's tool annotations into the SDK's own
@@ -47,7 +42,7 @@ func toolAnnotations(t *mcp.Tool) *agents.ToolAnnotations {
 	}
 }
 
-func NewMcpTool(t *mcp.Tool, session *mcp.ClientSession, Meta mcp.Meta, requiresApproval bool, deferred bool, beforeToolCall ...ToolCallHook) *McpTool {
+func NewMcpTool(t *mcp.Tool, session *mcp.ClientSession, Meta mcp.Meta, requiresApproval bool, deferred bool) *McpTool {
 	inputSchema := map[string]any{
 		"type":       "object",
 		"properties": map[string]any{},
@@ -71,23 +66,12 @@ func NewMcpTool(t *mcp.Tool, session *mcp.ClientSession, Meta mcp.Meta, requires
 				},
 			},
 		},
-		Session:        session,
-		Meta:           Meta,
-		beforeToolCall: beforeToolCall,
+		Session: session,
+		Meta:    Meta,
 	}
 }
 
 func (c *McpTool) Execute(ctx context.Context, params *agents.ToolCall) (*agents.ToolCallResponse, error) {
-	// Before anything is parsed or connected: a call the hooks settle should
-	// cost nothing and reach nothing.
-	settled, err := runBeforeToolCall(ctx, c.beforeToolCall, params)
-	if err != nil {
-		return toolOutput(params, err.Error()), nil
-	}
-	if settled != nil {
-		return settled, nil
-	}
-
 	var args map[string]any
 	if params.Arguments != "" {
 		err := sonic.Unmarshal([]byte(params.Arguments), &args)
@@ -164,12 +148,9 @@ type LazyMcpTool struct {
 	meta                 mcp.Meta
 	toolName             string
 	disableStandaloneSSE bool
-
-	// beforeToolCall gates each call — see McpTool.
-	beforeToolCall []ToolCallHook
 }
 
-func NewLazyMcpTool(t *mcp.Tool, endpoint, transportType string, resolvedHeaders map[string]string, meta mcp.Meta, disableStandaloneSSE bool, requiresApproval bool, deferred bool, beforeToolCall ...ToolCallHook) *LazyMcpTool {
+func NewLazyMcpTool(t *mcp.Tool, endpoint, transportType string, resolvedHeaders map[string]string, meta mcp.Meta, disableStandaloneSSE bool, requiresApproval bool, deferred bool) *LazyMcpTool {
 	inputSchema := map[string]any{
 		"type":       "object",
 		"properties": map[string]any{},
@@ -199,21 +180,10 @@ func NewLazyMcpTool(t *mcp.Tool, endpoint, transportType string, resolvedHeaders
 		meta:                 meta,
 		toolName:             t.Name,
 		disableStandaloneSSE: disableStandaloneSSE,
-		beforeToolCall:       beforeToolCall,
 	}
 }
 
 func (c *LazyMcpTool) Execute(ctx context.Context, params *agents.ToolCall) (*agents.ToolCallResponse, error) {
-	// Before the connection pool is touched: a call the hooks settle should not
-	// even open a session to the server.
-	settled, err := runBeforeToolCall(ctx, c.beforeToolCall, params)
-	if err != nil {
-		return toolOutput(params, err.Error()), nil
-	}
-	if settled != nil {
-		return settled, nil
-	}
-
 	var args map[string]any
 	if params.Arguments != "" {
 		err := sonic.Unmarshal([]byte(params.Arguments), &args)

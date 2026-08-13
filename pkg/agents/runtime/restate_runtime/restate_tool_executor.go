@@ -41,10 +41,23 @@ func wasCancelled(err error) bool {
 // result, so a replay decides the same way.
 type RestateToolExecutor struct {
 	restateCtx restate.WorkflowContext
+
+	// hooks run here, in the handler, so each of their methods is its own run
+	// step — see RestateToolCallHook.
+	hooks []agents.ToolCallHook
 }
 
 func NewRestateToolExecutor(restateCtx restate.WorkflowContext) *RestateToolExecutor {
 	return &RestateToolExecutor{restateCtx: restateCtx}
+}
+
+var _ agents.HookAwareToolExecutor = (*RestateToolExecutor)(nil)
+
+// WithToolCallHooks implements agents.HookAwareToolExecutor.
+func (e *RestateToolExecutor) WithToolCallHooks(hooks []agents.ToolCallHook) agents.ToolExecutor {
+	bound := *e
+	bound.hooks = hooks
+	return &bound
 }
 
 func (e *RestateToolExecutor) ExecuteAll(ctx context.Context, executions []agents.ExecutableToolCall) []agents.ToolExecutionResult {
@@ -57,7 +70,7 @@ func (e *RestateToolExecutor) ExecuteAll(ctx context.Context, executions []agent
 			continue
 		}
 
-		resp, err := exec.Tool.Execute(ctx, exec.ToolCall)
+		resp, err := agents.RunWithToolCallHooks(ctx, e.hooks, exec.ToolCall, exec.Tool.Execute)
 		results[i] = agents.ToolExecutionResult{
 			Response:  resp,
 			Err:       err,

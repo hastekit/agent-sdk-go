@@ -19,6 +19,16 @@ var (
 type Agent = agents.Agent
 type ModelParameters = responses.Parameters
 
+// Hook is anything an agent can be given to observe or intercept what it does
+// — see agents.Hook. Implement ToolCallHook, ModelCallHook, or both.
+type Hook = agents.Hook
+
+// ToolCallHook wraps a tool call — see agents.ToolCallHook.
+type ToolCallHook = agents.ToolCallHook
+
+// ModelCallHook wraps a call to the model — see agents.ModelCallHook.
+type ModelCallHook = agents.ModelCallHook
+
 // PermissionMode is the tool gating a turn runs under — see AgentInput.
 type PermissionMode = agents.PermissionMode
 
@@ -39,6 +49,11 @@ type AgentConfig struct {
 	Instruction   agents.SystemPromptProvider
 	Parameters    responses.Parameters
 	StickyHandoff bool
+
+	// Hooks observe or intercept what the agent does. A ToolCallHook wraps
+	// every tool it calls; a ModelCallHook wraps every call to the model, which
+	// is where a budget or credit check belongs. One hook may be both.
+	Hooks []agents.Hook
 }
 
 func (ac *AgentConfig) toAgentOptions() *agents.AgentOptions {
@@ -54,6 +69,7 @@ func (ac *AgentConfig) toAgentOptions() *agents.AgentOptions {
 		Instruction:   ac.Instruction,
 		Parameters:    ac.Parameters,
 		StickyHandoff: ac.StickyHandoff,
+		Hooks:         ac.Hooks,
 	}
 }
 
