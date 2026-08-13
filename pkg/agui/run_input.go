@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
-	"github.com/hastekit/hastekit-sdk-go/pkg/agents"
 	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/constants"
 	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/responses"
 )
@@ -89,11 +88,6 @@ type ApprovalDecision struct {
 	ToolCallID string          `json:"toolCallId"`
 	Approved   bool            `json:"approved"`
 	Content    json.RawMessage `json:"content,omitempty"`
-
-	// Remember makes the verdict standing rather than one-off: the tool is
-	// added to the thread's always-allow or always-deny list and is not asked
-	// about again. It is the "don't ask me again" checkbox on the prompt.
-	Remember bool `json:"remember,omitempty"`
 }
 
 // UnmarshalJSON resolves what "approved" means across the shapes clients
@@ -116,14 +110,12 @@ func (d *ApprovalDecision) UnmarshalJSON(b []byte) error {
 		Approved   *bool           `json:"approved"`
 		Action     string          `json:"action"`
 		Content    json.RawMessage `json:"content"`
-		Remember   bool            `json:"remember"`
 	}
 	if err := json.Unmarshal(b, &raw); err != nil {
 		return err
 	}
 
 	d.ToolCallID = raw.ToolCallID
-	d.Remember = raw.Remember
 	d.Content = nil
 	// A literal null is not content. Treat it as absent so it cannot flip a
 	// missing verdict into an approval below.
@@ -194,35 +186,6 @@ func (in *RunAgentInput) ExtractApprovals() []ApprovalDecision {
 	return nil
 }
 
-// ExtractPermissionMode reads the tool gating the client asked for from
-// forwardedProps:
-//
-//	{ "forwardedProps": { "permissionMode": "allow_all" } }
-//
-// Empty — absent, unreadable, or a mode this SDK doesn't know — means the
-// default, which is the gating mode. An unrecognised value is not an error a
-// run should fail on, but it must not be taken as permission either, so it
-// reads as "ask me".
-func (in *RunAgentInput) ExtractPermissionMode() agents.PermissionMode {
-	if in == nil {
-		return ""
-	}
-	fp, ok := in.ForwardedProps.(map[string]any)
-	if !ok {
-		return ""
-	}
-	mode, _ := fp["permissionMode"].(string)
-
-	switch agents.PermissionMode(strings.TrimSpace(mode)) {
-	case agents.PermissionModeAllowAll:
-		return agents.PermissionModeAllowAll
-	case agents.PermissionModeDefault:
-		return agents.PermissionModeDefault
-	default:
-		return ""
-	}
-}
-
 // lookupCanonicalResume drills into forwardedProps.command.resume
 // and returns the .decisions array (or the raw .resume value when
 // it's already an array — some clients flatten the structure).
@@ -283,9 +246,8 @@ func ApprovalsToMessage(decisions []ApprovalDecision) (*responses.FunctionCallIn
 			action = responses.InterruptActionApprove
 		}
 		msg.Resolutions = append(msg.Resolutions, responses.InterruptResolution{
-			CallID:         d.ToolCallID,
-			Action:         action,
-			RememberAction: d.Remember,
+			CallID: d.ToolCallID,
+			Action: action,
 			// Only an approval carries data. A rejected form has no answer to
 			// deliver, and passing one through would hand the resuming tool
 			// content the user declined to submit.

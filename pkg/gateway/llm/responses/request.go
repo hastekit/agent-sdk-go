@@ -314,16 +314,10 @@ const (
 // resolution — Content included — to the resuming tool via its
 // ToolCall.ResumeMessages, so a tool that raised a data interrupt reads the
 // user's answer from there.
-// RememberAction turns a one-off answer into a standing one: the tool this
-// call names is added to the thread's always-allow list on approve, or its
-// always-deny list on reject, and the same tool is not asked about again on
-// this thread. It is the "don't ask me again" / "never do this" checkbox next
-// to the approve and reject buttons.
 type InterruptResolution struct {
-	CallID         string          `json:"call_id"`
-	Action         string          `json:"action"`
-	Content        json.RawMessage `json:"content,omitempty"`
-	RememberAction bool            `json:"remember_action,omitempty"`
+	CallID  string          `json:"call_id"`
+	Action  string          `json:"action"`
+	Content json.RawMessage `json:"content,omitempty"`
 }
 
 // FunctionCallInterruptResolutionMessage is the resume message for the

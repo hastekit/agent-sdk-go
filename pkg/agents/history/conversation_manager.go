@@ -138,11 +138,6 @@ type ConversationRunManager struct {
 	// State is used to store any key-value pairs that need to be persisted along with the run
 	State map[string]string
 
-	// toolPermissions holds the thread's standing tool decisions, read from
-	// thread meta when the run loaded and written back on every save so they
-	// outlive the run that recorded them.
-	toolPermissions ToolPermissions
-
 	// RunState is used to store the state of the run, such as the current step and the usage of the run
 	RunState *agentstate.RunState
 
@@ -484,7 +479,6 @@ func (cm *ConversationRunManager) LoadMessages(ctx context.Context, namespace st
 	cm.convMessages = convMessages
 	cm.oldMessages = oldMessages
 	cm.RunState = agentstate.LoadRunStateFromMeta(cm.lastMessageMeta)
-	cm.toolPermissions = toolPermissionsFromMeta(cm.lastMessageMeta)
 	cm.loadSubAgentContext(ctx)
 
 	return nil
@@ -512,14 +506,6 @@ func (cm *ConversationRunManager) SaveMessages(ctx context.Context) error {
 	}
 
 	meta["state"] = cm.State
-
-	// Meta is rebuilt from the run state on every save, so thread-scoped
-	// entries have to be re-attached or they are dropped at the end of the
-	// turn that wrote them. Omitting the key when nothing is decided is what
-	// makes clearing a permission stick.
-	if !cm.toolPermissions.IsEmpty() {
-		meta[ToolPermissionsMetaKey] = cm.toolPermissions
-	}
 
 	// Record the run's RunContext (persistence-only; never sent to the
 	// provider) so later reads recover the turn's context.
@@ -681,11 +667,9 @@ func (cm *ConversationRunManager) processIncoming(message Message, queue, estima
 						}
 						cm.RunState.Resolutions[res.CallID] = res
 					}
-					cm.rememberDecision(res, true)
 				case responses.InterruptActionReject:
 					hasNewApproval = true
 					cm.RunState.QueuedRejections = append(cm.RunState.QueuedRejections, res.CallID)
-					cm.rememberDecision(res, false)
 				}
 			}
 		} else {

@@ -250,9 +250,6 @@ func (t *Translator) Translate(chunk *responses.ResponseChunk) []Event {
 								"content": "object — the answer for a data-carrying interrupt: " +
 									"form fields matching interrupts[].requestedSchema. Omit for " +
 									"plain approvals and for url mode.",
-								"remember": "boolean — make this verdict standing for the thread " +
-									"(\"don't ask me again\", or never do this on a reject). Offer it " +
-									"only where interrupts[].canRemember is true.",
 							}},
 						},
 					},
@@ -792,16 +789,6 @@ func projectInterrupts(interrupts []responses.Interrupt) []map[string]any {
 			"toolCallName": it.FunctionCallMessage.Name,
 			"arguments":    it.FunctionCallMessage.Arguments,
 			"mode":         string(mode),
-		}
-		// canRemember tells the client it may offer "don't ask me again" on
-		// this one, which resolves to decisions[].remember. Only an approval
-		// qualifies: a verdict about a tool is a thing a thread can hold
-		// standing, whereas a filled form or a visited URL answers this call
-		// and nothing else. The tool name is what a standing decision is
-		// recorded against, so without one there is nothing to remember and
-		// the checkbox would do nothing.
-		if mode == responses.InterruptModeApproval && it.FunctionCallMessage.Name != "" {
-			entry["canRemember"] = true
 		}
 		if it.IsNested {
 			entry["isNested"] = true

@@ -60,9 +60,11 @@ func (a *ToolAnnotations) IsDestructive() bool {
 
 // IsDeclaredDestructive reports whether the tool actually said it may destroy
 // or overwrite state, as opposed to IsDestructive's "assume the worst when
-// nothing was said". This is the one a permission check wants: an unannotated
-// tool has made no claim, and gating on the absence of a claim would put every
-// tool that predates annotations behind a prompt.
+// nothing was said".
+//
+// This is usually the one a hook gating tool calls wants: an unannotated tool
+// has made no claim, and gating on the absence of a claim would put every tool
+// written before annotations behind a prompt.
 func (a *ToolAnnotations) IsDeclaredDestructive() bool {
 	if a == nil || a.DestructiveHint == nil {
 		return false

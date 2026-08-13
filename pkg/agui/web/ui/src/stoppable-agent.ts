@@ -7,12 +7,6 @@ import {
 import type { Message, RunAgentInput } from "@ag-ui/core";
 import { stopRun, streamUrl } from "./api";
 
-// How much the agent may do without stopping to ask. "default" gates tools
-// that require approval or say they are destructive; "allow_all" runs
-// everything. The thread's own always-allow/always-deny decisions outrank
-// both, so allow_all cannot revive a tool the user has refused.
-export type PermissionMode = "default" | "allow_all";
-
 // rxjs is not a direct dependency; take the Observable type from the
 // helper's own signature rather than adding one for a type import.
 type EventStream = ReturnType<typeof transformHttpEventStream>;
@@ -38,11 +32,6 @@ const STREAM_ID_EVENT = "hastekit.stream_id";
 export class StoppableHttpAgent extends HttpAgent {
   private readonly agentName: string;
   private streamId?: string;
-
-  // Mutable rather than constructor-set: changing the mode must not mean
-  // rebuilding the agent, which would tear down the chat subtree and drop
-  // any run in flight. prepareRunAgentInput reads it when each run starts.
-  permissionMode: PermissionMode = "default";
 
   // Turns steered into a run that was already in flight, held until that
   // run ends. A run's event pipeline clones agent.messages when it starts
@@ -158,26 +147,6 @@ export class StoppableHttpAgent extends HttpAgent {
       return;
     }
     void this.connectAgent();
-  }
-
-  // prepareRunAgentInput is the one place every outbound run passes through —
-  // an ordinary turn, a steer, and the resume that carries an approval — so
-  // the mode is attached here rather than at each call site.
-  //
-  // Merged into forwardedProps rather than assigned over them: CopilotKit puts
-  // the interrupt resolution there (command.resume), and replacing the object
-  // would drop the user's approval on the very run that was meant to carry it.
-  protected prepareRunAgentInput(
-    parameters?: Parameters<HttpAgent["prepareRunAgentInput"]>[0]
-  ): RunAgentInput {
-    const input = super.prepareRunAgentInput(parameters);
-    return {
-      ...input,
-      forwardedProps: {
-        ...(input.forwardedProps ?? {}),
-        permissionMode: this.permissionMode,
-      },
-    };
   }
 
   // connect attaches to whatever this thread already has running, instead

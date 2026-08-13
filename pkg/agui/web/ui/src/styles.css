@@ -312,58 +312,6 @@ body {
   color: var(--hk-muted);
 }
 
-/* ── Permission mode selector ────────────────────────────── */
-/* Sits to the right of the agent name, quieter than it: this is a setting,
-   not the thing the page is about. It speaks up only in allow-everything,
-   where the user should be able to tell at a glance that nothing will stop
-   to ask. */
-.perm-menu {
-  margin-left: auto;
-}
-.perm-trigger {
-  font-size: 13px;
-  font-weight: 400;
-  color: var(--hk-muted);
-  gap: 6px;
-  border: 1px solid transparent;
-}
-.perm-trigger:not(:disabled):hover {
-  color: var(--hk-text);
-}
-.perm-trigger.loose {
-  color: var(--hk-warn);
-  border-color: color-mix(in srgb, var(--hk-warn) 40%, transparent);
-}
-.perm-trigger svg {
-  color: currentColor;
-}
-.perm-label {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  max-width: 22ch;
-}
-.perm-pop {
-  left: auto;
-  right: 0;
-  min-width: 280px;
-}
-.perm-opt {
-  align-items: flex-start;
-}
-.perm-opt .nm {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  white-space: normal;
-}
-.perm-opt .hk-hint {
-  color: var(--hk-muted);
-}
-.perm-opt-label {
-  font-size: 14px;
-}
-
 /* Run error banner — surfaces server RUN_ERROR / transport failures that
    CopilotKit would otherwise only log to the console. */
 .run-error {
@@ -432,42 +380,6 @@ body {
 .hk-call .meta {
   flex: 1;
   min-width: 0;
-}
-/* The call and its "don't ask again" share a row's worth of vertical space;
-   the call keeps the visual weight, the standing decision reads as an aside
-   so it can't be mistaken for the verdict itself. */
-.hk-call-row {
-  margin-bottom: 6px;
-}
-.hk-call-row .hk-call {
-  margin-bottom: 0;
-}
-.hk-remember {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  margin: 4px 0 0 10px;
-  font-size: 12px;
-  color: var(--muted-foreground, #666);
-  cursor: pointer;
-}
-.hk-remember input {
-  cursor: pointer;
-}
-.hk-remember-note {
-  margin: 8px 0 0;
-}
-.hk-call .nm {
-  font-family: var(--hk-mono);
-  font-size: 13px;
-}
-.hk-call .args {
-  font-size: 12px;
-  color: var(--muted-foreground, #666);
-  margin-top: 2px;
-  font-family: var(--hk-mono);
-  white-space: pre-wrap;
-  word-break: break-word;
 }
 /* Elicitation: a form the agent asked the user to fill in, or a URL to
    visit. Shares the pause card's frame with the approval rows above. */

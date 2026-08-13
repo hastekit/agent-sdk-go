@@ -451,10 +451,6 @@ func serveRun(w http.ResponseWriter, r *http.Request, agent *agents.Agent, o opt
 		ThreadID:  input.ThreadID,
 		StreamID:  streamID,
 		Message:   turn,
-		// How much this turn is allowed to do unattended. Per-turn on
-		// purpose: the same thread can be driven by someone watching and
-		// later by something that isn't.
-		PermissionMode: input.ExtractPermissionMode(),
 		// Fold AG-UI context into the prompt RunContext. forwardedProps
 		// and state land at top-level keys so prompt templates can
 		// reach them via {{State.x}} / {{ForwardedProps.y}}.

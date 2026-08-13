@@ -45,7 +45,7 @@ func annotatedTool(name string, annotations *agents.ToolAnnotations, requiresApp
 
 // The workflow side sees MCP tools only as the BaseTools the list activity
 // returned, so anything the loop needs to gate a call has to survive the data
-// converter. Annotations are what "ask before destructive tools" reads.
+// converter. Annotations are what a permission hook reads to decide.
 func TestListMCPToolsActivity_CarriesAnnotations(t *testing.T) {
 	toolset := &annotatedToolset{tools: []agents.Tool{
 		annotatedTool("search", &agents.ToolAnnotations{ReadOnlyHint: utils.Ptr(true)}, false),
@@ -86,38 +86,4 @@ func TestTemporalToolProxy_ForwardsAnnotations(t *testing.T) {
 	proxy := temporal_runtime.NewTemporalToolProxy(nil, "prefix", tool)
 
 	assert.True(t, agents.AnnotationsOf(proxy).IsDeclaredDestructive())
-}
-
-// The turn's permission mode is part of the workflow input, and the workflow
-// input is the whole AgentInput — so it crosses without a projection that
-// could drop it. A tool call carries it too, for agent-as-tool.
-func TestAgentInputAndToolCall_CarryPermissionMode(t *testing.T) {
-	var suite testsuite.WorkflowTestSuite
-	env := suite.NewTestActivityEnvironment()
-
-	echo := func(ctx context.Context, in *agents.AgentInput) (*agents.AgentInput, error) { return in, nil }
-	env.RegisterActivity(echo)
-
-	val, err := env.ExecuteActivity(echo, &agents.AgentInput{
-		ThreadID:       "thread-1",
-		PermissionMode: agents.PermissionModeAllowAll,
-	})
-	require.NoError(t, err)
-
-	var got agents.AgentInput
-	require.NoError(t, val.Get(&got))
-	assert.Equal(t, agents.PermissionModeAllowAll, got.PermissionMode)
-
-	echoCall := func(ctx context.Context, c *agents.ToolCall) (*agents.ToolCall, error) { return c, nil }
-	env.RegisterActivity(echoCall)
-
-	val, err = env.ExecuteActivity(echoCall, &agents.ToolCall{
-		FunctionCallMessage: &responses.FunctionCallMessage{ID: "fc_1", CallID: "call_1", Name: "sub_agent"},
-		PermissionMode:      agents.PermissionModeAllowAll,
-	})
-	require.NoError(t, err)
-
-	var gotCall agents.ToolCall
-	require.NoError(t, val.Get(&gotCall))
-	assert.Equal(t, agents.PermissionModeAllowAll, gotCall.PermissionMode)
 }

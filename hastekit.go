@@ -29,14 +29,6 @@ type ToolCallHook = agents.ToolCallHook
 // ModelCallHook wraps a call to the model — see agents.ModelCallHook.
 type ModelCallHook = agents.ModelCallHook
 
-// PermissionMode is the tool gating a turn runs under — see AgentInput.
-type PermissionMode = agents.PermissionMode
-
-const (
-	PermissionModeDefault  = agents.PermissionModeDefault
-	PermissionModeAllowAll = agents.PermissionModeAllowAll
-)
-
 type AgentConfig struct {
 	Name          string
 	LLM           llm.Provider

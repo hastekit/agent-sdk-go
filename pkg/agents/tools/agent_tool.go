@@ -181,10 +181,6 @@ func (t *AgentTool) Execute(ctx context.Context, params *agents.ToolCall) (*agen
 		PreviousMessageID: previousMessageID,
 		Message:           history.Message{SenderID: params.AgentName, Messages: messages},
 		SessionID:         params.SessionID, // Using conversation id as the shared session id
-		// The sub-agent runs on its own thread, so it does not inherit the
-		// parent thread's allow/deny lists — but it must inherit the turn's
-		// mode, or an unattended run pauses inside the sub-agent.
-		PermissionMode: params.PermissionMode,
 	}
 	if t.withoutTracing {
 		result, err = t.agent.ExecuteWithoutTrace(ctx, agentInput)

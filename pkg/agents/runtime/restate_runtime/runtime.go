@@ -28,13 +28,6 @@ type WorkflowInput struct {
 	// key so the workflow and the caller agree on the channel.
 	StreamID string
 
-	// PermissionMode is the turn's tool gating. WorkflowInput is a projection
-	// of AgentInput rather than the thing itself, so a field left out here is
-	// a field the workflow's agent never sees — an unattended run would pause
-	// on the far side. (The thread's standing per-tool decisions need no
-	// carrying: the workflow reads them from the thread's own meta.)
-	PermissionMode agents.PermissionMode
-
 	// ProviderConfigKey is the gateway provider config key (a virtual key
 	// or direct provider API key). Restate has no context propagator, so the
 	// value the caller placed on the context via gateway.WithProviderConfigKey
@@ -76,7 +69,6 @@ func (r *RestateRuntime) Run(ctx context.Context, agent *agents.Agent, in *agent
 		Message:           in.Message,
 		RunContext:        in.RunContext,
 		StreamID:          streamID,
-		PermissionMode:    in.PermissionMode,
 		ProviderConfigKey: gateway.ProviderConfigKeyFromContext(ctx),
 	}
 
