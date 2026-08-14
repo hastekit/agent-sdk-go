@@ -24,17 +24,39 @@ func (l *WrappedLLM) NewStreamingResponses(ctx context.Context, in *responses.Re
 		return nil, err
 	}
 
-	return acc.ReadStream(stream, cb)
+	return acc.ReadStream(ctx, stream, cb)
 }
 
 type Accumulator struct {
 }
 
-func (a *Accumulator) ReadStream(stream chan *responses.ResponseChunk, cb func(chunk *responses.ResponseChunk)) (*responses.Response, error) {
+// ReadStream folds a provider's chunk stream into one response, publishing
+// each chunk as it arrives.
+//
+// It gives up when ctx is cancelled — which is how a stop ends a model call
+// mid-stream — and reports ErrModelCallStopped. Whatever had accumulated is
+// dropped rather than returned: a stopped run does not answer, and the loop
+// writes its cancellation notice instead. The unread remainder is drained in
+// the background so the provider's sender is never left blocked on a channel
+// nobody is reading.
+func (a *Accumulator) ReadStream(ctx context.Context, stream chan *responses.ResponseChunk, cb func(chunk *responses.ResponseChunk)) (*responses.Response, error) {
 	// Process stream
 	finalOutput := []responses.OutputMessageUnion{}
 	var usage *responses.Usage
-	for chunk := range stream {
+	for {
+		var chunk *responses.ResponseChunk
+		var open bool
+
+		select {
+		case chunk, open = <-stream:
+			if !open {
+				return &responses.Response{Output: finalOutput, Usage: usage}, nil
+			}
+		case <-ctx.Done():
+			go drain(stream)
+			return nil, ErrModelCallStopped
+		}
+
 		cb(chunk)
 		switch chunk.ChunkType() {
 		case "response.output_item.done":
@@ -123,9 +145,11 @@ func (a *Accumulator) ReadStream(stream chan *responses.ResponseChunk, cb func(c
 			usage = &chunk.OfResponseCompleted.Response.Usage
 		}
 	}
+}
 
-	return &responses.Response{
-		Output: finalOutput,
-		Usage:  usage,
-	}, nil
+// drain reads a stream to its end and discards it, so a provider still writing
+// into a channel nobody reads is released rather than blocked forever.
+func drain(stream chan *responses.ResponseChunk) {
+	for range stream {
+	}
 }

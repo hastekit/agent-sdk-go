@@ -20,10 +20,17 @@ const ToolCancelledErrorCode = 499
 // replaying into this step and re-running the tool the user just stopped.
 // Other errors pass through untouched.
 func cancellationError(err error) error {
-	if err == nil || !errors.Is(err, agents.ErrToolCancelled) {
+	if err == nil || !stoppedWork(err) {
 		return err
 	}
 	return restate.TerminalError(err, ToolCancelledErrorCode)
+}
+
+// stoppedWork reports whether an error is work the stop unwound — a tool call
+// or a streaming model call. Both must reach Restate as a terminal failure it
+// will not replay.
+func stoppedWork(err error) bool {
+	return errors.Is(err, agents.ErrToolCancelled) || errors.Is(err, agents.ErrModelCallStopped)
 }
 
 // wasCancelled reports whether a run step failed because of a stop.

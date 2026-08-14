@@ -2,6 +2,7 @@ package agents
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
@@ -651,8 +652,27 @@ func (e *Agent) ExecuteWithRun(ctx context.Context, in *AgentInput, run *history
 				ContextTokens: run.ContextTokens(),
 				Usage:         run.RunState.Usage,
 			}, func(callCtx context.Context) (*responses.Response, error) {
-				return e.llm.NewStreamingResponses(callCtx, request, publish)
+				// A stop lands mid-stream on the local runtime, where the
+				// provider's request is this process's to cancel. The durable
+				// runtimes cancel inside their own activity or step instead —
+				// from here they hold a proxy, and cancelling that would end
+				// the waiting rather than the work.
+				streamCtx, cancel := StopCancelContext(callCtx, StopWatcherFrom(e.streamBroker), in.StreamID)
+				defer cancel()
+				return e.llm.NewStreamingResponses(streamCtx, request, publish)
 			})
+			if errors.Is(err, ErrModelCallStopped) {
+				// Not a failure: the user stopped the run while the model was
+				// still talking. Go back to the top of the loop, where the stop
+				// check ends the run the same way it would have between
+				// iterations — one cancellation path, not two.
+				//
+				// Whatever the model had said by then is dropped. It reached
+				// the client as it streamed, but a stopped turn is recorded as
+				// cancelled rather than as a half-answer the model never
+				// finished and would be asked to continue from.
+				continue
+			}
 			if err != nil {
 				return &AgentOutput{Status: agentstate.RunStatusError, RunID: runId}, err
 			}
