@@ -91,10 +91,10 @@ func TestAgentLoop_MCPElicitationPausesRun(t *testing.T) {
 
 	// Submit the form; the run resumes and the tool completes.
 	out = runAgent(t, agent, &agents.AgentInput{
-		Namespace:         "test",
-		ThreadID:          "thread-mcp-elicit",
-		PreviousMessageID: out.RunID,
-		Message:           elicitationMessage("call_book", `{"full_name":"Ada Lovelace"}`),
+		Namespace:     "test",
+		ThreadID:      "thread-mcp-elicit",
+		PreviousRunID: out.RunID,
+		Message:       elicitationMessage("call_book", `{"full_name":"Ada Lovelace"}`),
 	})
 
 	requireStatus(t, out, agentstate.RunStatusCompleted)

@@ -9,9 +9,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func saveTurn(t *testing.T, p ConversationPersistenceAdapter, namespace, msgID, prevID, threadID string) {
+func saveTurn(t *testing.T, p ConversationPersistenceAdapter, namespace, runID, prevID, threadID string) {
 	t.Helper()
-	err := p.SaveMessages(context.Background(), namespace, msgID, prevID, threadID, "", []Message{messages.New("user", nil)}, nil)
+	err := p.SaveMessages(context.Background(), namespace, runID, prevID, threadID, "", []Message{messages.New("user", nil)}, nil)
 	require.NoError(t, err)
 }
 
@@ -33,7 +33,7 @@ func TestInMemoryListThreads(t *testing.T) {
 	}
 	assert.Equal(t, 2, byID["thread-a"].MessageCount)
 	assert.Equal(t, 1, byID["thread-b"].MessageCount)
-	assert.Equal(t, "m2", byID["thread-a"].LastMessageID)
+	assert.Equal(t, "m2", byID["thread-a"].LastRunID)
 
 	// Empty namespace lists across all namespaces.
 	all, err := p.ListThreads(context.Background(), "")

@@ -33,7 +33,7 @@ func digest(msgs []ConversationMessage) []conversationDigest {
 	var out []conversationDigest
 	for _, m := range msgs {
 		d := conversationDigest{
-			MessageID:      m.MessageID,
+			MessageID:      m.RunID,
 			ThreadID:       m.ThreadID,
 			ConversationID: m.ConversationID,
 		}
@@ -149,8 +149,8 @@ func TestFileConversationPersistenceBranchReplay(t *testing.T) {
 		if !ok {
 			t.Fatalf("replayed state missing thread %s", threadID)
 		}
-		if replayedThread.LastMessageID != thread.LastMessageID {
-			t.Fatalf("thread %s last message: expected %s, got %s", threadID, thread.LastMessageID, replayedThread.LastMessageID)
+		if replayedThread.LastRunID != thread.LastRunID {
+			t.Fatalf("thread %s last message: expected %s, got %s", threadID, thread.LastRunID, replayedThread.LastRunID)
 		}
 		if replayedThread.ConversationID != thread.ConversationID {
 			t.Fatalf("thread %s conversation: expected %s, got %s", threadID, thread.ConversationID, replayedThread.ConversationID)
@@ -161,7 +161,7 @@ func TestFileConversationPersistenceBranchReplay(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to load branch thread: %v", err)
 	}
-	if len(loaded) != 2 || loaded[0].MessageID != "msg-1" || loaded[1].MessageID != "msg-3" {
+	if len(loaded) != 2 || loaded[0].RunID != "msg-1" || loaded[1].RunID != "msg-3" {
 		t.Fatalf("expected branch thread [msg-1 msg-3], got %+v", digest(loaded))
 	}
 }
@@ -221,7 +221,7 @@ func TestFileConversationPersistenceMultipleConversations(t *testing.T) {
 		}
 		var got []string
 		for _, m := range loaded {
-			got = append(got, m.MessageID)
+			got = append(got, m.RunID)
 		}
 		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("thread %s: expected %v, got %v", threadID, want, got)
@@ -245,12 +245,12 @@ func TestFileConversationPersistenceSummaryReplay(t *testing.T) {
 	}
 
 	summary := Summary{
-		ID:                      "summary-1",
-		ThreadID:                "thread-1",
-		SummaryMessage:          newTestMessage(t, "system", "summary of msg-1"),
-		LastSummarizedMessageID: "msg-1",
-		CreatedAt:               time.Now(),
-		Meta:                    map[string]any{"is_summary": true},
+		ID:                  "summary-1",
+		ThreadID:            "thread-1",
+		SummaryMessage:      newTestMessage(t, "system", "summary of msg-1"),
+		LastSummarizedRunID: "msg-1",
+		CreatedAt:           time.Now(),
+		Meta:                map[string]any{"is_summary": true},
 	}
 	if err := p.SaveSummary(ctx, "ns", summary); err != nil {
 		t.Fatalf("failed to save summary: %v", err)
@@ -273,10 +273,10 @@ func TestFileConversationPersistenceSummaryReplay(t *testing.T) {
 	if len(loaded) != 3 {
 		t.Fatalf("expected summary + 2 messages, got %d: %+v", len(loaded), digest(loaded))
 	}
-	if loaded[0].MessageID != "summary-1" {
-		t.Fatalf("expected first message to be the summary, got %s", loaded[0].MessageID)
+	if loaded[0].RunID != "summary-1" {
+		t.Fatalf("expected first message to be the summary, got %s", loaded[0].RunID)
 	}
-	if loaded[1].MessageID != "msg-2" || loaded[2].MessageID != "msg-3" {
+	if loaded[1].RunID != "msg-2" || loaded[2].RunID != "msg-3" {
 		t.Fatalf("expected [msg-2 msg-3] after summary, got %+v", digest(loaded))
 	}
 }
@@ -301,7 +301,7 @@ func TestFileConversationPersistenceSkipsPartialTrailingLine(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to open conversation file: %v", err)
 	}
-	if _, err := f.WriteString(`{"type":"message","message":{"message_id":"msg-2","thread`); err != nil {
+	if _, err := f.WriteString(`{"type":"message","message":{"run_id":"msg-2","thread`); err != nil {
 		t.Fatalf("failed to write partial line: %v", err)
 	}
 	f.Close()
@@ -316,7 +316,7 @@ func TestFileConversationPersistenceSkipsPartialTrailingLine(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to load messages: %v", err)
 	}
-	if len(loaded) != 1 || loaded[0].MessageID != "msg-1" {
+	if len(loaded) != 1 || loaded[0].RunID != "msg-1" {
 		t.Fatalf("expected only msg-1 to survive, got %+v", digest(loaded))
 	}
 }

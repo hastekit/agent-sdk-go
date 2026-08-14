@@ -262,11 +262,11 @@ func (e *Agent) ToolExecutor() ToolExecutor {
 }
 
 type AgentInput struct {
-	Namespace         string          `json:"namespace"`
-	ThreadID          string          `json:"thread_id"`
-	PreviousMessageID string          `json:"previous_message_id"`
-	Message           history.Message `json:"messages"`
-	RunContext        map[string]any  `json:"run_context"`
+	Namespace     string          `json:"namespace"`
+	ThreadID      string          `json:"thread_id"`
+	PreviousRunID string          `json:"previous_run_id"`
+	Message       history.Message `json:"messages"`
+	RunContext    map[string]any  `json:"run_context"`
 
 	// StreamID is the broker channel used for streaming chunks and for
 	// stop signaling. The runtime and the agent loop use it to publish
@@ -373,7 +373,7 @@ func (e *Agent) ExecuteLocal(ctx context.Context, in *AgentInput) (*AgentOutput,
 		defer e.streamBroker.Close(context.Background(), in.StreamID)
 	}
 
-	run, err := history.NewRun(ctx, e.history, in.Namespace, in.ThreadID, in.PreviousMessageID, history.WithRunContext(in.RunContext))
+	run, err := history.NewRun(ctx, e.history, in.Namespace, in.ThreadID, in.PreviousRunID, history.WithRunContext(in.RunContext))
 	if err != nil {
 		return &AgentOutput{Status: agentstate.RunStatusError, RunID: ""}, err
 	}
@@ -381,7 +381,7 @@ func (e *Agent) ExecuteLocal(ctx context.Context, in *AgentInput) (*AgentOutput,
 	// Add the incoming message to the run
 	run.AddMessages(ctx, in.Message)
 
-	runId := run.GetMessageID()
+	runId := run.GetRunID()
 
 	if in.SessionID == "" {
 		in.SessionID = run.GetConversationID()
@@ -466,7 +466,7 @@ func (e *Agent) ExecuteWithRun(ctx context.Context, in *AgentInput, run *history
 	}
 
 	// Load run state from meta (in-memory, no DB call)
-	runId := run.GetMessageID()
+	runId := run.GetRunID()
 
 	// Get the prompt
 	instruction := "You are a helpful assistant."

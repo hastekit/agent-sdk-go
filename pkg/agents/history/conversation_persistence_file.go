@@ -37,26 +37,26 @@ type fileRecord struct {
 // branching save mints a new thread ID), so replay rebuilds the indexes
 // without re-running the branching logic.
 type fileMessageRecord struct {
-	MessageID         string         `json:"message_id"`
-	PreviousMessageID string         `json:"previous_message_id,omitempty"`
-	ThreadID          string         `json:"thread_id"`
-	ConversationID    string         `json:"conversation_id"`
-	Namespace         string         `json:"namespace,omitempty"`
-	Messages          []Message      `json:"messages"`
-	Meta              map[string]any `json:"meta,omitempty"`
-	CreatedAt         time.Time      `json:"created_at"`
+	RunID          string         `json:"run_id"`
+	PreviousRunID  string         `json:"previous_run_id,omitempty"`
+	ThreadID       string         `json:"thread_id"`
+	ConversationID string         `json:"conversation_id"`
+	Namespace      string         `json:"namespace,omitempty"`
+	Messages       []Message      `json:"messages"`
+	Meta           map[string]any `json:"meta,omitempty"`
+	CreatedAt      time.Time      `json:"created_at"`
 }
 
 // fileSummaryRecord is a summary line. The latest record per thread wins on
 // replay, matching the in-memory adapter.
 type fileSummaryRecord struct {
-	ID                      string         `json:"id"`
-	ThreadID                string         `json:"thread_id"`
-	Namespace               string         `json:"namespace,omitempty"`
-	SummaryMessage          Message        `json:"summary_message"`
-	LastSummarizedMessageID string         `json:"last_summarized_message_id"`
-	CreatedAt               time.Time      `json:"created_at"`
-	Meta                    map[string]any `json:"meta,omitempty"`
+	ID                  string         `json:"id"`
+	ThreadID            string         `json:"thread_id"`
+	Namespace           string         `json:"namespace,omitempty"`
+	SummaryMessage      Message        `json:"summary_message"`
+	LastSummarizedRunID string         `json:"last_summarized_run_id"`
+	CreatedAt           time.Time      `json:"created_at"`
+	Meta                map[string]any `json:"meta,omitempty"`
 }
 
 // FileConversationPersistence is a ConversationPersistenceAdapter that keeps
@@ -103,23 +103,23 @@ func (p *FileConversationPersistence) NewRunID(ctx context.Context) string {
 	return p.mem.NewRunID(ctx)
 }
 
-// LoadMessages retrieves all messages up to and including the previousMessageID
-func (p *FileConversationPersistence) LoadMessages(ctx context.Context, namespace string, threadID string, previousMessageId string) ([]ConversationMessage, error) {
+// LoadMessages retrieves all messages up to and including the previousRunID
+func (p *FileConversationPersistence) LoadMessages(ctx context.Context, namespace string, threadID string, previousRunId string) ([]ConversationMessage, error) {
 	ctx, span := tracer.Start(ctx, "FileConversationPersistence.LoadMessages")
 	defer span.End()
 
-	return p.mem.LoadMessages(ctx, namespace, threadID, previousMessageId)
+	return p.mem.LoadMessages(ctx, namespace, threadID, previousRunId)
 }
 
 // SaveMessages saves messages in memory and appends them to the
 // conversation's JSONL file
-func (p *FileConversationPersistence) SaveMessages(ctx context.Context, namespace, msgId, previousMsgId, threadId, conversationId string, messages []Message, meta map[string]any) error {
+func (p *FileConversationPersistence) SaveMessages(ctx context.Context, namespace, runId, previousRunId, threadId, conversationId string, messages []Message, meta map[string]any) error {
 	ctx, span := tracer.Start(ctx, "FileConversationPersistence.SaveMessages")
 	defer span.End()
 
 	span.SetAttributes(
 		attribute.String("namespace", namespace),
-		attribute.String("previous_message_id", previousMsgId),
+		attribute.String("previous_run_id", previousRunId),
 		attribute.String("thread_id", threadId),
 		attribute.String("conversation_id", conversationId),
 		attribute.Int("messages_count", len(messages)),
@@ -128,16 +128,16 @@ func (p *FileConversationPersistence) SaveMessages(ctx context.Context, namespac
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	if err := p.mem.SaveMessages(ctx, namespace, msgId, previousMsgId, threadId, conversationId, messages, meta); err != nil {
+	if err := p.mem.SaveMessages(ctx, namespace, runId, previousRunId, threadId, conversationId, messages, meta); err != nil {
 		return err
 	}
 
 	// Read back the stored message: branching resolves the thread and
 	// conversation IDs at save time, and the record must carry the
 	// resolved values for replay to reconstruct the same state.
-	stored := p.mem.getMessage(msgId)
+	stored := p.mem.getMessage(runId)
 	if stored == nil {
-		return fmt.Errorf("message %s missing after save", msgId)
+		return fmt.Errorf("run %s missing after save", runId)
 	}
 
 	f, err := p.fileFor(stored.ConversationID)
@@ -148,13 +148,13 @@ func (p *FileConversationPersistence) SaveMessages(ctx context.Context, namespac
 	return appendRecord(f, fileRecord{
 		Type: recordTypeMessage,
 		Message: &fileMessageRecord{
-			MessageID:         stored.MessageID,
-			PreviousMessageID: stored.PreviousMessageID,
-			ThreadID:          stored.ThreadID,
-			ConversationID:    stored.ConversationID,
-			Namespace:         stored.Namespace,
+			RunID:          stored.RunID,
+			PreviousRunID:  stored.PreviousRunID,
+			ThreadID:       stored.ThreadID,
+			ConversationID: stored.ConversationID,
+			Namespace:      stored.Namespace,
 			// Persist this save's increment, not the in-memory readback:
-			// a run saved more than once under the same msgId merges its
+			// a run saved more than once under the same run id merges its
 			// increments in memory (see InMemory.SaveMessages), so the
 			// readback already holds prior saves. Writing it would double
 			// them on replay. Each record carries only its own increment;
@@ -195,13 +195,13 @@ func (p *FileConversationPersistence) SaveSummary(ctx context.Context, namespace
 	return appendRecord(f, fileRecord{
 		Type: recordTypeSummary,
 		Summary: &fileSummaryRecord{
-			ID:                      summary.ID,
-			ThreadID:                summary.ThreadID,
-			Namespace:               namespace,
-			SummaryMessage:          summary.SummaryMessage,
-			LastSummarizedMessageID: summary.LastSummarizedMessageID,
-			CreatedAt:               summary.CreatedAt,
-			Meta:                    summary.Meta,
+			ID:                  summary.ID,
+			ThreadID:            summary.ThreadID,
+			Namespace:           namespace,
+			SummaryMessage:      summary.SummaryMessage,
+			LastSummarizedRunID: summary.LastSummarizedRunID,
+			CreatedAt:           summary.CreatedAt,
+			Meta:                summary.Meta,
 		},
 	})
 }
@@ -288,13 +288,13 @@ func (p *FileConversationPersistence) applyRecord(rec *fileRecord) error {
 			return fmt.Errorf("summary record has no summary body")
 		}
 		p.mem.summaries[rec.Summary.ThreadID] = &inMemorySummary{
-			ID:                      rec.Summary.ID,
-			ThreadID:                rec.Summary.ThreadID,
-			Namespace:               rec.Summary.Namespace,
-			SummaryMessage:          rec.Summary.SummaryMessage,
-			LastSummarizedMessageID: rec.Summary.LastSummarizedMessageID,
-			CreatedAt:               rec.Summary.CreatedAt,
-			Meta:                    rec.Summary.Meta,
+			ID:                  rec.Summary.ID,
+			ThreadID:            rec.Summary.ThreadID,
+			Namespace:           rec.Summary.Namespace,
+			SummaryMessage:      rec.Summary.SummaryMessage,
+			LastSummarizedRunID: rec.Summary.LastSummarizedRunID,
+			CreatedAt:           rec.Summary.CreatedAt,
+			Meta:                rec.Summary.Meta,
 		}
 	default:
 		return fmt.Errorf("unknown record type %q", rec.Type)
@@ -310,17 +310,17 @@ func (p *FileConversationPersistence) applyMessageRecord(rec *fileMessageRecord)
 	m := p.mem
 
 	// Incremental save replayed: a run saved more than once under the
-	// same msgId writes one record per increment. Append to the existing
+	// same run id writes one record per increment. Append to the existing
 	// run record rather than overwriting it (which would drop the
 	// earlier increments) and don't re-index it in the thread — mirrors
 	// InMemory.SaveMessages' merge so replay reconstructs the same state.
-	if existing, ok := m.messages[rec.MessageID]; ok {
+	if existing, ok := m.messages[rec.RunID]; ok {
 		existing.Messages = append(existing.Messages, rec.Messages...)
 		if rec.Meta != nil {
 			existing.Meta = rec.Meta
 		}
 		if t := m.threads[existing.ThreadID]; t != nil {
-			t.LastMessageID = rec.MessageID
+			t.LastRunID = rec.RunID
 		}
 		return
 	}
@@ -328,11 +328,11 @@ func (p *FileConversationPersistence) applyMessageRecord(rec *fileMessageRecord)
 	thread, exists := m.threads[rec.ThreadID]
 	if !exists {
 		var prefix []string
-		if rec.PreviousMessageID != "" {
-			if prev, ok := m.messages[rec.PreviousMessageID]; ok && prev.ThreadID != rec.ThreadID {
+		if rec.PreviousRunID != "" {
+			if prev, ok := m.messages[rec.PreviousRunID]; ok && prev.ThreadID != rec.ThreadID {
 				for _, id := range m.messagesByThread[prev.ThreadID] {
 					prefix = append(prefix, id)
-					if id == rec.PreviousMessageID {
+					if id == rec.PreviousRunID {
 						break
 					}
 				}
@@ -340,28 +340,28 @@ func (p *FileConversationPersistence) applyMessageRecord(rec *fileMessageRecord)
 		}
 
 		thread = &inMemoryThread{
-			ThreadID:        rec.ThreadID,
-			ConversationID:  rec.ConversationID,
-			OriginMessageID: rec.MessageID,
-			Namespace:       rec.Namespace,
-			CreatedAt:       rec.CreatedAt,
+			ThreadID:       rec.ThreadID,
+			ConversationID: rec.ConversationID,
+			OriginRunID:    rec.RunID,
+			Namespace:      rec.Namespace,
+			CreatedAt:      rec.CreatedAt,
 		}
 		m.threads[rec.ThreadID] = thread
 		m.messagesByThread[rec.ThreadID] = prefix
 	}
-	thread.LastMessageID = rec.MessageID
+	thread.LastRunID = rec.RunID
 
-	m.messages[rec.MessageID] = &inMemoryMessage{
-		MessageID:         rec.MessageID,
-		PreviousMessageID: rec.PreviousMessageID,
-		ThreadID:          rec.ThreadID,
-		ConversationID:    rec.ConversationID,
-		Namespace:         rec.Namespace,
-		Messages:          rec.Messages,
-		Meta:              rec.Meta,
-		CreatedAt:         rec.CreatedAt,
+	m.messages[rec.RunID] = &inMemoryMessage{
+		RunID:          rec.RunID,
+		PreviousRunID:  rec.PreviousRunID,
+		ThreadID:       rec.ThreadID,
+		ConversationID: rec.ConversationID,
+		Namespace:      rec.Namespace,
+		Messages:       rec.Messages,
+		Meta:           rec.Meta,
+		CreatedAt:      rec.CreatedAt,
 	}
-	m.messagesByThread[rec.ThreadID] = append(m.messagesByThread[rec.ThreadID], rec.MessageID)
+	m.messagesByThread[rec.ThreadID] = append(m.messagesByThread[rec.ThreadID], rec.RunID)
 }
 
 // replayLines invokes apply for each non-empty line of the file. A

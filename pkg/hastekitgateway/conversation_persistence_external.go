@@ -62,14 +62,14 @@ func (p *ExternalConversationPersistence) NewRunID(ctx context.Context) string {
 }
 
 // LoadMessages implements core.ChatHistory
-func (p *ExternalConversationPersistence) LoadMessages(ctx context.Context, namespace string, threadId string, previousMessageId string) ([]history.ConversationMessage, error) {
+func (p *ExternalConversationPersistence) LoadMessages(ctx context.Context, namespace string, threadId string, previousRunId string) ([]history.ConversationMessage, error) {
 	ctx, span := tracer.Start(ctx, "ExternalConversationPersistence.LoadMessages")
 	defer span.End()
 
 	span.SetAttributes(
 		attribute.String("namespace", namespace),
 		attribute.String("thread_id", threadId),
-		attribute.String("previous_message_id", previousMessageId),
+		attribute.String("previous_run_id", previousRunId),
 	)
 
 	// If no previous message ID, return empty list
@@ -77,7 +77,7 @@ func (p *ExternalConversationPersistence) LoadMessages(ctx context.Context, name
 		return []history.ConversationMessage{}, nil
 	}
 
-	url := fmt.Sprintf("%s/messages/summary?namespace=%s&thread_id=%s&previous_message_id=%s", projectBasePath(p.Endpoint, p.orgName, p.projectName), namespace, threadId, previousMessageId)
+	url := fmt.Sprintf("%s/messages/summary?namespace=%s&thread_id=%s&previous_run_id=%s", projectBasePath(p.Endpoint, p.orgName, p.projectName), namespace, threadId, previousRunId)
 
 	resp, err := p.httpClient.Get(url)
 	if err != nil {
@@ -103,7 +103,7 @@ func (p *ExternalConversationPersistence) LoadMessages(ctx context.Context, name
 // question — it substitutes a summary for the turns the summary covers, which
 // is what keeps a long thread inside the context window and what would make a
 // chat UI lose its own early turns. Note that endpoint fills an empty
-// previous_message_id with the thread's last message, so asking it for "the
+// previous_run_id with the thread's last run, so asking it for "the
 // whole thread" is exactly when the substitution kicks in.
 func (p *ExternalConversationPersistence) LoadTranscript(ctx context.Context, namespace, threadID string) ([]history.ConversationMessage, error) {
 	ctx, span := tracer.Start(ctx, "ExternalConversationPersistence.LoadTranscript")
@@ -139,25 +139,25 @@ func (p *ExternalConversationPersistence) LoadTranscript(ctx context.Context, na
 }
 
 type AddMessageRequest struct {
-	ProjectID         uuid.UUID         `json:"project_id"`
-	Namespace         string            `json:"namespace"`
-	MessageID         string            `json:"message_id"`
-	ThreadID          string            `json:"thread_id"`
-	PreviousMessageID string            `json:"previous_message_id"`
-	Messages          []history.Message `json:"messages"`
-	Meta              map[string]any    `json:"meta"`
-	ConversationID    string            `json:"conversation_id"`
+	ProjectID      uuid.UUID         `json:"project_id"`
+	Namespace      string            `json:"namespace"`
+	RunID          string            `json:"run_id"`
+	ThreadID       string            `json:"thread_id"`
+	PreviousRunID  string            `json:"previous_run_id"`
+	Messages       []history.Message `json:"messages"`
+	Meta           map[string]any    `json:"meta"`
+	ConversationID string            `json:"conversation_id"`
 }
 
 // SaveMessages implements core.ChatHistory
-func (p *ExternalConversationPersistence) SaveMessages(ctx context.Context, namespace, msgId, previousMsgId, threadId string, conversationId string, messages []history.Message, meta map[string]any) error {
+func (p *ExternalConversationPersistence) SaveMessages(ctx context.Context, namespace, runId, previousRunId, threadId string, conversationId string, messages []history.Message, meta map[string]any) error {
 	ctx, span := tracer.Start(ctx, "ExternalConversationPersistence.SaveMessages")
 	defer span.End()
 
 	span.SetAttributes(
 		attribute.String("namespace", namespace),
 		attribute.String("thread_id", threadId),
-		attribute.String("previous_message_id", previousMsgId),
+		attribute.String("previous_run_id", previousRunId),
 		attribute.String("conversation_id", conversationId),
 		attribute.Int("messages_count", len(messages)),
 	)
@@ -166,13 +166,13 @@ func (p *ExternalConversationPersistence) SaveMessages(ctx context.Context, name
 	url := fmt.Sprintf("%s/messages", projectBasePath(p.Endpoint, p.orgName, p.projectName))
 
 	payload := AddMessageRequest{
-		Namespace:         namespace,
-		MessageID:         msgId,
-		ThreadID:          threadId,
-		PreviousMessageID: previousMsgId,
-		Messages:          messages,
-		Meta:              meta,
-		ConversationID:    conversationId,
+		Namespace:      namespace,
+		RunID:          runId,
+		ThreadID:       threadId,
+		PreviousRunID:  previousRunId,
+		Messages:       messages,
+		Meta:           meta,
+		ConversationID: conversationId,
 	}
 
 	payloadBytes, err := sonic.Marshal(payload)

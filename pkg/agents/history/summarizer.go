@@ -9,10 +9,10 @@ import (
 
 // SummaryResult contains the result of summarization including metadata needed for saving
 type SummaryResult struct {
-	Summary                 *messages.Message // The summary message
-	MessagesToKeep          []messages.Message
-	LastSummarizedMessageID string // ID of the last message that was summarized
-	SummaryID               string // Unique ID for the summary (generated if empty)
+	Summary             *messages.Message // The summary message
+	MessagesToKeep      []messages.Message
+	LastSummarizedRunID string // ID of the last run that was summarized
+	SummaryID           string // Unique ID for the summary (generated if empty)
 
 	// Usage reports what producing this summary cost, for summarizers that
 	// call a model to do it. The run manager bills it to the run without

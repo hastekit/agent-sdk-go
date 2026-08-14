@@ -64,7 +64,7 @@ func (p *InMemoryConversationPersistence) LoadTranscript(ctx context.Context, na
 			continue
 		}
 		result = append(result, ConversationMessage{
-			MessageID:      m.MessageID,
+			RunID:          m.RunID,
 			ThreadID:       m.ThreadID,
 			ConversationID: m.ConversationID,
 			Messages:       m.Messages,

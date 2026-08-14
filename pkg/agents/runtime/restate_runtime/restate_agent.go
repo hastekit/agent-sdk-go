@@ -43,12 +43,12 @@ func (w *AgentWorkflow) Run(restateCtx restate.WorkflowContext, input *WorkflowI
 	// chunks itself using StreamID. The caller's Execute owns the broker
 	// stream's lifecycle (subscribe + close), so we don't close here.
 	return agent.ExecuteWithoutTrace(restateCtx, &agents.AgentInput{
-		Namespace:         input.Namespace,
-		ThreadID:          input.ThreadID,
-		PreviousMessageID: input.PreviousMessageID,
-		Message:           input.Message,
-		RunContext:        input.RunContext,
-		StreamID:          streamID,
+		Namespace:     input.Namespace,
+		ThreadID:      input.ThreadID,
+		PreviousRunID: input.PreviousRunID,
+		Message:       input.Message,
+		RunContext:    input.RunContext,
+		StreamID:      streamID,
 	})
 }
 

@@ -19,7 +19,7 @@ var (
 
 // ConversationMessage represents a turn within a thread.
 type ConversationMessage struct {
-	MessageID      string         `json:"message_id" db:"message_id"`
+	RunID          string         `json:"run_id" db:"run_id"`
 	ThreadID       string         `json:"thread_id" db:"thread_id"`
 	ConversationID string         `json:"conversation_id" db:"conversation_id"`
 	Messages       []Message      `json:"messages" db:"messages"`
@@ -31,19 +31,19 @@ type Message = messages.Message
 
 // Summary represents a conversation summary stored in the summaries table
 type Summary struct {
-	ID                      string         `json:"id" db:"id"`
-	ThreadID                string         `json:"thread_id" db:"thread_id"`
-	SummaryMessage          Message        `json:"summary_message" db:"summary_message"`
-	LastSummarizedMessageID string         `json:"last_summarized_message_id" db:"last_summarized_message_id"`
-	CreatedAt               time.Time      `json:"created_at" db:"created_at"`
-	Meta                    map[string]any `json:"meta" db:"meta"`
+	ID                  string         `json:"id" db:"id"`
+	ThreadID            string         `json:"thread_id" db:"thread_id"`
+	SummaryMessage      Message        `json:"summary_message" db:"summary_message"`
+	LastSummarizedRunID string         `json:"last_summarized_run_id" db:"last_summarized_run_id"`
+	CreatedAt           time.Time      `json:"created_at" db:"created_at"`
+	Meta                map[string]any `json:"meta" db:"meta"`
 }
 
 type ConversationPersistenceAdapter interface {
 	NewConversationID(ctx context.Context) string
 	NewRunID(ctx context.Context) string
-	LoadMessages(ctx context.Context, namespace string, threadID string, previousMessageID string) ([]ConversationMessage, error)
-	SaveMessages(ctx context.Context, namespace, msgId, previousMsgId, threadID string, conversationId string, messages []Message, meta map[string]any) error
+	LoadMessages(ctx context.Context, namespace string, threadID string, previousRunID string) ([]ConversationMessage, error)
+	SaveMessages(ctx context.Context, namespace, runId, previousRunId, threadID string, conversationId string, messages []Message, meta map[string]any) error
 	SaveSummary(ctx context.Context, namespace string, summary Summary) error
 }
 
@@ -122,8 +122,8 @@ type ConversationRunManager struct {
 
 	namespace      string
 	conversationId string
-	msgId          string
-	previousMsgId  string
+	runId          string
+	previousRunId  string
 	msgIdToRunId   map[string]string
 	threadId       string
 
@@ -155,7 +155,7 @@ type ConversationRunManager struct {
 	steeredIDs map[string]struct{}
 }
 
-func NewRun(ctx context.Context, cm *CommonConversationManager, namespace string, threadID string, previousMessageID string, options ...RunOption) (*ConversationRunManager, error) {
+func NewRun(ctx context.Context, cm *CommonConversationManager, namespace string, threadID string, previousRunID string, options ...RunOption) (*ConversationRunManager, error) {
 	cr := &ConversationRunManager{
 		ConversationPersistenceAdapter: cm.ConversationPersistenceAdapter,
 		summarizer:                     cm.Summarizer,
@@ -167,7 +167,7 @@ func NewRun(ctx context.Context, cm *CommonConversationManager, namespace string
 	}
 
 	// Load messages
-	err := cr.LoadMessages(ctx, namespace, threadID, previousMessageID)
+	err := cr.LoadMessages(ctx, namespace, threadID, previousRunID)
 	if err != nil {
 		return nil, err
 	}
@@ -210,11 +210,11 @@ func NewRun(ctx context.Context, cm *CommonConversationManager, namespace string
 		cr.RunState.PendingContextTokens = pendingContextTokens
 	} else {
 		// Continuing the previous run
-		runID = cr.previousMsgId
+		runID = cr.previousRunId
 	}
 
 	// Store the run id
-	cr.msgId = runID
+	cr.runId = runID
 
 	// Run the options
 	for _, o := range options {
@@ -366,10 +366,10 @@ func (cm *ConversationRunManager) summarize(ctx context.Context) error {
 	// those is guaranteed by an interface a caller can implement, so refuse the
 	// claim rather than rely on both holding. Clearing it leaves the summary row
 	// saved but inert on reload.
-	if result.LastSummarizedMessageID == cm.msgId {
+	if result.LastSummarizedRunID == cm.runId {
 		slog.WarnContext(ctx, "summarizer covered the in-flight run; not persisting the summary boundary",
-			"run_id", cm.msgId)
-		result.LastSummarizedMessageID = ""
+			"run_id", cm.runId)
+		result.LastSummarizedRunID = ""
 	}
 
 	cm.summaries = result
@@ -432,10 +432,10 @@ func (cm *ConversationRunManager) trackRun(m Message) {
 	if cm.msgIdToRunId == nil {
 		cm.msgIdToRunId = map[string]string{}
 	}
-	cm.msgIdToRunId[m.ID] = cm.msgId
+	cm.msgIdToRunId[m.ID] = cm.runId
 }
 
-func (cm *ConversationRunManager) LoadMessages(ctx context.Context, namespace string, threadID string, previousMessageID string) error {
+func (cm *ConversationRunManager) LoadMessages(ctx context.Context, namespace string, threadID string, previousRunID string) error {
 	cm.threadId = threadID
 
 	if cm.ConversationPersistenceAdapter == nil {
@@ -447,7 +447,7 @@ func (cm *ConversationRunManager) LoadMessages(ctx context.Context, namespace st
 		return nil
 	}
 
-	convMessages, err := cm.ConversationPersistenceAdapter.LoadMessages(ctx, namespace, threadID, previousMessageID)
+	convMessages, err := cm.ConversationPersistenceAdapter.LoadMessages(ctx, namespace, threadID, previousRunID)
 	if err != nil {
 		return err
 	}
@@ -455,11 +455,11 @@ func (cm *ConversationRunManager) LoadMessages(ctx context.Context, namespace st
 	oldMessages := []Message{}
 	for _, msg := range convMessages {
 		for _, bundle := range msg.Messages {
-			cm.msgIdToRunId[bundle.ID] = msg.MessageID
+			cm.msgIdToRunId[bundle.ID] = msg.RunID
 		}
 		cm.threadId = msg.ThreadID
 		cm.conversationId = msg.ConversationID
-		cm.previousMsgId = msg.MessageID
+		cm.previousRunId = msg.RunID
 
 		oldMessages = append(oldMessages, msg.Messages...)
 
@@ -490,8 +490,8 @@ func (cm *ConversationRunManager) GetMeta() map[string]any {
 }
 
 // GetMessageID returns the current run id
-func (cm *ConversationRunManager) GetMessageID() string {
-	return cm.msgId
+func (cm *ConversationRunManager) GetRunID() string {
+	return cm.runId
 }
 
 // GetConversationID GetOrCreateConversationID returns the conversation ID, if it doesn't exist it will create one
@@ -515,10 +515,10 @@ func (cm *ConversationRunManager) SaveMessages(ctx context.Context) error {
 
 	if cm.summaries != nil {
 		sum := Summary{
-			ID:                      cm.summaries.SummaryID,
-			ThreadID:                cm.threadId,
-			LastSummarizedMessageID: cm.summaries.LastSummarizedMessageID,
-			CreatedAt:               time.Now(),
+			ID:                  cm.summaries.SummaryID,
+			ThreadID:            cm.threadId,
+			LastSummarizedRunID: cm.summaries.LastSummarizedRunID,
+			CreatedAt:           time.Now(),
 			Meta: map[string]any{
 				"is_summary": true,
 			},
@@ -539,7 +539,7 @@ func (cm *ConversationRunManager) SaveMessages(ctx context.Context) error {
 	}
 
 	if cm.ConversationPersistenceAdapter != nil {
-		err := cm.ConversationPersistenceAdapter.SaveMessages(ctx, cm.namespace, cm.msgId, cm.previousMsgId, cm.threadId, cm.conversationId, cm.newMessages, meta)
+		err := cm.ConversationPersistenceAdapter.SaveMessages(ctx, cm.namespace, cm.runId, cm.previousRunId, cm.threadId, cm.conversationId, cm.newMessages, meta)
 		if err != nil {
 			return err
 		}
@@ -547,8 +547,8 @@ func (cm *ConversationRunManager) SaveMessages(ctx context.Context) error {
 
 	runState := agentstate.LoadRunStateFromMeta(meta)
 	if runState.IsComplete() {
-		cm.previousMsgId = cm.msgId
-		cm.msgId = uuid.NewString()
+		cm.previousRunId = cm.runId
+		cm.runId = uuid.NewString()
 	}
 
 	cm.lastMessageMeta = meta

@@ -17,11 +17,11 @@ import (
 type WorkflowInput struct {
 	AgentName string `json:"agent_name"`
 
-	Namespace         string
-	ThreadID          string
-	PreviousMessageID string
-	Message           history.Message
-	RunContext        map[string]any
+	Namespace     string
+	ThreadID      string
+	PreviousRunID string
+	Message       history.Message
+	RunContext    map[string]any
 
 	// StreamID is the broker channel used for streaming chunks and for
 	// stop signaling. The runtime sets it equal to the Restate workflow
@@ -65,7 +65,7 @@ func (r *RestateRuntime) Run(ctx context.Context, agent *agents.Agent, in *agent
 		AgentName:         agent.Name,
 		Namespace:         in.Namespace,
 		ThreadID:          in.ThreadID,
-		PreviousMessageID: in.PreviousMessageID,
+		PreviousRunID:     in.PreviousRunID,
 		Message:           in.Message,
 		RunContext:        in.RunContext,
 		StreamID:          streamID,

@@ -50,6 +50,15 @@ func (a *Accumulator) ReadStream(ctx context.Context, stream chan *responses.Res
 		select {
 		case chunk, open = <-stream:
 			if !open {
+				// A provider that honours cancellation closes its stream, so
+				// the end of the channel is ambiguous: it means either the
+				// model finished or the stop reached it first. The context is
+				// what tells them apart — without this check the outcome would
+				// depend on which of the two raced ahead, and a stopped run
+				// would sometimes be recorded as a complete answer.
+				if ctx.Err() != nil {
+					return nil, ErrModelCallStopped
+				}
 				return &responses.Response{Output: finalOutput, Usage: usage}, nil
 			}
 		case <-ctx.Done():

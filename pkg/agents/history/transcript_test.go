@@ -21,12 +21,12 @@ func summarizedThread(t *testing.T) *InMemoryConversationPersistence {
 			[]Message{newTestMessage(t, "alice", ids[0])}, nil))
 	}
 	require.NoError(t, p.SaveSummary(ctx, "ns", Summary{
-		ID:                      "summary-1",
-		ThreadID:                "thread-1",
-		SummaryMessage:          newTestMessage(t, "system", "summary of msg-1"),
-		LastSummarizedMessageID: "msg-1",
-		CreatedAt:               time.Now(),
-		Meta:                    map[string]any{"is_summary": true},
+		ID:                  "summary-1",
+		ThreadID:            "thread-1",
+		SummaryMessage:      newTestMessage(t, "system", "summary of msg-1"),
+		LastSummarizedRunID: "msg-1",
+		CreatedAt:           time.Now(),
+		Meta:                map[string]any{"is_summary": true},
 	}))
 	return p
 }
@@ -34,7 +34,7 @@ func summarizedThread(t *testing.T) *InMemoryConversationPersistence {
 func messageIDs(rows []ConversationMessage) []string {
 	ids := make([]string, 0, len(rows))
 	for _, r := range rows {
-		ids = append(ids, r.MessageID)
+		ids = append(ids, r.RunID)
 	}
 	return ids
 }
@@ -84,12 +84,12 @@ func (a summaryOnlyAdapter) NewRunID(ctx context.Context) string {
 	return a.inner.NewRunID(ctx)
 }
 
-func (a summaryOnlyAdapter) LoadMessages(ctx context.Context, namespace, threadID, previousMessageID string) ([]ConversationMessage, error) {
-	return a.inner.LoadMessages(ctx, namespace, threadID, previousMessageID)
+func (a summaryOnlyAdapter) LoadMessages(ctx context.Context, namespace, threadID, previousRunID string) ([]ConversationMessage, error) {
+	return a.inner.LoadMessages(ctx, namespace, threadID, previousRunID)
 }
 
-func (a summaryOnlyAdapter) SaveMessages(ctx context.Context, namespace, msgID, previousMsgID, threadID, conversationID string, msgs []Message, meta map[string]any) error {
-	return a.inner.SaveMessages(ctx, namespace, msgID, previousMsgID, threadID, conversationID, msgs, meta)
+func (a summaryOnlyAdapter) SaveMessages(ctx context.Context, namespace, runID, previousRunID, threadID, conversationID string, msgs []Message, meta map[string]any) error {
+	return a.inner.SaveMessages(ctx, namespace, runID, previousRunID, threadID, conversationID, msgs, meta)
 }
 
 func (a summaryOnlyAdapter) SaveSummary(ctx context.Context, namespace string, summary Summary) error {
