@@ -58,10 +58,20 @@ type BaseTool struct {
 	ToolUnion        responses.ToolUnion
 	RequiresApproval bool
 	Deferred         bool
+
+	// Annotations are the tool's self-reported behavioural hints (read-only,
+	// destructive, ...). Nil when the tool declared none. They ride along with
+	// the rest of BaseTool across a durable runtime's serialization boundary,
+	// so a policy on the far side sees the same hints the server sent.
+	Annotations *ToolAnnotations
 }
 
 func (t *BaseTool) NeedApproval() bool {
 	return t.RequiresApproval
+}
+
+func (t *BaseTool) GetAnnotations() *ToolAnnotations {
+	return t.Annotations
 }
 
 func (t *BaseTool) IsDeferred() bool {

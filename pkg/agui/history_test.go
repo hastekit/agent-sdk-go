@@ -19,8 +19,8 @@ import (
 
 func TestHistoryToMessages(t *testing.T) {
 	rows := []history.ConversationMessage{{
-		MessageID: "turn-1",
-		ThreadID:  "thread-1",
+		RunID:    "turn-1",
+		ThreadID: "thread-1",
 		Messages: []history.Message{
 			messages.New("user", []responses.InputMessageUnion{
 				responses.UserMessage("what's the weather?"),

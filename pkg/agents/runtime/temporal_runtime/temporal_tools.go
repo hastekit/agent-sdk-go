@@ -83,3 +83,7 @@ func (t *TemporalToolProxy) NeedApproval() bool {
 func (t *TemporalToolProxy) IsDeferred() bool {
 	return t.wrappedTool.IsDeferred()
 }
+
+func (t *TemporalToolProxy) GetAnnotations() *agents.ToolAnnotations {
+	return agents.AnnotationsOf(t.wrappedTool)
+}

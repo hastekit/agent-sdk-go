@@ -2,6 +2,7 @@ package agents
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
@@ -29,22 +30,23 @@ var (
 )
 
 type Agent struct {
-	Name          string
-	output        map[string]any
-	history       *history.CommonConversationManager
-	instruction   SystemPromptProvider
-	tools         []Tool
-	mcpServers    []MCPToolset
-	llm           LLM
-	parameters    responses.Parameters
-	runtime       Runtime
-	maxLoops      int
-	streamBroker  StreamBroker
-	handoffs      []*Handoff
-	toolExecutor  ToolExecutor
-	durableStep   DurableStep
-	stickyHandoff bool
-	singleTurn    bool
+	Name           string
+	output         map[string]any
+	history        *history.CommonConversationManager
+	instruction    SystemPromptProvider
+	tools          []Tool
+	mcpServers     []MCPToolset
+	llm            LLM
+	parameters     responses.Parameters
+	runtime        Runtime
+	maxLoops       int
+	streamBroker   StreamBroker
+	handoffs       []*Handoff
+	toolExecutor   ToolExecutor
+	durableStep    DurableStep
+	stickyHandoff  bool
+	singleTurn     bool
+	modelCallHooks []ModelCallHook
 }
 
 type AgentOptions struct {
@@ -64,6 +66,23 @@ type AgentOptions struct {
 	StreamBroker  StreamBroker
 	DurableStep   DurableStep
 	StickyHandoff bool
+
+	// Hooks observe or intercept what the agent does — see Hook. Each wraps
+	// both sides, with NoopToolCallHook or NoopModelCallHook standing in for
+	// the side it does not care about:
+	//
+	//   - the tool-call side wraps every tool the agent calls: its own function
+	//     tools, its sub-agent tools, and every MCP server's. Handoffs do not
+	//     pass through it, since transfer_to_agent calls out to nothing and the
+	//     target agent's own hooks govern what it then does.
+	//   - the model-call side wraps every call to the model, one per turn of
+	//     the tool loop. A budget check belongs here.
+	//
+	// Tool hooks are handed to the ToolExecutor, which runs them (see
+	// HookAwareToolExecutor); model hooks run in the loop, where the model is
+	// called. Under Temporal and Restate both of those sit inside the workflow,
+	// so a hook's methods become journaled steps either way.
+	Hooks []Hook
 
 	// SingleTurn ends the run as soon as the model has responded, before any
 	// tool is executed. The returned AgentOutput carries exactly what the model
@@ -122,45 +141,42 @@ func NewAgent(opts *AgentOptions) *Agent {
 		toolExecutor = aware.WithStreamBroker(streamBroker)
 	}
 
+	// Hand the executor the tool-call side, since running those around each
+	// call is its job. Only when the agent was given some: an executor built
+	// with hooks of its own keeps them rather than having them cleared.
+	if aware, ok := toolExecutor.(HookAwareToolExecutor); ok && len(opts.Hooks) > 0 {
+		toolExecutor = aware.WithToolCallHooks(ToolCallHooksOf(opts.Hooks))
+	}
+
 	return &Agent{
-		Name:          opts.Name,
-		output:        opts.Output,
-		history:       opts.History,
-		instruction:   opts.Instruction,
-		tools:         opts.Tools,
-		mcpServers:    opts.McpServers,
-		llm:           &WrappedLLM{opts.LLM},
-		parameters:    opts.Parameters,
-		runtime:       opts.Runtime,
-		maxLoops:      maxLoops,
-		handoffs:      opts.Handoffs,
-		toolExecutor:  toolExecutor,
-		streamBroker:  streamBroker,
-		durableStep:   durableStep,
-		stickyHandoff: opts.StickyHandoff,
-		singleTurn:    opts.SingleTurn,
+		Name:           opts.Name,
+		output:         opts.Output,
+		history:        opts.History,
+		instruction:    opts.Instruction,
+		tools:          opts.Tools,
+		mcpServers:     opts.McpServers,
+		llm:            &WrappedLLM{opts.LLM},
+		parameters:     opts.Parameters,
+		runtime:        opts.Runtime,
+		maxLoops:       maxLoops,
+		handoffs:       opts.Handoffs,
+		toolExecutor:   toolExecutor,
+		streamBroker:   streamBroker,
+		durableStep:    durableStep,
+		stickyHandoff:  opts.StickyHandoff,
+		singleTurn:     opts.SingleTurn,
+		modelCallHooks: ModelCallHooksOf(opts.Hooks),
 	}
 }
 
+// WithLLM returns a copy of the agent bound to a different LLM. It copies the
+// struct wholesale rather than listing fields: this used to enumerate them,
+// and a field added anywhere else was silently dropped here — the copy simply
+// lost it, with nothing to fail until the behaviour went missing at runtime.
 func (e *Agent) WithLLM(wrappedLLM LLM) *Agent {
-	return &Agent{
-		Name:          e.Name,
-		output:        e.output,
-		history:       e.history,
-		instruction:   e.instruction,
-		tools:         e.tools,
-		mcpServers:    e.mcpServers,
-		llm:           wrappedLLM,
-		parameters:    e.parameters,
-		runtime:       e.runtime,
-		maxLoops:      e.maxLoops,
-		streamBroker:  e.streamBroker,
-		handoffs:      e.handoffs,
-		toolExecutor:  e.toolExecutor,
-		durableStep:   e.durableStep,
-		stickyHandoff: e.stickyHandoff,
-		singleTurn:    e.singleTurn,
-	}
+	clone := *e
+	clone.llm = wrappedLLM
+	return &clone
 }
 
 func (e *Agent) PrepareMCPTools(ctx context.Context, runContext map[string]any) ([]Tool, error) {
@@ -238,12 +254,19 @@ func (e *Agent) StreamBroker() StreamBroker {
 	return e.streamBroker
 }
 
+// ToolExecutor returns the executor the agent runs tool calls through — the
+// one it was configured with, after the broker and the agent's tool call hooks
+// were injected into it.
+func (e *Agent) ToolExecutor() ToolExecutor {
+	return e.toolExecutor
+}
+
 type AgentInput struct {
-	Namespace         string          `json:"namespace"`
-	ThreadID          string          `json:"thread_id"`
-	PreviousMessageID string          `json:"previous_message_id"`
-	Message           history.Message `json:"messages"`
-	RunContext        map[string]any  `json:"run_context"`
+	Namespace     string          `json:"namespace"`
+	ThreadID      string          `json:"thread_id"`
+	PreviousRunID string          `json:"previous_run_id"`
+	Message       history.Message `json:"messages"`
+	RunContext    map[string]any  `json:"run_context"`
 
 	// StreamID is the broker channel used for streaming chunks and for
 	// stop signaling. The runtime and the agent loop use it to publish
@@ -350,7 +373,7 @@ func (e *Agent) ExecuteLocal(ctx context.Context, in *AgentInput) (*AgentOutput,
 		defer e.streamBroker.Close(context.Background(), in.StreamID)
 	}
 
-	run, err := history.NewRun(ctx, e.history, in.Namespace, in.ThreadID, in.PreviousMessageID, history.WithRunContext(in.RunContext))
+	run, err := history.NewRun(ctx, e.history, in.Namespace, in.ThreadID, in.PreviousRunID, history.WithRunContext(in.RunContext))
 	if err != nil {
 		return &AgentOutput{Status: agentstate.RunStatusError, RunID: ""}, err
 	}
@@ -358,7 +381,7 @@ func (e *Agent) ExecuteLocal(ctx context.Context, in *AgentInput) (*AgentOutput,
 	// Add the incoming message to the run
 	run.AddMessages(ctx, in.Message)
 
-	runId := run.GetMessageID()
+	runId := run.GetRunID()
 
 	if in.SessionID == "" {
 		in.SessionID = run.GetConversationID()
@@ -443,7 +466,7 @@ func (e *Agent) ExecuteWithRun(ctx context.Context, in *AgentInput, run *history
 	}
 
 	// Load run state from meta (in-memory, no DB call)
-	runId := run.GetMessageID()
+	runId := run.GetRunID()
 
 	// Get the prompt
 	instruction := "You are a helpful assistant."
@@ -603,14 +626,53 @@ func (e *Agent) ExecuteWithRun(ctx context.Context, in *AgentInput, run *history
 				}
 			}
 
-			resp, err := e.llm.NewStreamingResponses(ctx, &responses.Request{
+			request := &responses.Request{
 				Instructions: utils.Ptr(instruction),
 				Input: responses.InputUnion{
 					OfInputMessageList: convMessages,
 				},
 				Tools:      append(toolDefs, activatedDeferredToolsDef...),
 				Parameters: parameters,
-			}, publish)
+			}
+
+			// The hooks see what the call is and what the run has spent, not
+			// the prompt — see ModelCall. A hook that answers for the model
+			// (an exhausted budget, say) supplies the reply and the provider
+			// is never contacted.
+			resp, err := RunWithModelCallHooks(ctx, e.modelCallHooks, &ModelCall{
+				AgentName:     e.Name,
+				Namespace:     in.Namespace,
+				ThreadID:      in.ThreadID,
+				SessionID:     in.SessionID,
+				StreamID:      in.StreamID,
+				RunID:         runId,
+				RunContext:    in.RunContext,
+				Model:         request.Model,
+				LoopIteration: run.RunState.LoopIteration,
+				ContextTokens: run.ContextTokens(),
+				Usage:         run.RunState.Usage,
+			}, func(callCtx context.Context) (*responses.Response, error) {
+				// A stop lands mid-stream on the local runtime, where the
+				// provider's request is this process's to cancel. The durable
+				// runtimes cancel inside their own activity or step instead —
+				// from here they hold a proxy, and cancelling that would end
+				// the waiting rather than the work.
+				streamCtx, cancel := StopCancelContext(callCtx, StopWatcherFrom(e.streamBroker), in.StreamID)
+				defer cancel()
+				return e.llm.NewStreamingResponses(streamCtx, request, publish)
+			})
+			if errors.Is(err, ErrModelCallStopped) {
+				// Not a failure: the user stopped the run while the model was
+				// still talking. Go back to the top of the loop, where the stop
+				// check ends the run the same way it would have between
+				// iterations — one cancellation path, not two.
+				//
+				// Whatever the model had said by then is dropped. It reached
+				// the client as it streamed, but a stopped turn is recorded as
+				// cancelled rather than as a half-answer the model never
+				// finished and would be asked to continue from.
+				continue
+			}
 			if err != nil {
 				return &AgentOutput{Status: agentstate.RunStatusError, RunID: runId}, err
 			}

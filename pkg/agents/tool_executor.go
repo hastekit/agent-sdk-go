@@ -40,6 +40,22 @@ type ToolExecutor interface {
 	ExecuteAll(ctx context.Context, executions []ExecutableToolCall) []ToolExecutionResult
 }
 
+// HookAwareToolExecutor is an optional ToolExecutor capability: the executor
+// runs the agent's tool call hooks around each call. NewAgent injects the
+// hooks the agent was configured with.
+//
+// Running them here rather than in the loop is what makes them durable steps:
+// the Temporal and Restate executors run inside the workflow, so a hook they
+// invoke is journaled like any other step. An executor that doesn't implement
+// this simply runs no agent-level hooks.
+type HookAwareToolExecutor interface {
+	ToolExecutor
+
+	// WithToolCallHooks returns a copy bound to hooks, rather than mutating,
+	// so an executor shared between agents never runs another agent's hooks.
+	WithToolCallHooks(hooks []ToolCallHook) ToolExecutor
+}
+
 // BrokerAwareToolExecutor is an optional ToolExecutor capability: the
 // executor wants the run's broker, to watch the stop flag. NewAgent
 // injects the same broker the loop uses.
@@ -64,9 +80,28 @@ type DefaultToolExecutor struct {
 	// unwind before it is abandoned. Zero or less selects
 	// DefaultCancelGrace.
 	CancelGracePeriod time.Duration
+
+	// Hooks wrap every call this executor runs, whatever the tool's source —
+	// the agent's own function tools, its sub-agent tools, and every MCP
+	// server's. This is the only place tool call hooks run.
+	//
+	// Handoffs do not pass through them: transfer_to_agent is settled by the
+	// loop before anything reaches an executor, and the target agent's own
+	// hooks apply to what it then does.
+	Hooks []ToolCallHook
 }
 
-var _ BrokerAwareToolExecutor = (*DefaultToolExecutor)(nil)
+var (
+	_ BrokerAwareToolExecutor = (*DefaultToolExecutor)(nil)
+	_ HookAwareToolExecutor   = (*DefaultToolExecutor)(nil)
+)
+
+// WithToolCallHooks implements HookAwareToolExecutor.
+func (e *DefaultToolExecutor) WithToolCallHooks(hooks []ToolCallHook) ToolExecutor {
+	bound := *e
+	bound.Hooks = hooks
+	return &bound
+}
 
 // WithStreamBroker implements BrokerAwareToolExecutor. A watcher set by
 // the caller wins; injection only fills a gap.
@@ -95,9 +130,16 @@ func (e *DefaultToolExecutor) ExecuteAll(ctx context.Context, executions []Execu
 		reports[i] = report
 
 		go func(ex ExecutableToolCall) {
+			// The hooks run inside the stoppable unit, so a stop unwinds a hook
+			// that is hanging on a slow authorization service the same way it
+			// unwinds a hanging tool. They sit outside the tool's own span,
+			// which stays a measure of the tool.
 			resp, err := RunStoppableTool(ctx, e.StopWatcher, e.CancelGracePeriod, ex.ToolCall,
 				func(callCtx context.Context, params *ToolCall) (*ToolCallResponse, error) {
-					return ExecuteWithTrace(callCtx, ex.Tool, params, ex.Tool.Execute)
+					return RunWithToolCallHooks(callCtx, e.Hooks, params,
+						func(hookedCtx context.Context, p *ToolCall) (*ToolCallResponse, error) {
+							return ExecuteWithTrace(hookedCtx, ex.Tool, p, ex.Tool.Execute)
+						})
 				})
 			report <- ToolExecutionResult{
 				Response:  resp,

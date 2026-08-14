@@ -47,3 +47,7 @@ func (t *RestateTool) NeedApproval() bool {
 func (t *RestateTool) IsDeferred() bool {
 	return t.wrappedTool.IsDeferred()
 }
+
+func (t *RestateTool) GetAnnotations() *agents.ToolAnnotations {
+	return agents.AnnotationsOf(t.wrappedTool)
+}

@@ -39,6 +39,7 @@ func (t *RestateMCPServer) ListTools(ctx context.Context, runContext map[string]
 				ToolUnion:        *tool.Tool(ctx),
 				RequiresApproval: tool.NeedApproval(),
 				Deferred:         tool.IsDeferred(),
+				Annotations:      agents.AnnotationsOf(tool),
 			})
 		}
 

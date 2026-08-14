@@ -269,10 +269,10 @@ func (s *LLMHistorySummarizer) Summarize(ctx context.Context, msgIdToRunId map[s
 		// The sender stays empty on purpose: attributeMessages treats an empty
 		// SenderID as the running agent's own, so the summary is passed through
 		// as-is instead of being rewritten as "(Agent) … said:".
-		Summary:                 utils.Ptr(messages.New("", []responses.InputMessageUnion{summaryMessage})),
-		LastSummarizedMessageID: lastSummarizedMessageID,
-		SummaryID:               summaryID,
-		MessagesToKeep:          messagesToKeep,
+		Summary:             utils.Ptr(messages.New("", []responses.InputMessageUnion{summaryMessage})),
+		LastSummarizedRunID: lastSummarizedMessageID,
+		SummaryID:           summaryID,
+		MessagesToKeep:      messagesToKeep,
 		// Summarizing costs real tokens. Reporting them here is what keeps the
 		// run's usage total from silently excluding the work done to shrink it.
 		Usage: resp.Usage,

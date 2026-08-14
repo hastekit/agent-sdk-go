@@ -17,6 +17,31 @@ type McpTool struct {
 	Meta    mcp.Meta           `json:"-"`
 }
 
+// toolAnnotations converts a server's tool annotations into the SDK's own
+// shape, so MCP tools and locally defined function tools present identical
+// hints to a permission policy.
+//
+// The MCP wire types carry readOnlyHint and idempotentHint as bare bools, so
+// an absent hint is already false by the time we see it — which is the
+// spec's default for both, and is what we forward. destructiveHint and
+// openWorldHint arrive as pointers and stay unset when the server said
+// nothing, leaving the conservative defaults (destructive, open world) to the
+// Is* helpers.
+func toolAnnotations(t *mcp.Tool) *agents.ToolAnnotations {
+	if t == nil || t.Annotations == nil {
+		return nil
+	}
+
+	a := t.Annotations
+	return &agents.ToolAnnotations{
+		Title:           a.Title,
+		ReadOnlyHint:    utils.Ptr(a.ReadOnlyHint),
+		DestructiveHint: a.DestructiveHint,
+		IdempotentHint:  utils.Ptr(a.IdempotentHint),
+		OpenWorldHint:   a.OpenWorldHint,
+	}
+}
+
 func NewMcpTool(t *mcp.Tool, session *mcp.ClientSession, Meta mcp.Meta, requiresApproval bool, deferred bool) *McpTool {
 	inputSchema := map[string]any{
 		"type":       "object",
@@ -31,6 +56,7 @@ func NewMcpTool(t *mcp.Tool, session *mcp.ClientSession, Meta mcp.Meta, requires
 		BaseTool: &agents.BaseTool{
 			RequiresApproval: requiresApproval,
 			Deferred:         deferred,
+			Annotations:      toolAnnotations(t),
 			ToolUnion: responses.ToolUnion{
 				OfFunction: &responses.FunctionTool{
 					Name:        t.Name,
@@ -138,6 +164,7 @@ func NewLazyMcpTool(t *mcp.Tool, endpoint, transportType string, resolvedHeaders
 		BaseTool: &agents.BaseTool{
 			RequiresApproval: requiresApproval,
 			Deferred:         deferred,
+			Annotations:      toolAnnotations(t),
 			ToolUnion: responses.ToolUnion{
 				OfFunction: &responses.FunctionTool{
 					Name:        t.Name,

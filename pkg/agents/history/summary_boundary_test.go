@@ -44,9 +44,9 @@ func TestSlidingWindowZeroKeepCountKeepsTheCurrentRun(t *testing.T) {
 	if len(result.MessagesToKeep) != 1 || result.MessagesToKeep[0].ID != current.ID {
 		t.Fatalf("MessagesToKeep = %+v, want just the current run", result.MessagesToKeep)
 	}
-	if result.LastSummarizedMessageID != "run-1" {
+	if result.LastSummarizedRunID != "run-1" {
 		t.Errorf("LastSummarizedMessageID = %q, want \"run-1\" — the boundary must stop short of the run in flight",
-			result.LastSummarizedMessageID)
+			result.LastSummarizedRunID)
 	}
 }
 

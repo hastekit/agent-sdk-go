@@ -112,9 +112,9 @@ func (t *AgentTool) Execute(ctx context.Context, params *agents.ToolCall) (*agen
 	namespace := params.Namespace + "/" + params.Name
 
 	var (
-		threadId          string
-		previousMessageID string
-		messages          []responses.InputMessageUnion
+		threadId      string
+		previousRunID string
+		messages      []responses.InputMessageUnion
 	)
 
 	if params.ShouldResume {
@@ -140,7 +140,7 @@ func (t *AgentTool) Execute(ctx context.Context, params *agents.ToolCall) (*agen
 		}
 
 		threadId = savedThreadId
-		previousMessageID = savedResult.RunID
+		previousRunID = savedResult.RunID
 		messages = params.ResumeMessages
 	} else {
 		var agentArgs agentToolArgument
@@ -176,11 +176,11 @@ func (t *AgentTool) Execute(ctx context.Context, params *agents.ToolCall) (*agen
 	var result *agents.AgentOutput
 	var err error
 	agentInput := &agents.AgentInput{
-		Namespace:         namespace,
-		ThreadID:          threadId,
-		PreviousMessageID: previousMessageID,
-		Message:           history.Message{SenderID: params.AgentName, Messages: messages},
-		SessionID:         params.SessionID, // Using conversation id as the shared session id
+		Namespace:     namespace,
+		ThreadID:      threadId,
+		PreviousRunID: previousRunID,
+		Message:       history.Message{SenderID: params.AgentName, Messages: messages},
+		SessionID:     params.SessionID, // Using conversation id as the shared session id
 	}
 	if t.withoutTracing {
 		result, err = t.agent.ExecuteWithoutTrace(ctx, agentInput)

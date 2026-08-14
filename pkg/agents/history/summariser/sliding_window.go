@@ -66,8 +66,8 @@ func (s *SlidingWindowHistorySummarizer) Summarize(ctx context.Context, msgIdToR
 	// We just return the messages to keep
 	// The LastSummarizedMessageID represents the last run ID that was discarded
 	return &history.SummaryResult{
-		LastSummarizedMessageID: lastDiscardedRunID,
-		SummaryID:               uuid.NewString(),
-		MessagesToKeep:          messagesToKeep,
+		LastSummarizedRunID: lastDiscardedRunID,
+		SummaryID:           uuid.NewString(),
+		MessagesToKeep:      messagesToKeep,
 	}, nil
 }

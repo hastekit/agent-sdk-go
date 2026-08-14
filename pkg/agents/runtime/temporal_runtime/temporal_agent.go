@@ -2,6 +2,7 @@ package temporal_runtime
 
 import (
 	"context"
+	"maps"
 	"time"
 
 	"github.com/hastekit/hastekit-sdk-go/pkg/agents"
@@ -57,6 +58,10 @@ func (a *TemporalAgentV2) GetActivities() map[string]interface{} {
 		temporalTool := NewTemporalTool(tool, a.broker)
 		activities[getToolName(a.options.Name, tool)+"_ExecuteToolActivity"] = temporalTool.Execute
 	}
+
+	// Four activities per hook, so the workflow can run each method as its own
+	// step.
+	maps.Copy(activities, hookActivities(a.options.Name, a.options.Hooks))
 
 	for _, mcpClient := range a.options.McpServers {
 		temporalMCP := NewTemporalMCPServer(mcpClient, a.broker)
@@ -135,6 +140,9 @@ func (a *TemporalAgentV2) newTemporalProxyAgent(ctx workflow.Context) *agents.Ag
 		Tools:        toolProxies,
 		McpServers:   mcpProxies,
 		ToolExecutor: NewTemporalToolExecutor(ctx),
+		// Proxies, not the hooks themselves: the executor and the loop both run
+		// in the workflow, so each hook method becomes its own activity.
+		Hooks:        hookProxies(ctx, a.options.Name, a.options.Hooks),
 		StreamBroker: NewTemporalStreamBrokerProxy(ctx, a.options.Name, a.broker),
 		DurableStep:  NewTemporalDurableStep(ctx),
 	}

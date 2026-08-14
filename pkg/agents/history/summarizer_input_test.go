@@ -96,7 +96,7 @@ func TestInFlightMessagesCarryRunID(t *testing.T) {
 		t.Fatalf("GetMessages: %v", err)
 	}
 
-	runID := run.GetMessageID()
+	runID := run.GetRunID()
 	for _, m := range []Message{first, second} {
 		if got := cap.sawRunIDs[m.ID]; got != runID {
 			t.Errorf("bundle %s mapped to run %q, want %q", m.ID, got, runID)
@@ -133,8 +133,8 @@ func TestQueuedMessagesReachTheModel(t *testing.T) {
 	if len(run.RunState.QueuedMessages) != 0 {
 		t.Errorf("QueuedMessages = %d, want 0 (drained)", len(run.RunState.QueuedMessages))
 	}
-	if got := run.msgIdToRunId[queued.ID]; got != run.GetMessageID() {
-		t.Errorf("queued bundle mapped to run %q, want %q", got, run.GetMessageID())
+	if got := run.msgIdToRunId[queued.ID]; got != run.GetRunID() {
+		t.Errorf("queued bundle mapped to run %q, want %q", got, run.GetRunID())
 	}
 }
 
@@ -207,15 +207,15 @@ func TestSummaryBoundaryNeverNamesInFlightRun(t *testing.T) {
 
 	// The summarizer claims to have covered the run in flight.
 	cap.result = &SummaryResult{
-		SummaryID:               "sum-1",
-		LastSummarizedMessageID: run.GetMessageID(),
+		SummaryID:           "sum-1",
+		LastSummarizedRunID: run.GetRunID(),
 	}
 
 	if _, err := run.GetMessages(ctx, "agent"); err != nil {
 		t.Fatalf("GetMessages: %v", err)
 	}
 
-	if got := run.summaries.LastSummarizedMessageID; got != "" {
+	if got := run.summaries.LastSummarizedRunID; got != "" {
 		t.Fatalf("LastSummarizedMessageID = %q, want \"\" (clamped off the in-flight run)", got)
 	}
 }

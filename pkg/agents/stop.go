@@ -21,6 +21,11 @@ const (
 // into ToolExecutionResult.Cancelled.
 var ErrToolCancelled = errors.New("tool call cancelled: the run was stopped")
 
+// ErrModelCallStopped reports a streaming model call the stop cut short. The
+// loop treats it as the stop it is rather than as a failed call, and ends the
+// run the same way a stop between iterations does.
+var ErrModelCallStopped = errors.New("model call cancelled: the run was stopped")
+
 // DefaultCancelGrace bounds how long a cancelled call may take to unwind.
 // Long enough that a clean unwind is never cut off, short enough that a
 // tool ignoring ctx doesn't leave the stop looking broken.
@@ -34,6 +39,40 @@ func StopWatcherFrom(broker StreamBroker) StopWatcher {
 		return nil
 	}
 	return watcher
+}
+
+// StopCancelContext returns a context that is cancelled when the run on
+// streamID is stopped, so work already in flight can unwind rather than
+// finishing into a run nobody is waiting for.
+//
+// This is the streaming counterpart of RunStoppable. A streamed model call
+// needs no abandon-after-grace: it is read chunk by chunk in this process, and
+// the reader gives up on the context itself — there is no opaque callee to
+// outlast. Cancelling also reaches the provider's own request, which is what
+// actually stops the tokens being generated and billed.
+//
+// With no watcher or no stream, the context is returned unchanged (with a
+// no-op cancel), so a caller can wrap unconditionally.
+func StopCancelContext(ctx context.Context, watcher StopWatcher, streamID string) (context.Context, context.CancelFunc) {
+	if watcher == nil || streamID == "" {
+		return ctx, func() {}
+	}
+
+	stop, release := watcher.WatchStop(ctx, streamID)
+	callCtx, cancel := context.WithCancel(ctx)
+
+	go func() {
+		select {
+		case <-stop:
+			cancel()
+		case <-callCtx.Done():
+		}
+	}()
+
+	return callCtx, func() {
+		cancel()
+		release()
+	}
 }
 
 // RunStoppableTool runs one tool call so that stopping the run stops the

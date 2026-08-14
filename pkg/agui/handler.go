@@ -178,7 +178,10 @@ func serveThreadMessages(w http.ResponseWriter, r *http.Request, agent *agents.A
 		writeJSONError(w, http.StatusNotImplemented, "the agent has no conversation persistence")
 		return
 	}
-	rows, err := manager.ConversationPersistenceAdapter.LoadMessages(r.Context(), o.namespace, threadID, "")
+	// The transcript, not the model's view of it: LoadMessages returns a
+	// summary in place of the turns it covers, which is right for a prompt and
+	// wrong for a chat window the user is scrolling back through.
+	rows, err := manager.LoadTranscript(r.Context(), o.namespace, threadID)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "unable to load messages: "+err.Error())
 		return

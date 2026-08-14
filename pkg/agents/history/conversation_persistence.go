@@ -12,35 +12,35 @@ import (
 
 // inMemoryMessage represents a message with its ordering metadata
 type inMemoryMessage struct {
-	MessageID         string
-	PreviousMessageID string
-	ThreadID          string
-	ConversationID    string
-	Namespace         string
-	Messages          []Message
-	Meta              map[string]any
-	CreatedAt         time.Time
+	RunID          string
+	PreviousRunID  string
+	ThreadID       string
+	ConversationID string
+	Namespace      string
+	Messages       []Message
+	Meta           map[string]any
+	CreatedAt      time.Time
 }
 
 // inMemoryThread represents a thread with its message chain
 type inMemoryThread struct {
-	ThreadID        string
-	ConversationID  string
-	OriginMessageID string
-	LastMessageID   string
-	Namespace       string
-	CreatedAt       time.Time
+	ThreadID       string
+	ConversationID string
+	OriginRunID    string
+	LastRunID      string
+	Namespace      string
+	CreatedAt      time.Time
 }
 
 // inMemorySummary represents a conversation summary
 type inMemorySummary struct {
-	ID                      string
-	ThreadID                string
-	Namespace               string
-	SummaryMessage          messages.Message
-	LastSummarizedMessageID string
-	CreatedAt               time.Time
-	Meta                    map[string]any
+	ID                  string
+	ThreadID            string
+	Namespace           string
+	SummaryMessage      messages.Message
+	LastSummarizedRunID string
+	CreatedAt           time.Time
+	Meta                map[string]any
 }
 
 // InMemoryConversationPersistence is a simple in-memory implementation of ConversationPersistenceAdapter
@@ -77,15 +77,15 @@ func (p *InMemoryConversationPersistence) NewRunID(ctx context.Context) string {
 	return uuid.NewString()
 }
 
-// LoadMessages retrieves all messages up to and including the previousMessageID
-func (p *InMemoryConversationPersistence) LoadMessages(ctx context.Context, namespace string, threadID string, previousMessageId string) ([]ConversationMessage, error) {
+// LoadMessages retrieves all messages up to and including the previousRunID
+func (p *InMemoryConversationPersistence) LoadMessages(ctx context.Context, namespace string, threadID string, previousRunId string) ([]ConversationMessage, error) {
 	ctx, span := tracer.Start(ctx, "InMemoryConversationPersistence.LoadMessages")
 	defer span.End()
 
 	span.SetAttributes(
 		attribute.String("namespace", namespace),
 		attribute.String("thread_id", threadID),
-		attribute.String("previous_message_id", previousMessageId),
+		attribute.String("previous_run_id", previousRunId),
 	)
 
 	if threadID == "" {
@@ -113,15 +113,15 @@ func (p *InMemoryConversationPersistence) LoadMessages(ctx context.Context, name
 	var result []ConversationMessage
 
 	// If we have a summary, check if it's applicable
-	if hasSummary && summary.LastSummarizedMessageID != "" {
+	if hasSummary && summary.LastSummarizedRunID != "" {
 		// Find the position of the last summarized message
 		summarizedIdx := -1
 		targetIdx := -1
-		for i, msgID := range messageIDs {
-			if msgID == summary.LastSummarizedMessageID {
+		for i, runID := range messageIDs {
+			if runID == summary.LastSummarizedRunID {
 				summarizedIdx = i
 			}
-			if msgID == previousMessageId {
+			if runID == previousRunId {
 				targetIdx = i
 			}
 		}
@@ -130,7 +130,7 @@ func (p *InMemoryConversationPersistence) LoadMessages(ctx context.Context, name
 		if summarizedIdx >= 0 && summarizedIdx < targetIdx {
 			// Add the summary as the first message
 			summaryMsg := ConversationMessage{
-				MessageID:      summary.ID,
+				RunID:          summary.ID,
 				ThreadID:       summary.ThreadID,
 				ConversationID: thread.ConversationID,
 				Messages:       []Message{summary.SummaryMessage},
@@ -142,7 +142,7 @@ func (p *InMemoryConversationPersistence) LoadMessages(ctx context.Context, name
 			for i := summarizedIdx + 1; i <= targetIdx; i++ {
 				m := p.messages[messageIDs[i]]
 				result = append(result, ConversationMessage{
-					MessageID:      m.MessageID,
+					RunID:          m.RunID,
 					ThreadID:       m.ThreadID,
 					ConversationID: m.ConversationID,
 					Messages:       m.Messages,
@@ -154,18 +154,18 @@ func (p *InMemoryConversationPersistence) LoadMessages(ctx context.Context, name
 		}
 	}
 
-	// No applicable summary, return all messages up to and including previousMessageID
-	for _, msgID := range messageIDs {
-		m := p.messages[msgID]
+	// No applicable summary, return all messages up to and including previousRunID
+	for _, runID := range messageIDs {
+		m := p.messages[runID]
 		result = append(result, ConversationMessage{
-			MessageID:      m.MessageID,
+			RunID:          m.RunID,
 			ThreadID:       m.ThreadID,
 			ConversationID: m.ConversationID,
 			Messages:       m.Messages,
 			Meta:           m.Meta,
 		})
 
-		if msgID == previousMessageId {
+		if runID == previousRunId {
 			break
 		}
 	}
@@ -176,13 +176,13 @@ func (p *InMemoryConversationPersistence) LoadMessages(ctx context.Context, name
 }
 
 // SaveMessages saves messages with support for conversations and threads
-func (p *InMemoryConversationPersistence) SaveMessages(ctx context.Context, namespace, msgId, previousMsgId, threadId, conversationId string, messages []Message, meta map[string]any) error {
+func (p *InMemoryConversationPersistence) SaveMessages(ctx context.Context, namespace, runId, previousRunId, threadId, conversationId string, messages []Message, meta map[string]any) error {
 	ctx, span := tracer.Start(ctx, "InMemoryConversationPersistence.SaveMessages")
 	defer span.End()
 
 	span.SetAttributes(
 		attribute.String("namespace", namespace),
-		attribute.String("previous_message_id", previousMsgId),
+		attribute.String("previous_run_id", previousRunId),
 		attribute.String("thread_id", threadId),
 		attribute.String("conversation_id", conversationId),
 		attribute.Int("messages_count", len(messages)),
@@ -194,19 +194,19 @@ func (p *InMemoryConversationPersistence) SaveMessages(ctx context.Context, name
 	now := time.Now()
 
 	// Incremental save of an already-saved run. A single run can be
-	// saved more than once under the same msgId — e.g. it pauses for a
+	// saved more than once under the same run id — e.g. it pauses for a
 	// tool/approval round and is later continued — and each save carries
 	// only the messages added since the previous one. Append those to
 	// the existing record instead of overwriting it (which would drop
 	// the earlier messages, often the user turn that opened the run) and
 	// don't re-index the run in its thread.
-	if existing, ok := p.messages[msgId]; ok {
+	if existing, ok := p.messages[runId]; ok {
 		existing.Messages = append(existing.Messages, messages...)
 		if meta != nil {
 			existing.Meta = meta
 		}
 		if t := p.threads[existing.ThreadID]; t != nil {
-			t.LastMessageID = msgId
+			t.LastRunID = runId
 		}
 		return nil
 	}
@@ -215,7 +215,7 @@ func (p *InMemoryConversationPersistence) SaveMessages(ctx context.Context, name
 	var convID string
 
 	// Case 1: Starting a new conversation with a provided conversationId
-	if previousMsgId == "" {
+	if previousRunId == "" {
 		convID = conversationId
 		if convID == "" {
 			convID = uuid.NewString()
@@ -228,17 +228,17 @@ func (p *InMemoryConversationPersistence) SaveMessages(ctx context.Context, name
 
 		// Create a new thread
 		p.threads[threadID] = &inMemoryThread{
-			ThreadID:        threadID,
-			OriginMessageID: msgId,
-			ConversationID:  convID,
-			LastMessageID:   msgId,
-			Namespace:       namespace,
-			CreatedAt:       now,
+			ThreadID:       threadID,
+			OriginRunID:    runId,
+			ConversationID: convID,
+			LastRunID:      runId,
+			Namespace:      namespace,
+			CreatedAt:      now,
 		}
 		p.messagesByThread[threadID] = []string{}
-	} else if previousMsgId != "" {
+	} else if previousRunId != "" {
 		// Case 2: Continuing an existing conversation
-		prevMsg, exists := p.messages[previousMsgId]
+		prevMsg, exists := p.messages[previousRunId]
 		if !exists {
 			// Previous message doesn't exist, create a new thread
 			convID = conversationId
@@ -248,12 +248,12 @@ func (p *InMemoryConversationPersistence) SaveMessages(ctx context.Context, name
 			threadID = uuid.New().String()
 
 			p.threads[threadID] = &inMemoryThread{
-				ThreadID:        threadID,
-				ConversationID:  convID,
-				OriginMessageID: msgId,
-				LastMessageID:   msgId,
-				Namespace:       namespace,
-				CreatedAt:       now,
+				ThreadID:       threadID,
+				ConversationID: convID,
+				OriginRunID:    runId,
+				LastRunID:      runId,
+				Namespace:      namespace,
+				CreatedAt:      now,
 			}
 			p.messagesByThread[threadID] = []string{}
 		} else {
@@ -263,34 +263,34 @@ func (p *InMemoryConversationPersistence) SaveMessages(ctx context.Context, name
 
 			thread := p.threads[threadID]
 			if thread != nil {
-				// Check if we're branching (previousMsgId is not the last message)
-				if thread.LastMessageID != previousMsgId {
+				// Check if we're branching (previousRunId is not the last message)
+				if thread.LastRunID != previousRunId {
 					// Create a new thread (branch)
 					newThreadID := uuid.New().String()
 					threadID = newThreadID
 
-					// Copy messages up to previousMsgId to the new thread
+					// Copy messages up to previousRunId to the new thread
 					oldMessages := p.messagesByThread[prevMsg.ThreadID]
 					newMessages := []string{}
 					for _, oldMsgID := range oldMessages {
 						newMessages = append(newMessages, oldMsgID)
-						if oldMsgID == previousMsgId {
+						if oldMsgID == previousRunId {
 							break
 						}
 					}
 
 					p.threads[newThreadID] = &inMemoryThread{
-						ThreadID:        newThreadID,
-						ConversationID:  convID,
-						OriginMessageID: prevMsg.ThreadID, // Reference to original thread
-						LastMessageID:   msgId,
-						Namespace:       namespace,
-						CreatedAt:       now,
+						ThreadID:       newThreadID,
+						ConversationID: convID,
+						OriginRunID:    prevMsg.ThreadID, // Reference to original thread
+						LastRunID:      runId,
+						Namespace:      namespace,
+						CreatedAt:      now,
 					}
 					p.messagesByThread[newThreadID] = newMessages
 				} else {
 					// Update the last message ID
-					thread.LastMessageID = msgId
+					thread.LastRunID = runId
 				}
 			}
 		}
@@ -300,30 +300,30 @@ func (p *InMemoryConversationPersistence) SaveMessages(ctx context.Context, name
 		threadID = uuid.New().String()
 
 		p.threads[threadID] = &inMemoryThread{
-			ThreadID:        threadID,
-			ConversationID:  convID,
-			OriginMessageID: msgId,
-			LastMessageID:   msgId,
-			Namespace:       namespace,
-			CreatedAt:       now,
+			ThreadID:       threadID,
+			ConversationID: convID,
+			OriginRunID:    runId,
+			LastRunID:      runId,
+			Namespace:      namespace,
+			CreatedAt:      now,
 		}
 		p.messagesByThread[threadID] = []string{}
 	}
 
 	// Create and store the message
-	p.messages[msgId] = &inMemoryMessage{
-		MessageID:         msgId,
-		PreviousMessageID: previousMsgId,
-		ThreadID:          threadID,
-		ConversationID:    convID,
-		Namespace:         namespace,
-		Messages:          messages,
-		Meta:              meta,
-		CreatedAt:         now,
+	p.messages[runId] = &inMemoryMessage{
+		RunID:          runId,
+		PreviousRunID:  previousRunId,
+		ThreadID:       threadID,
+		ConversationID: convID,
+		Namespace:      namespace,
+		Messages:       messages,
+		Meta:           meta,
+		CreatedAt:      now,
 	}
 
 	// Add message to the thread's message list
-	p.messagesByThread[threadID] = append(p.messagesByThread[threadID], msgId)
+	p.messagesByThread[threadID] = append(p.messagesByThread[threadID], runId)
 
 	return nil
 }
@@ -337,23 +337,23 @@ func (p *InMemoryConversationPersistence) SaveSummary(ctx context.Context, names
 	defer p.mu.Unlock()
 
 	p.summaries[summary.ThreadID] = &inMemorySummary{
-		ID:                      summary.ID,
-		ThreadID:                summary.ThreadID,
-		Namespace:               namespace,
-		SummaryMessage:          summary.SummaryMessage,
-		LastSummarizedMessageID: summary.LastSummarizedMessageID,
-		CreatedAt:               summary.CreatedAt,
-		Meta:                    summary.Meta,
+		ID:                  summary.ID,
+		ThreadID:            summary.ThreadID,
+		Namespace:           namespace,
+		SummaryMessage:      summary.SummaryMessage,
+		LastSummarizedRunID: summary.LastSummarizedRunID,
+		CreatedAt:           summary.CreatedAt,
+		Meta:                summary.Meta,
 	}
 
 	return nil
 }
 
 // getMessage returns the stored message for an ID, or nil if absent
-func (p *InMemoryConversationPersistence) getMessage(msgID string) *inMemoryMessage {
+func (p *InMemoryConversationPersistence) getMessage(runID string) *inMemoryMessage {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	return p.messages[msgID]
+	return p.messages[runID]
 }
 
 // getThread returns the stored thread for an ID, or nil if absent

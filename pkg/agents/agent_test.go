@@ -258,10 +258,10 @@ func TestAgentLoop_PauseOnApproval_DeclineSkipsTool(t *testing.T) {
 
 	// Decline the tool call and resume the paused run.
 	out = runAgent(t, agent, &agents.AgentInput{
-		Namespace:         "test",
-		ThreadID:          "thread-decline",
-		PreviousMessageID: out.RunID,
-		Message:           approvalMessage(nil, []string{"call_danger"}),
+		Namespace:     "test",
+		ThreadID:      "thread-decline",
+		PreviousRunID: out.RunID,
+		Message:       approvalMessage(nil, []string{"call_danger"}),
 	})
 
 	requireStatus(t, out, agentstate.RunStatusCompleted)
@@ -292,10 +292,10 @@ func TestAgentLoop_PauseOnApproval_ApproveExecutesTool(t *testing.T) {
 	requireStatus(t, out, agentstate.RunStatusPaused)
 
 	out = runAgent(t, agent, &agents.AgentInput{
-		Namespace:         "test",
-		ThreadID:          "thread-approve",
-		PreviousMessageID: out.RunID,
-		Message:           approvalMessage([]string{"call_danger"}, nil),
+		Namespace:     "test",
+		ThreadID:      "thread-approve",
+		PreviousRunID: out.RunID,
+		Message:       approvalMessage([]string{"call_danger"}, nil),
 	})
 
 	requireStatus(t, out, agentstate.RunStatusCompleted)
@@ -869,10 +869,10 @@ func TestAgentLoop_SubAgentApprovalPausesParent(t *testing.T) {
 	}
 
 	out = runAgent(t, parent, &agents.AgentInput{
-		Namespace:         "test",
-		ThreadID:          "thread-subagent",
-		PreviousMessageID: out.RunID,
-		Message:           approvalMessage([]string{"call_child_danger"}, nil),
+		Namespace:     "test",
+		ThreadID:      "thread-subagent",
+		PreviousRunID: out.RunID,
+		Message:       approvalMessage([]string{"call_child_danger"}, nil),
 	})
 
 	requireStatus(t, out, agentstate.RunStatusCompleted)
@@ -933,10 +933,10 @@ func TestAgentLoop_SubSubAgentApprovalPausesParent(t *testing.T) {
 	}
 
 	out = runAgent(t, parent, &agents.AgentInput{
-		Namespace:         "test",
-		ThreadID:          "thread-subsubagent",
-		PreviousMessageID: out.RunID,
-		Message:           approvalMessage([]string{"call_gc_danger"}, nil),
+		Namespace:     "test",
+		ThreadID:      "thread-subsubagent",
+		PreviousRunID: out.RunID,
+		Message:       approvalMessage([]string{"call_gc_danger"}, nil),
 	})
 
 	requireStatus(t, out, agentstate.RunStatusCompleted)
@@ -999,10 +999,10 @@ func TestAgentLoop_HandoffToolApprovalPausesRun(t *testing.T) {
 
 	// Resume on the handoff target, as the host would.
 	out = runAgent(t, agentB, &agents.AgentInput{
-		Namespace:         "test",
-		ThreadID:          "thread-handoff",
-		PreviousMessageID: out.RunID,
-		Message:           approvalMessage([]string{"call_b_danger"}, nil),
+		Namespace:     "test",
+		ThreadID:      "thread-handoff",
+		PreviousRunID: out.RunID,
+		Message:       approvalMessage([]string{"call_b_danger"}, nil),
 	})
 
 	requireStatus(t, out, agentstate.RunStatusCompleted)
@@ -1060,10 +1060,10 @@ func TestAgentLoop_StickyHandoffRoutesNextTurnToSpecialist(t *testing.T) {
 	// Turn 2: same thread, entering through the ROOT again. Sticky routing
 	// must send it straight to the specialist without re-running the root.
 	out = runAgent(t, agentA, &agents.AgentInput{
-		Namespace:         "test",
-		ThreadID:          "thread-sticky",
-		PreviousMessageID: out.RunID,
-		Message:           userMessage("and again"),
+		Namespace:     "test",
+		ThreadID:      "thread-sticky",
+		PreviousRunID: out.RunID,
+		Message:       userMessage("and again"),
 	})
 	requireStatus(t, out, agentstate.RunStatusCompleted)
 
@@ -1107,10 +1107,10 @@ func TestAgentLoop_NonStickyHandoffReentersRootNextTurn(t *testing.T) {
 	requireStatus(t, out, agentstate.RunStatusCompleted)
 
 	out = runAgent(t, agentA, &agents.AgentInput{
-		Namespace:         "test",
-		ThreadID:          "thread-nonsticky",
-		PreviousMessageID: out.RunID,
-		Message:           userMessage("and again"),
+		Namespace:     "test",
+		ThreadID:      "thread-nonsticky",
+		PreviousRunID: out.RunID,
+		Message:       userMessage("and again"),
 	})
 	requireStatus(t, out, agentstate.RunStatusCompleted)
 
@@ -1169,8 +1169,8 @@ func TestAgentLoop_StickyBackHandoffUnsticksThread(t *testing.T) {
 	// Turn 2: sticky enters the specialist, which hands back to the root.
 	out = runAgent(t, agentA, &agents.AgentInput{
 		Namespace: "test", ThreadID: "thread-back",
-		PreviousMessageID: out.RunID,
-		Message:           userMessage("i'm done, go back"),
+		PreviousRunID: out.RunID,
+		Message:       userMessage("i'm done, go back"),
 	})
 	requireStatus(t, out, agentstate.RunStatusCompleted)
 	if text := messagesText(out.Output); !strings.Contains(text, "agent-a back in control") {
@@ -1181,8 +1181,8 @@ func TestAgentLoop_StickyBackHandoffUnsticksThread(t *testing.T) {
 	// without touching the specialist again.
 	out = runAgent(t, agentA, &agents.AgentInput{
 		Namespace: "test", ThreadID: "thread-back",
-		PreviousMessageID: out.RunID,
-		Message:           userMessage("hello again"),
+		PreviousRunID: out.RunID,
+		Message:       userMessage("hello again"),
 	})
 	requireStatus(t, out, agentstate.RunStatusCompleted)
 	if text := messagesText(out.Output); !strings.Contains(text, "agent-a turn 3") {
@@ -1247,10 +1247,10 @@ func TestAgentLoop_NestedHandoffToolApprovalPausesRun(t *testing.T) {
 	}
 
 	out = runAgent(t, agentC, &agents.AgentInput{
-		Namespace:         "test",
-		ThreadID:          "thread-nested-handoff",
-		PreviousMessageID: out.RunID,
-		Message:           approvalMessage([]string{"call_c_danger"}, nil),
+		Namespace:     "test",
+		ThreadID:      "thread-nested-handoff",
+		PreviousRunID: out.RunID,
+		Message:       approvalMessage([]string{"call_c_danger"}, nil),
 	})
 
 	requireStatus(t, out, agentstate.RunStatusCompleted)
@@ -1478,10 +1478,10 @@ func TestAgentLoop_FormElicitationRoundTrip(t *testing.T) {
 
 	// Submit the form.
 	out = runAgent(t, agent, &agents.AgentInput{
-		Namespace:         "test",
-		ThreadID:          "thread-elicit",
-		PreviousMessageID: out.RunID,
-		Message:           elicitationMessage("call_book", `{"passenger_name":"Ada Lovelace"}`),
+		Namespace:     "test",
+		ThreadID:      "thread-elicit",
+		PreviousRunID: out.RunID,
+		Message:       elicitationMessage("call_book", `{"passenger_name":"Ada Lovelace"}`),
 	})
 
 	requireStatus(t, out, agentstate.RunStatusCompleted)

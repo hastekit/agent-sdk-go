@@ -12,7 +12,7 @@ type ThreadInfo struct {
 	ThreadID       string    `json:"thread_id"`
 	ConversationID string    `json:"conversation_id"`
 	Namespace      string    `json:"namespace"`
-	LastMessageID  string    `json:"last_message_id"`
+	LastRunID      string    `json:"last_run_id"`
 	Title          string    `json:"title"`
 	MessageCount   int       `json:"message_count"`
 	CreatedAt      time.Time `json:"created_at"`
@@ -41,7 +41,7 @@ func (p *InMemoryConversationPersistence) ListThreads(ctx context.Context, names
 			ThreadID:       t.ThreadID,
 			ConversationID: t.ConversationID,
 			Namespace:      t.Namespace,
-			LastMessageID:  t.LastMessageID,
+			LastRunID:      t.LastRunID,
 			MessageCount:   len(p.messagesByThread[t.ThreadID]),
 			CreatedAt:      t.CreatedAt,
 			UpdatedAt:      t.CreatedAt,
@@ -50,8 +50,8 @@ func (p *InMemoryConversationPersistence) ListThreads(ctx context.Context, names
 		// Title comes from the thread's first textual user message —
 		// what a chat UI shows as the conversation name. UpdatedAt is
 		// the newest turn's save time so listings sort by recency.
-		for _, msgID := range p.messagesByThread[t.ThreadID] {
-			m := p.messages[msgID]
+		for _, runID := range p.messagesByThread[t.ThreadID] {
+			m := p.messages[runID]
 			if m == nil {
 				continue
 			}
