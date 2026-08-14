@@ -13,11 +13,13 @@ A powerful Golang SDK for building AI agents and making LLM calls across multipl
 - **👤 Human-in-the-Loop** - Integrate human feedback and approval workflows
 - **🛡️ Durable Execution** - Create fault-tolerant agents with Restate or Temporal
 - **🔧 Tool Calling** - Function calling and MCP (Model Context Protocol) tool integration
+- **🪝 Hooks** - Intercept tool calls and model calls for auth, budgets, and audit
+- **🏷️ Tool Annotations** - MCP-style behavioural hints on both MCP and function tools
 - **💾 Conversation History** - Maintain context across interactions with built-in persistence
 - **📊 Embeddings** - Generate text embeddings for semantic search and RAG applications
 - **🎨 Image Processing & Generation** - Vision capabilities and image generation tools
 - **🌊 Streaming Support** - Real-time streaming responses for better UX
-- **🛑 Cancellation** - Stop in-flight runs cleanly at iteration boundaries via the run handle
+- **🛑 Cancellation** - Stop in-flight runs cleanly, including mid-stream and mid-tool-call
 - **📝 Structured Output** - JSON schema validation for reliable structured responses
 
 ## Table of Contents
@@ -29,6 +31,7 @@ A powerful Golang SDK for building AI agents and making LLM calls across multipl
   - [Agents](#agents)
   - [AG-UI](#ag-ui)
   - [Tools](#tools)
+  - [Hooks](#hooks)
   - [Conversation History](#conversation-history)
   - [Durable Agents](#durable-agents)
   - [Embeddings](#embeddings)
@@ -333,7 +336,14 @@ same `Tools` slice.
 
 #### Streaming Chunks and Cancellation
 
-`agent.Execute` returns a handle. Range over `handle.Chunks` to forward live deltas (UI, SSE, logs); call `handle.Stop(ctx)` to ask the agent to stop at the next iteration boundary — it will record a "Cancelled by user" assistant turn in history and emit `run.completed` cleanly.
+`agent.Execute` returns a handle. Range over `handle.Chunks` to forward live deltas (UI, SSE, logs); call `handle.Stop(ctx)` to stop the run — it records a "Cancelled by user" assistant turn in history and emits `run.completed` cleanly.
+
+`Stop` does not wait for an iteration boundary. It reaches work already in flight:
+
+- **Mid-stream** — the model call is cut off where it is, rather than waited out. Text that had already streamed still reached the client, but the turn is recorded as cancelled rather than as a half-answer the model never finished.
+- **Mid-tool-call** — a running tool has its context cancelled; a tool that ignores cancellation is abandoned after a grace period so the run still ends.
+
+Either way the loop's invariant holds: every `function_call` in history is answered, so a stopped thread is still a valid thread to resume from.
 
 ```go
 handle, err := agent.Execute(ctx, &agents.AgentInput{
@@ -452,6 +462,109 @@ agent := hastekit.NewAgent(&hastekit.AgentConfig{
 })
 ```
 
+#### Tool Annotations
+
+Tools can advertise what they do. The hints mirror [MCP's tool annotations](https://modelcontextprotocol.io/docs/concepts/tools), so hints read off an MCP server and hints declared on a local function tool are the same thing — one policy can read both:
+
+```go
+readTool := hastekit.NewTool(listUsers,
+    hastekit.WithName("list_users"),
+    hastekit.WithTitle("List users"), // human-readable, for UI
+    hastekit.WithReadOnly(true),
+)
+
+writeTool := hastekit.NewTool(deleteUser,
+    hastekit.WithName("delete_user"),
+    hastekit.WithDestructive(true),
+    hastekit.WithIdempotent(false),
+    hastekit.WithOpenWorld(false),
+)
+```
+
+MCP tools carry whatever their server declared; nothing extra is needed to pick them up. Read the hints back from any tool with `agents.AnnotationsOf(tool)`:
+
+```go
+a := agents.AnnotationsOf(tool)
+if a.IsDestructive() {
+    // gate it — see Hooks below
+}
+```
+
+Every hint is a pointer, so "nothing was said" stays distinguishable from "false was said". Prefer the `Is*` helpers over reading fields directly: they are nil-safe and apply MCP's defaults, which are deliberately conservative — an unset `DestructiveHint` reads as destructive, an unset `ReadOnlyHint` as not read-only.
+
+> Hints are self-reported: they describe intent, not enforcement. Never let a hint from an untrusted MCP server widen what a tool is allowed to do.
+
+### Hooks
+
+A hook wraps what the agent does, so cross-cutting concerns — auth, budgets, quotas, audit, approval policy — live in one place instead of inside every tool. Hooks can observe, or answer in place of the real call.
+
+`ToolCallHook` wraps every tool call; `ModelCallHook` wraps every call to the model. `hastekit.Hook` is both. Implement only the half you care about by embedding the no-op other half:
+
+```go
+// A budget check that has no interest in tools.
+type credits struct {
+    agents.NoopToolCallHook // supplies the tool-call half
+}
+
+func (c *credits) GetName() string { return "credits" }
+
+func (c *credits) BeforeModelCall(ctx context.Context, call *agents.ModelCall) (agents.ModelCallHookResult, error) {
+    if balanceFor(call.RunContext) <= 0 {
+        // Answering is kinder than failing: the run ends with a message the
+        // user can read rather than an error they cannot.
+        return agents.HandleModelCall(
+            agents.ModelCallText("You're out of credits — top up to continue."),
+        ), nil
+    }
+    return agents.ContinueModelCall(), nil
+}
+
+func (c *credits) AfterModelCall(ctx context.Context, call *agents.ModelCall, res *agents.ModelCallResult) (agents.ModelCallHookResult, error) {
+    recordSpend(call.RunContext, res.Usage) // res.Usage is this one call
+    return agents.ContinueModelCall(), nil
+}
+
+agent := hastekit.NewAgent(&hastekit.AgentConfig{
+    Name:  "Assistant",
+    LLM:   client.Model("OpenAI/gpt-4o-mini"),
+    Tools: []hastekit.Tool{weatherTool},
+    Hooks: []agents.Hook{&credits{}},
+})
+```
+
+The tool-call side has the same shape. Combined with annotations, a policy hook is a few lines:
+
+```go
+type policy struct {
+    agents.NoopModelCallHook // model-call half; this hook only guards tools
+}
+
+func (p *policy) GetName() string { return "policy" }
+
+func (p *policy) BeforeToolCall(ctx context.Context, call *agents.ToolCall) (agents.ToolCallHookResult, error) {
+    if !allowed(call.RunContext, call.Name) {
+        // Short-circuit: the tool never runs, and this stands in as its output.
+        return agents.HandleToolCall(
+            agents.ToolCallResult(call, "Denied by policy."),
+        ), nil
+    }
+    return agents.ContinueToolCall(), nil
+}
+
+func (p *policy) AfterToolCall(ctx context.Context, call *agents.ToolCall, resp *agents.ToolCallResponse) (agents.ToolCallHookResult, error) {
+    audit(call.Name, call.RunContext)
+    return agents.ContinueToolCall(), nil
+}
+```
+
+Notes:
+
+- **`Handled` is explicit.** `ContinueToolCall()` passes the call along; `HandleToolCall(resp)` says the hook answered and the real call never happens. It's a flag rather than a nil check, because "I answered, and the answer is nothing to say" differs from "carry on without me".
+- **Run context comes along.** `call.RunContext` is the per-run map you set on `AgentInput`, so per-tenant data (a JWT, an org id) is available without threading it through every tool.
+- **`GetName()` must be unique per agent and stable across deploys.** Durable runtimes name each hook's journaled step after it, so a renamed hook is a new step on replay.
+- **Hooks run as their own durable steps.** Under Restate or Temporal each hook call is journaled, so a check that talks to a billing service is not re-run on every replay.
+- **A `BeforeModelCall` hook sees the shape of the call, not the prompt** — model, tenant, loop iteration, `ContextTokens`, and usage so far. That's what a budget check needs, and it keeps the conversation from crossing a durable boundary twice.
+
 ### Conversation History
 
 Enable conversation memory across interactions:
@@ -493,6 +606,31 @@ handle, err = agent.Execute(context.Background(), &agents.AgentInput{
 })
 out, err = handle.Result()
 ```
+
+Passing `ThreadID` alone continues from the thread's tip. To branch from a specific earlier turn instead — a retry, or an edit of an earlier message — set `PreviousRunID` to the `RunID` of the run you want to continue from:
+
+```go
+out, _ := handle.Result()
+
+handle, err = agent.Execute(ctx, &agents.AgentInput{
+    Namespace:     "user-123",
+    ThreadID:      threadID,
+    PreviousRunID: out.RunID, // continue from this run, not the thread tip
+    Message:       history.Message{ /* ... */ },
+})
+```
+
+#### Reading a thread back
+
+To render a thread — a chat window, an audit view — use `LoadTranscript`:
+
+```go
+transcript, err := memory.LoadTranscript(ctx, "user-123", threadID)
+```
+
+It returns the thread as written. That is deliberately not what the agent reads for itself: the agent's own history load is summary-aware, replacing the turns a summary covers with the summary, which is what keeps a long thread inside the context window. Right for the model, wrong for a UI — asking the summary-aware path for a whole summarized thread is exactly when the substitution kicks in, and the window loses its own early turns.
+
+Adapters implement `history.TranscriptReader` to support this; the built-in in-memory and file adapters both do.
 
 ### Durable Agents
 
@@ -716,37 +854,52 @@ Explore complete working examples in the [documentation repository](https://gith
 
 ## Supported Providers
 
-| Provider | Chat Completion | Streaming | Tool Calling | Embeddings | Vision | Image Generation |
-|----------|:---------------:|:---------:|:------------:|:----------:|:------:|:----------------:|
-| **OpenAI** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| **Anthropic** | ✅ | ✅ | ✅ | ❌ | ✅ | ❌ |
-| **Gemini** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| **XAI** | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ |
+| Provider | Text | Streaming | Tool Calling | Vision | Embeddings | Image Gen | Image Edit | Speech | Transcription |
+|----------|:----:|:---------:|:------------:|:------:|:----------:|:---------:|:----------:|:------:|:-------------:|
+| **OpenAI** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **Anthropic** | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| **Gemini** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **xAI** | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅¹ | ❌ |
+| **Bedrock** | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| **ElevenLabs** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ |
+
+¹ Non-streaming only — xAI has no `NewStreamingSpeech`.
+
+**Text** is the Responses API (`NewResponses`), which is what agents use. OpenAI additionally implements the older Chat Completions API (`NewChatCompletion` / `NewStreamingChatCompletion`); no other provider does.
+
+`ProviderOllama` and `ProviderOpenRouter` are not in the table because their capabilities aren't the SDK's to state: both are served by the OpenAI-compatible client, so every method is wired up and each call is passed straight through. What actually answers depends on the endpoint and the model behind it. OpenRouter defaults to `https://openrouter.ai/api/v1`; Ollama needs an explicit `BaseURL` on its provider config.
+
+> A ❌ is not a graceful "unsupported" error. Unimplemented methods fall through to the embedded base provider, where the text and embedding methods `panic` and the media methods return `(nil, nil)` — so a call for a capability a provider doesn't have will either crash or hand back a silent nil. Check this table before reaching for a non-text method on a non-OpenAI provider.
 
 ## Architecture
 
 ```
 hastekit-sdk-go/
-├── pkg/
-│   ├── agents/              # Agent orchestration
-│   │   ├── runtime/         # Durable execution runtimes
-│   │   │   ├── restate_runtime/
-│   │   │   └── temporal_runtime/
-│   │   ├── history/         # Conversation management
-│   │   ├── mcpclient/       # MCP tool integration
-│   │   ├── streambroker/    # Stream brokers (memory, Redis)
-│   │   └── tools/           # Built-in tools
-│   ├── gateway/             # LLM gateway
-│   │   ├── llm/             # LLM request/response types
-│   │   └── providers/       # Provider implementations
-│   │       ├── openai/
-│   │       ├── anthropic/
-│   │       ├── gemini/
-│   │       └── xai/
-│   └── utils/               # Utilities
-├── examples/                # Example applications
-└── docs/                    # Documentation
+└── pkg/
+    ├── agents/              # Agent orchestration, hooks, tool annotations
+    │   ├── runtime/         # Durable execution runtimes
+    │   │   ├── restate_runtime/
+    │   │   └── temporal_runtime/
+    │   ├── agentstate/      # Run status and state
+    │   ├── history/         # Conversation management
+    │   ├── mcpclient/       # MCP tool integration
+    │   ├── prompts/         # Prompt construction
+    │   ├── sandbox/         # Sandboxed execution
+    │   ├── streambroker/    # Stream brokers (memory, Redis)
+    │   └── tools/           # Built-in tools
+    ├── agui/                # AG-UI protocol + embedded chat UI
+    ├── gateway/             # LLM gateway
+    │   ├── llm/             # LLM request/response types
+    │   └── providers/       # Provider implementations
+    │       ├── openai/      # anthropic, gemini, xai,
+    │       └── bedrock/     # elevenlabs, ollama, ...
+    ├── hastekitgateway/     # HasteKit Gateway adapters
+    ├── knowledge/           # Knowledge / retrieval
+    ├── telemetry/           # Tracing and metrics
+    └── utils/               # Utilities
 ```
+
+Runnable examples live in the [documentation repository](https://github.com/hastekit/hastekit-docs/tree/master/examples) — see [Examples](#examples) above.
 
 ## Contributing
 
