@@ -2,6 +2,7 @@ package agents
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"testing/fstest"
 
@@ -44,21 +45,44 @@ func TestAgentAddsTheSkillReaderTool(t *testing.T) {
 	}
 }
 
-// The prompt names the tool the agent actually added, rather than assuming one.
-func TestSkillDependenciesCarryTheToolName(t *testing.T) {
-	skills, toolName := skillDependencies(context.Background(), testRegistry(t))
+// The prompt introduces the skills in the provider's own words, rather than
+// assuming. A registry serves its own, so it names its own tool.
+func TestSkillDependenciesCarryTheProvidersHint(t *testing.T) {
+	skills, hint := skillDependencies(testRegistry(t))
 
 	if len(skills) != 1 || skills[0].Name != "pdf" {
 		t.Errorf("skills = %+v", skills)
 	}
-	if toolName != ReadSkillToolName {
-		t.Errorf("tool name = %q", toolName)
+	if !strings.Contains(hint, ReadSkillToolName) {
+		t.Errorf("hint = %q, want it to name %s", hint, ReadSkillToolName)
 	}
 }
 
-// A source whose skills the agent already reaches some other way — staged into
-// a sandbox it browses with bash — contributes no tool, and the prompt has no
-// tool name to point the model at.
+// A host that serves skills its own way says so in its own words, and the
+// prompt repeats them rather than guessing at a tool.
+func TestSkillsWithHintCarryTheHostsWording(t *testing.T) {
+	provider := SkillsWithHint{
+		List: SkillList{{Name: "pdf", Description: "Fill and read PDF forms."}},
+		Hint: "Read one with the `read_file` tool at the location listed below.",
+	}
+
+	agent := NewAgent(&AgentOptions{Name: "Hosted_Agent", Skills: provider})
+	if len(agent.tools) != 0 {
+		t.Errorf("got %d tools, want none", len(agent.tools))
+	}
+
+	skills, hint := skillDependencies(provider)
+	if len(skills) != 1 {
+		t.Errorf("skills = %+v", skills)
+	}
+	if hint != provider.Hint {
+		t.Errorf("hint = %q, want %q", hint, provider.Hint)
+	}
+}
+
+// A bare list is skills the agent already reaches some other way. It adds no
+// tool, and says nothing about what they are or how to read them — the SDK has
+// no way to know, and a guess would sooner or later name a tool the agent lacks.
 func TestSkillsTheAgentAlreadyReachesAddNoTool(t *testing.T) {
 	list := SkillList{{Name: "pdf", Description: "Fill and read PDF forms."}}
 
@@ -67,12 +91,12 @@ func TestSkillsTheAgentAlreadyReachesAddNoTool(t *testing.T) {
 		t.Errorf("got %d tools, want none", len(agent.tools))
 	}
 
-	skills, toolName := skillDependencies(context.Background(), list)
+	skills, hint := skillDependencies(list)
 	if len(skills) != 1 {
 		t.Errorf("skills = %+v", skills)
 	}
-	if toolName != "" {
-		t.Errorf("tool name = %q, want empty", toolName)
+	if hint != "" {
+		t.Errorf("hint = %q, want empty", hint)
 	}
 }
 
@@ -121,8 +145,8 @@ func TestAgentWithoutSkillsIsUnchanged(t *testing.T) {
 		t.Errorf("got %d tools, want none", len(agent.tools))
 	}
 
-	skills, toolName := skillDependencies(context.Background(), nil)
-	if skills != nil || toolName != "" {
-		t.Errorf("skills = %+v, tool name = %q", skills, toolName)
+	skills, hint := skillDependencies(nil)
+	if skills != nil || hint != "" {
+		t.Errorf("skills = %+v, hint = %q", skills, hint)
 	}
 }

@@ -573,19 +573,36 @@ Skills work the same under the Temporal and Restate runtimes: the durable agent 
 
 #### Skills from somewhere else
 
-`AgentConfig.Skills` takes an `agents.SkillProvider` — a source that lists its skills and supplies the tool that reads them:
+`AgentConfig.Skills` takes an `agents.SkillProvider` — a source that lists its skills, supplies the tool that reads them, and introduces them to the model:
 
 ```go
 type SkillProvider interface {
     Skills() []agents.Skill
     SkillTool() agents.Tool // nil when the model already has a way to read them
+    SkillHint() string      // the prompt's prose: what they are, how to read one
 }
 ```
 
-The agent asks the source for both, which is what keeps the prompt and the tools in step: the prompt names the exact tool the agent added. A source that returns no tool is one the model can already reach — skills staged into a sandbox it browses with its bash tool, for which `agents.SkillList` lists them and adds nothing:
+The agent asks the source for all three, which is what keeps the prompt and the tools in step. `SkillHint` is the whole of the section's prose and goes in verbatim — the resolver writes the `## Skills` heading and the catalogue, nothing else. Only the provider can write that hint honestly: a `SkillRegistry` names its own `read_skill` tool, while a host serving skills its own way names whatever the model actually has. Say nothing and the model gets the bare catalogue, which beats a prompt naming a tool the agent does not have.
+
+A source that returns no tool is one the model can already reach. `agents.SkillList` lists such skills and adds nothing:
 
 ```go
 Skills: agents.SkillList{{Name: "changelog", Description: "Write a release changelog entry."}},
+```
+
+`agents.SkillsWithHint` is the same, plus the prose — for a host that serves skill files through a tool of its own:
+
+```go
+Skills: agents.SkillsWithHint{
+    List: agents.SkillList{{
+        Name:         "changelog",
+        Description:  "Write a release changelog entry.",
+        FileLocation: "/skills/changelog/SKILL.md",
+    }},
+    Hint: "Skills are specialised instructions for particular kinds of work. " +
+        "Read one with the `read_file` tool at the location listed below.",
+},
 ```
 
 #### Prompt resolvers

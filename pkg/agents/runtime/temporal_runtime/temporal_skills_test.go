@@ -51,16 +51,16 @@ func TestGetActivities_RegistersNothingExtraWithoutSkills(t *testing.T) {
 }
 
 // The workflow builds the prompt's Dependencies and the activity renders them
-// on the worker, so the skills and the name of the tool that reads them have
-// to survive Temporal's data converter — a section the model never sees is a
-// skill it never uses.
+// on the worker, so the skills and the hint introducing them have to survive
+// Temporal's data converter — a section the model never sees is a skill it
+// never uses.
 func TestDependencies_CarrySkillsAcrossTheActivityBoundary(t *testing.T) {
 	registry := skillRegistry(t)
-	skills, toolName := registry.Skills(), agents.ReadSkillToolName
+	skills, hint := registry.Skills(), registry.SkillHint()
 
 	payload, err := converter.GetDefaultDataConverter().ToPayload(&agents.Dependencies{
-		Skills:        skills,
-		SkillToolName: toolName,
+		Skills:    skills,
+		SkillHint: hint,
 	})
 	require.NoError(t, err)
 
@@ -71,5 +71,6 @@ func TestDependencies_CarrySkillsAcrossTheActivityBoundary(t *testing.T) {
 	assert.Equal(t, "changelog", got.Skills[0].Name)
 	assert.Equal(t, "Write a release changelog entry.", got.Skills[0].Description)
 	assert.Equal(t, "skills/changelog/SKILL.md", got.Skills[0].FileLocation)
-	assert.Equal(t, agents.ReadSkillToolName, got.SkillToolName)
+	assert.Equal(t, hint, got.SkillHint)
+	assert.Contains(t, got.SkillHint, agents.ReadSkillToolName)
 }

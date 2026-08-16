@@ -20,17 +20,17 @@ type Dependencies struct {
 	Handoffs      []*Handoff
 	DeferredTools []DeferredToolInfo
 
-	// Skills the agent was given, and the name of the tool that reads them —
-	// empty when the model reaches them some other way, such as a sandbox it
-	// browses with its bash tool. The name travels with the skills so the
-	// prompt names the tool the agent actually added, rather than one it
-	// assumes is there.
+	// Skills the agent was given, and the hint introducing them — what they
+	// are and how to read one. Both come from the SkillProvider, the only
+	// thing that knows how its skills are actually reached. A provider that
+	// says nothing gets no prose at all, just the catalogue: guessing here
+	// would sooner or later name a tool the agent does not have.
 	//
 	// Like DeferredTools, these are the flattened, JSON-serializable view: the
 	// SkillProvider itself holds filesystem handles that do not survive a
 	// Temporal activity boundary.
-	Skills        []Skill `json:"skills,omitempty"`
-	SkillToolName string  `json:"skill_tool_name,omitempty"`
+	Skills    []Skill `json:"skills,omitempty"`
+	SkillHint string  `json:"skill_hint,omitempty"`
 }
 
 type SystemPromptProvider interface {

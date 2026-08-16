@@ -500,14 +500,14 @@ func (e *Agent) ExecuteWithRun(ctx context.Context, in *AgentInput, run *history
 			}
 		}
 
-		skills, skillToolName := skillDependencies(ctx, e.skills)
+		skills, skillHint := skillDependencies(e.skills)
 
 		instruction, err = e.instruction.GetPrompt(ctx, &Dependencies{
 			RunContext:    in.RunContext,
 			Handoffs:      e.handoffs,
 			DeferredTools: deferredToolInfos,
 			Skills:        skills,
-			SkillToolName: skillToolName,
+			SkillHint:     skillHint,
 		})
 		if err != nil {
 			return &AgentOutput{Status: agentstate.RunStatusError, RunID: runId}, err

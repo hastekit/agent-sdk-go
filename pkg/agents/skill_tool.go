@@ -161,8 +161,8 @@ func functionToolName(tool Tool) string {
 }
 
 // skillDependencies flattens a skill source into what the prompt needs: the
-// list to advertise, and the name of the tool the agent added for reading it.
-func skillDependencies(ctx context.Context, provider SkillProvider) ([]Skill, string) {
+// list to advertise, and the provider's own hint introducing it.
+func skillDependencies(provider SkillProvider) ([]Skill, string) {
 	if provider == nil {
 		return nil, ""
 	}
@@ -172,14 +172,7 @@ func skillDependencies(ctx context.Context, provider SkillProvider) ([]Skill, st
 		return nil, ""
 	}
 
-	var toolName string
-	if tool := provider.SkillTool(); tool != nil {
-		if schema := tool.Tool(ctx); schema != nil && schema.OfFunction != nil {
-			toolName = schema.OfFunction.Name
-		}
-	}
-
-	return skills, toolName
+	return skills, provider.SkillHint()
 }
 
 // withResourceIndex appends the skill's bundled files to its instructions.

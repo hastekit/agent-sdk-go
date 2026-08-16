@@ -160,10 +160,11 @@ func ResolveTemplate(prompt string, deps *agents.Dependencies) (string, error) {
 	return DefaultResolver(prompt, deps.RunContext)
 }
 
-// ResolveSkills appends the catalogue of skills the agent was given: each
-// one's name and description, and how to read it. Only that much — the
-// instructions themselves are what the reader tool is for, and putting them
-// here would cost context on every turn instead of the turns that use them.
+// ResolveSkills appends the catalogue of skills the agent was given: the
+// provider's hint, then each skill's name, description and location. Only that
+// much — the instructions themselves are what the reader tool is for, and
+// putting them here would cost context on every turn instead of the turns that
+// use them.
 func ResolveSkills(prompt string, deps *agents.Dependencies) (string, error) {
 	if len(deps.Skills) == 0 {
 		return prompt, nil
@@ -172,8 +173,14 @@ func ResolveSkills(prompt string, deps *agents.Dependencies) (string, error) {
 	var p strings.Builder
 
 	p.WriteString("\n\n" + "## Skills\n\n")
-	p.WriteString("Skills contains more specialised context, instructions and scripts that you can use when it is required. ")
-	p.WriteString(skillAccess(deps.SkillToolName))
+	// Verbatim from the provider, and the only prose in this section. What
+	// these skills are and how one is read are both the provider's to say — it
+	// serves them, through a tool of its own, or a sandbox the agent browses,
+	// or a tool the host wired up — and a sentence written here could only
+	// ever guess between them.
+	if deps.SkillHint != "" {
+		p.WriteString(deps.SkillHint + "\n")
+	}
 	p.WriteString("<available_skills>")
 	for _, skill := range deps.Skills {
 		p.WriteString("<skill>")
@@ -187,21 +194,6 @@ func ResolveSkills(prompt string, deps *agents.Dependencies) (string, error) {
 	p.WriteString("</available_skills>")
 
 	return prompt + p.String(), nil
-}
-
-// skillAccess tells the model how to get at the skills. It names the tool the
-// agent actually added, so the prompt cannot advertise one that isn't there.
-// Skills with no tool of their own are ones the agent reaches through its
-// sandbox.
-func skillAccess(toolName string) string {
-	if toolName == "" {
-		return "They are available to you in the filesystem that you can access using the `execute_bash_commands` tool. Based on the task at hand, access relevant skill."
-	}
-
-	return fmt.Sprintf(
-		"Read one with the `%s` tool, passing the skill's name, before doing the kind of work it covers. A skill may bundle further files; read those by also passing `file`.",
-		toolName,
-	)
 }
 
 // skillLocation keeps the sandbox convention for skills that carry no location

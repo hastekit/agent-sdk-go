@@ -18,8 +18,14 @@ type SkillProvider = agents.SkillProvider
 type SkillRegistry = agents.SkillRegistry
 
 // SkillList is a SkillProvider for skills the agent can already reach by other
-// means, such as ones staged into its sandbox. It lists them and adds no tool.
+// means, such as ones staged into its sandbox. It lists them and adds no tool,
+// and says nothing about what they are or how to read them — use
+// SkillsWithHint to say.
 type SkillList = agents.SkillList
+
+// SkillsWithHint is a SkillProvider for skills your own host serves: it lists
+// them, adds no tool, and introduces them to the model in your words.
+type SkillsWithHint = agents.SkillsWithHint
 
 // NewSkillRegistryFromDir loads every skill in a directory on disk:
 //

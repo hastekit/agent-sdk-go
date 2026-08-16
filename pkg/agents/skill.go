@@ -43,15 +43,45 @@ type SkillProvider interface {
 	// already has a way to read them — skills sitting in a sandbox the agent
 	// browses with its bash tool need no tool of their own.
 	SkillTool() Tool
+
+	// SkillHint introduces the skills in the prompt — what they are and how to
+	// read one — and goes in verbatim, as the only prose in that section.
+	// Only the provider can write it honestly: it is the one thing that knows
+	// whether the skills are served by a tool of its own, by a sandbox the
+	// agent browses, or by a tool the host wired up. Return "" to say nothing
+	// and leave the model the bare catalogue, which is better than a prompt
+	// naming a tool the agent turns out not to have.
+	SkillHint() string
 }
 
 // SkillList is a SkillProvider for skills the agent can already reach by other
 // means — ones staged into a sandbox it browses with its bash tool, say. It
 // lists them for the model and adds no tool.
+//
+// It says nothing about what they are or how to read them, because it cannot
+// know. Wrap it in SkillsWithHint to say.
 type SkillList []Skill
 
-func (s SkillList) Skills() []Skill { return append([]Skill(nil), s...) }
-func (s SkillList) SkillTool() Tool { return nil }
+func (s SkillList) Skills() []Skill   { return append([]Skill(nil), s...) }
+func (s SkillList) SkillTool() Tool   { return nil }
+func (s SkillList) SkillHint() string { return "" }
+
+// SkillsWithHint is a SkillProvider for skills the host serves its own way: it
+// lists them, adds no tool, and introduces them to the model in your words.
+//
+//	Skills: agents.SkillsWithHint{
+//		List: agents.SkillList{{Name: "changelog", Description: "...", FileLocation: "/skills/changelog/SKILL.md"}},
+//		Hint: "Skills are specialised instructions for particular kinds of work. " +
+//			"Read one with the `read_file` tool at the location listed below.",
+//	}
+type SkillsWithHint struct {
+	List SkillList
+	Hint string
+}
+
+func (s SkillsWithHint) Skills() []Skill   { return s.List.Skills() }
+func (s SkillsWithHint) SkillTool() Tool   { return nil }
+func (s SkillsWithHint) SkillHint() string { return s.Hint }
 
 // SkillRegistry holds the skills found in one or more places. A skill is a
 // folder holding a SKILL.md with YAML frontmatter (name, description) followed
@@ -204,6 +234,18 @@ func (r *SkillRegistry) Skills() []Skill {
 // this registry, which the agent adds to its own tools.
 func (r *SkillRegistry) SkillTool() Tool {
 	return NewReadSkillTool(r)
+}
+
+// SkillHint introduces the skills and points the model at that tool. The
+// registry serves its skills itself, so it is the one provider that can say
+// how to read them without being told.
+func (r *SkillRegistry) SkillHint() string {
+	return fmt.Sprintf(
+		"Skills contain more specialised context, instructions and scripts for particular kinds of work. "+
+			"Read one with the `%s` tool, passing the skill's name, before doing the kind of work it covers. "+
+			"A skill may bundle further files; read those by also passing `file`.",
+		ReadSkillToolName,
+	)
 }
 
 // Get returns the named skill's metadata.
