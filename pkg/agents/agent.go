@@ -47,6 +47,7 @@ type Agent struct {
 	stickyHandoff  bool
 	singleTurn     bool
 	modelCallHooks []ModelCallHook
+	skills         SkillProvider
 }
 
 type AgentOptions struct {
@@ -54,11 +55,17 @@ type AgentOptions struct {
 	Instruction SystemPromptProvider
 	Parameters  responses.Parameters
 
-	Name          string
-	LLM           llm.Provider
-	Output        map[string]any
-	Tools         []Tool
-	Handoffs      []*Handoff
+	Name     string
+	LLM      llm.Provider
+	Output   map[string]any
+	Tools    []Tool
+	Handoffs []*Handoff
+
+	// Skills are folders of instructions the agent reads only when it needs
+	// them — see SkillProvider and NewSkillRegistryFromDir. The agent lists
+	// them in its prompt and adds the provider's reader tool to Tools itself,
+	// so the two halves cannot be wired up inconsistently.
+	Skills        SkillProvider
 	McpServers    []MCPToolset
 	Runtime       Runtime
 	MaxLoops      *int
@@ -149,11 +156,15 @@ func NewAgent(opts *AgentOptions) *Agent {
 	}
 
 	return &Agent{
-		Name:           opts.Name,
-		output:         opts.Output,
-		history:        opts.History,
-		instruction:    opts.Instruction,
-		tools:          opts.Tools,
+		Name:        opts.Name,
+		output:      opts.Output,
+		history:     opts.History,
+		instruction: opts.Instruction,
+		// The skill source brings its own reader tool, so an agent given
+		// skills can always read them — there is no second thing to remember
+		// to pass, and no way to advertise a skill the model cannot open.
+		tools:          WithSkillTool(opts.Tools, opts.Skills),
+		skills:         opts.Skills,
 		mcpServers:     opts.McpServers,
 		llm:            &WrappedLLM{opts.LLM},
 		parameters:     opts.Parameters,
@@ -489,10 +500,14 @@ func (e *Agent) ExecuteWithRun(ctx context.Context, in *AgentInput, run *history
 			}
 		}
 
+		skills, skillToolName := skillDependencies(ctx, e.skills)
+
 		instruction, err = e.instruction.GetPrompt(ctx, &Dependencies{
 			RunContext:    in.RunContext,
 			Handoffs:      e.handoffs,
 			DeferredTools: deferredToolInfos,
+			Skills:        skills,
+			SkillToolName: skillToolName,
 		})
 		if err != nil {
 			return &AgentOutput{Status: agentstate.RunStatusError, RunID: runId}, err

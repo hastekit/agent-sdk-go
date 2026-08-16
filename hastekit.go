@@ -42,6 +42,11 @@ type AgentConfig struct {
 	Parameters    responses.Parameters
 	StickyHandoff bool
 
+	// Skills are folders of instructions the agent reads only when it needs
+	// them — see NewSkillRegistryFromDir. The agent lists them in its prompt
+	// and adds the reader tool to Tools itself.
+	Skills agents.SkillProvider
+
 	// Hooks observe or intercept what the agent does. A ToolCallHook wraps
 	// every tool it calls; a ModelCallHook wraps every call to the model, which
 	// is where a budget or credit check belongs. One hook may be both.
@@ -61,6 +66,7 @@ func (ac *AgentConfig) toAgentOptions() *agents.AgentOptions {
 		Instruction:   ac.Instruction,
 		Parameters:    ac.Parameters,
 		StickyHandoff: ac.StickyHandoff,
+		Skills:        ac.Skills,
 		Hooks:         ac.Hooks,
 	}
 }

@@ -69,8 +69,11 @@ func (w *AgentWorkflow) newRestateAgentProxy(restateCtx restate.WorkflowContext,
 	}
 	conversationHistory := history.NewConversationManager(conversationPersistenceProxy, options...)
 
+	// WithSkillTool, not options.Tools: an agent given skills adds the tool that
+	// reads them itself, and a tool this loop never wraps is one that would
+	// run outside the workflow's journal.
 	var restateTools []agents.Tool
-	for _, tool := range agentOptions.Tools {
+	for _, tool := range agents.WithSkillTool(agentOptions.Tools, agentOptions.Skills) {
 		restateTools = append(restateTools, NewRestateTool(restateCtx, tool, w.broker))
 	}
 
@@ -85,9 +88,14 @@ func (w *AgentWorkflow) newRestateAgentProxy(restateCtx restate.WorkflowContext,
 		Parameters: agentOptions.Parameters,
 		MaxLoops:   agentOptions.MaxLoops,
 
-		Instruction:  promptProxy,
-		History:      conversationHistory,
-		Tools:        restateTools,
+		Instruction: promptProxy,
+		History:     conversationHistory,
+		Tools:       restateTools,
+		// The skills travel with the proxy agent so the prompt still lists
+		// them, and names the tool that reads them. The reader tool itself is
+		// already in restateTools, wrapped as a workflow step — the agent sees
+		// it there and does not add a second, unjournaled one.
+		Skills:       agentOptions.Skills,
 		McpServers:   mcpClients,
 		ToolExecutor: NewRestateToolExecutor(restateCtx),
 		// The real hooks, each wrapped so its methods run as their own steps.

@@ -31,6 +31,7 @@ A powerful Golang SDK for building AI agents and making LLM calls across multipl
   - [Agents](#agents)
   - [AG-UI](#ag-ui)
   - [Tools](#tools)
+  - [Skills](#skills)
   - [Hooks](#hooks)
   - [Conversation History](#conversation-history)
   - [Durable Agents](#durable-agents)
@@ -493,6 +494,118 @@ if a.IsDestructive() {
 Every hint is a pointer, so "nothing was said" stays distinguishable from "false was said". Prefer the `Is*` helpers over reading fields directly: they are nil-safe and apply MCP's defaults, which are deliberately conservative — an unset `DestructiveHint` reads as destructive, an unset `ReadOnlyHint` as not read-only.
 
 > Hints are self-reported: they describe intent, not enforcement. Never let a hint from an untrusted MCP server widen what a tool is allowed to do.
+
+### Skills
+
+A skill is a folder of instructions the agent reads only when it needs them — a house style, a procedure, a checklist too long to keep in the system prompt every turn. Write one as a `SKILL.md` with YAML frontmatter, and put any supporting files beside it:
+
+```
+skills/
+└── changelog/
+    ├── SKILL.md
+    └── references/
+        └── style.md
+```
+
+```markdown
+---
+name: changelog
+description: Write a release changelog entry. Use whenever the user asks for release notes.
+---
+
+Group the changes under `Added`, `Changed`, `Fixed`, and `Removed`...
+The full house style is in `references/style.md`.
+```
+
+Point the agent at that folder:
+
+```go
+registry, err := hastekit.NewSkillRegistryFromDir("./skills")
+if err != nil {
+    log.Fatal(err)
+}
+
+agent := hastekit.NewAgent(&hastekit.AgentConfig{
+    Name: "Release_Agent",
+    Instruction: hastekit.NewPrompt(
+        "You help maintain this project's releases.",
+        prompts.WithResolver(prompts.DefaultResolvers()...), // ResolveSkills lists them
+    ),
+    Skills: registry,
+    LLM:    model,
+})
+```
+
+The agent lists the skills in its prompt and adds the tool that reads them to its own tools, so a prompt can never advertise a skill the model has no way to open. A prompt runs only the resolvers it is given, so one that leaves out `ResolveSkills` gets a model that never hears about them — see [Prompt resolvers](#prompt-resolvers) below.
+
+The prompt carries only each skill's name and description. The model calls `read_skill` with a name to pull in the instructions, and `read_skill` with a `file` to pull in one of the bundled files — so a long skill costs context only on the turns it is actually used.
+
+Pass several directories to draw from more than one library — a shared set plus this agent's own, say:
+
+```go
+registry, err := hastekit.NewSkillRegistryFromDir("./skills", "/etc/agent/skills")
+```
+
+Reading happens once, at construction. To pick up edits on disk, build a new registry.
+
+#### Shipping skills inside the binary
+
+Where the skills are part of the program rather than of its deployment, `go:embed` puts the whole tree in the binary — no folder to mount, copy, or keep in sync:
+
+```go
+//go:embed skills
+var skillsFS embed.FS
+
+registry, err := hastekit.NewSkillRegistry(skillsFS)
+```
+
+Embedding the parent folder is enough: a skill is found wherever a `SKILL.md` sits, so there is no `fs.Sub` to get right. `NewSkillRegistry` takes any `fs.FS`, so this is also the hook for skills that come from somewhere else entirely.
+
+#### Rules
+
+The name comes from the frontmatter, or from the folder when the frontmatter omits it. A folder holding a `SKILL.md` is one skill, and everything below it belongs to that skill — so a `SKILL.md` bundled as an example or a template stays a bundled file rather than becoming a second, half-formed skill.
+
+Loading fails loudly on a skill with no description, on broken frontmatter, on a directory that isn't there, and on the same name defined twice. Skills decide how the agent behaves, so a bad one should stop startup rather than go quietly missing at runtime.
+
+Only files a skill actually bundles are reachable through the tool: a path that tries to traverse out of the skill folder is refused, so one skill cannot read another or the rest of the filesystem the skills were read from.
+
+Skills work the same under the Temporal and Restate runtimes: the durable agent registers and wraps the reader tool along with the rest, so a `read_skill` call is journaled like any other tool call and replays from the journal rather than re-reading the folder.
+
+#### Skills from somewhere else
+
+`AgentConfig.Skills` takes an `agents.SkillProvider` — a source that lists its skills and supplies the tool that reads them:
+
+```go
+type SkillProvider interface {
+    Skills() []agents.Skill
+    SkillTool() agents.Tool // nil when the model already has a way to read them
+}
+```
+
+The agent asks the source for both, which is what keeps the prompt and the tools in step: the prompt names the exact tool the agent added. A source that returns no tool is one the model can already reach — skills staged into a sandbox it browses with its bash tool, for which `agents.SkillList` lists them and adds nothing:
+
+```go
+Skills: agents.SkillList{{Name: "changelog", Description: "Write a release changelog entry."}},
+```
+
+#### Prompt resolvers
+
+The system prompt is built by a chain of resolvers, each handed what the last produced along with the run's dependencies:
+
+```go
+type PromptResolverFn func(prompt string, deps *agents.Dependencies) (string, error)
+```
+
+A prompt starts with an empty chain and is used exactly as written — nothing appended, no templating. `prompts.DefaultResolvers()` is the standard set: `ResolveSkills`, `ResolveHandoffs`, `ResolveDeferredTools`, `ResolveTemplate` — the sections the agent contributes, then the `{{ placeholder }}` pass over the whole thing. Pass what you want, in the order you want; repeated calls accumulate:
+
+```go
+hastekit.NewPrompt("You help maintain this project's releases.",
+    prompts.WithResolver(prompts.DefaultResolvers()...),
+    prompts.WithResolver(func(prompt string, deps *agents.Dependencies) (string, error) {
+        return prompt + "\n\n## House rules\n\nBe brief.", nil
+    }),
+)
+```
 
 ### Hooks
 

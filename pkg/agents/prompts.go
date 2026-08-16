@@ -19,6 +19,18 @@ type Dependencies struct {
 	RunContext    map[string]any
 	Handoffs      []*Handoff
 	DeferredTools []DeferredToolInfo
+
+	// Skills the agent was given, and the name of the tool that reads them —
+	// empty when the model reaches them some other way, such as a sandbox it
+	// browses with its bash tool. The name travels with the skills so the
+	// prompt names the tool the agent actually added, rather than one it
+	// assumes is there.
+	//
+	// Like DeferredTools, these are the flattened, JSON-serializable view: the
+	// SkillProvider itself holds filesystem handles that do not survive a
+	// Temporal activity boundary.
+	Skills        []Skill `json:"skills,omitempty"`
+	SkillToolName string  `json:"skill_tool_name,omitempty"`
 }
 
 type SystemPromptProvider interface {

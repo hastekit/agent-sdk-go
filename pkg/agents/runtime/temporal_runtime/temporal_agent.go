@@ -54,7 +54,10 @@ func (a *TemporalAgentV2) GetActivities() map[string]interface{} {
 		activities[a.options.Name+"_MessageFilterActivity"] = temporalMessageFilter.Filter
 	}
 
-	for _, tool := range a.options.Tools {
+	// WithSkillTool, not options.Tools: an agent given skills adds the tool that
+	// reads them itself, and a tool with no activity registered is one the
+	// workflow cannot call.
+	for _, tool := range agents.WithSkillTool(a.options.Tools, a.options.Skills) {
 		temporalTool := NewTemporalTool(tool, a.broker)
 		activities[getToolName(a.options.Name, tool)+"_ExecuteToolActivity"] = temporalTool.Execute
 	}
@@ -118,7 +121,7 @@ func (a *TemporalAgentV2) newTemporalProxyAgent(ctx workflow.Context) *agents.Ag
 	conversationHistory := history.NewConversationManager(conversationPersistenceProxy, options...)
 
 	var toolProxies []agents.Tool
-	for _, tool := range a.options.Tools {
+	for _, tool := range agents.WithSkillTool(a.options.Tools, a.options.Skills) {
 		toolProxy := NewTemporalToolProxy(ctx, getToolName(a.options.Name, tool), tool)
 		toolProxies = append(toolProxies, toolProxy)
 	}
@@ -135,9 +138,14 @@ func (a *TemporalAgentV2) newTemporalProxyAgent(ctx workflow.Context) *agents.Ag
 		Parameters: a.options.Parameters,
 		MaxLoops:   a.options.MaxLoops,
 
-		History:      conversationHistory,
-		Instruction:  promptProxy,
-		Tools:        toolProxies,
+		History:     conversationHistory,
+		Instruction: promptProxy,
+		Tools:       toolProxies,
+		// The skills travel with the proxy agent so the prompt still lists
+		// them, and names the tool that reads them. The reader tool itself is
+		// already in toolProxies, wrapped as a workflow step — the agent sees
+		// it there and does not add a second, unjournaled one.
+		Skills:       a.options.Skills,
 		McpServers:   mcpProxies,
 		ToolExecutor: NewTemporalToolExecutor(ctx),
 		// Proxies, not the hooks themselves: the executor and the loop both run
