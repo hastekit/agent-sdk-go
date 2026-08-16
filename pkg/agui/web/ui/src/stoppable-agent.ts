@@ -15,6 +15,29 @@ type EventStream = ReturnType<typeof transformHttpEventStream>;
 // the broker stream id that identifies it (agui.CustomNameStreamID).
 const STREAM_ID_EVENT = "hastekit.stream_id";
 
+// Roles a client can contribute. Everything else (assistant, tool) is
+// the server's own output being echoed back to it.
+const INCOMING_ROLES = new Set(["user", "system", "developer"]);
+
+// newTurnOf returns the messages that are new this turn: the trailing
+// run of client-authored messages, which is everything after the last
+// thing the agent itself produced.
+//
+// This mirrors RunAgentInput.NewTurnSDKMessages in pkg/agui/run_input.go,
+// including its all-client-messages case (a first turn, where there is no
+// assistant message to cut at and the whole list is the turn). The two
+// must agree: the server applies the same rule to whatever it receives,
+// so trimming to this block is what makes the trim invisible to it.
+//
+// Empty is a valid answer. An approval resume ends on an assistant
+// message and contributes no new text — its decisions ride in
+// forwardedProps, and the server builds the resolution from those.
+function newTurnOf(messages: Message[]): Message[] {
+  let start = messages.length;
+  while (start > 0 && INCOMING_ROLES.has(messages[start - 1].role)) start--;
+  return messages.slice(start);
+}
+
 // StoppableHttpAgent adds the three things a long run needs from a browser
 // that comes and goes: stopping it for real, picking it back up, and
 // steering it while it works.
@@ -32,6 +55,10 @@ const STREAM_ID_EVENT = "hastekit.stream_id";
 export class StoppableHttpAgent extends HttpAgent {
   private readonly agentName: string;
   private streamId?: string;
+
+  // Whether the server needs the whole conversation posted to it. It
+  // normally does not — see requestInit.
+  private readonly fullHistory: boolean;
 
   // Turns steered into a run that was already in flight, held until that
   // run ends. A run's event pipeline clones agent.messages when it starts
@@ -55,6 +82,7 @@ export class StoppableHttpAgent extends HttpAgent {
     url: string;
     threadId?: string;
     history?: Message[];
+    fullHistory?: boolean;
   }) {
     super({
       url: config.url,
@@ -63,6 +91,7 @@ export class StoppableHttpAgent extends HttpAgent {
     });
     this.agentName = config.agentName;
     this.history = config.history ?? [];
+    this.fullHistory = config.fullHistory ?? false;
 
     this.subscribe({
       // Runs between the clear and the pipeline's snapshot, so history is
@@ -100,6 +129,32 @@ export class StoppableHttpAgent extends HttpAgent {
         this.steered = [];
       },
     });
+  }
+
+  // ── request body ───────────────────────────────────────────────────
+  //
+  // AbstractAgent.prepareRunAgentInput puts the agent's entire message
+  // list on every run, so the POST body grows with the thread and a long
+  // conversation re-uploads itself on each turn. The server does not want
+  // it: it takes the new turn from the trailing user block and loads
+  // everything before that from the thread itself, keyed by ThreadID. So
+  // the rest is bytes on the wire that are parsed and then dropped.
+  //
+  // Trimming here rather than in run() keeps it to the wire: `input` is
+  // also what the run's event pipeline snapshots and what subscribers see
+  // as `input.messages`, and the transcript on screen is that list.
+  // requestInit is the last place the input is only a request body.
+  //
+  // What goes is exactly what the server would have kept — the trailing
+  // block of user/system/developer messages — so this changes the payload
+  // and not the run. Sending that block back through the server's own
+  // rule reselects the same block, which is what makes the two agree.
+  //
+  // Approvals are untouched: they travel in forwardedProps, so a resume
+  // whose trailing block is empty still posts its decisions.
+  protected requestInit(input: RunAgentInput): RequestInit {
+    if (this.fullHistory) return super.requestInit(input);
+    return super.requestInit({ ...input, messages: newTurnOf(input.messages) });
   }
 
   // ── steer ──────────────────────────────────────────────────────────

@@ -42,6 +42,9 @@ function newActive(): Active {
 export default function App() {
   const [agents, setAgents] = useState<string[]>([]);
   const [agentName, setAgentName] = useState<string>("");
+  // Whether the server needs the full message list posted on every run.
+  // Reported by GET /agents; false is both the default and the common case.
+  const [fullHistory, setFullHistory] = useState(false);
   const [active, setActive] = useState<Active>(() => newActive());
   const [threads, setThreads] = useState<ThreadInfo[]>([]);
   const [listingSupported, setListingSupported] = useState(true);
@@ -56,8 +59,9 @@ export default function App() {
   // Load the agent list once.
   useEffect(() => {
     fetchAgents()
-      .then((names) => {
+      .then(({ agents: names, fullHistory }) => {
         setAgents(names);
+        setFullHistory(fullHistory);
         if (names.length) setAgentName(names[0]);
         else setError("No agents registered on the server.");
       })
@@ -99,8 +103,9 @@ export default function App() {
       url: runUrl(agentName),
       threadId: active.threadId,
       history: active.initialMessages,
+      fullHistory,
     });
-  }, [agentName, active.threadId, active.initialMessages]);
+  }, [agentName, active.threadId, active.initialMessages, fullHistory]);
 
   // Rejoining a run in flight is CopilotChat's own doing: it connects to
   // the thread whenever it is given an explicit threadId, and the server

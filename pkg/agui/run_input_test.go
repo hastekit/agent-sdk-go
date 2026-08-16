@@ -257,3 +257,73 @@ func TestNullContentIsNotASubmission(t *testing.T) {
 	assert.False(t, decisions[0].Approved)
 	assert.Empty(t, decisions[0].Content)
 }
+
+// The embedded UI trims the run body down to the new turn instead of
+// re-posting the whole thread on every message (StoppableHttpAgent.requestInit,
+// mirroring NewTurnSDKMessages in ui/src/stoppable-agent.ts). That is only
+// safe because the rule is idempotent: reapplying it to an already-trimmed
+// list has to select the same messages, or the client and server would
+// disagree about what the turn is.
+//
+// This pins the property for the shapes a client actually posts. If
+// NewTurnSDKMessages ever stops being idempotent, the trimming in the UI
+// has to go with it.
+func TestNewTurnSDKMessagesIsIdempotent(t *testing.T) {
+	toolCall := []ToolCall{{ID: "call_1", Type: "function", Function: ToolCallFunction{Name: "f", Arguments: "{}"}}}
+
+	cases := map[string][]Message{
+		"follow-up turn": {
+			{ID: "m1", Role: RoleUser, Content: "first question"},
+			{ID: "m2", Role: RoleAssistant, Content: "first answer"},
+			{ID: "m3", Role: RoleUser, Content: "follow-up"},
+		},
+		"multi-message turn": {
+			{ID: "m1", Role: RoleUser, Content: "old"},
+			{ID: "m2", Role: RoleAssistant, Content: "answer"},
+			{ID: "m3", Role: RoleSystem, Content: "be brief"},
+			{ID: "m3", Role: RoleUser, Content: "follow-up"},
+		},
+		"first turn": {
+			{ID: "m1", Role: RoleSystem, Content: "be helpful"},
+			{ID: "m2", Role: RoleUser, Content: "hi"},
+		},
+		"after a tool call": {
+			{ID: "m1", Role: RoleUser, Content: "old"},
+			{ID: "m2", Role: RoleAssistant, ToolCalls: toolCall},
+			{ID: "m3", Role: RoleTool, ToolCallID: "call_1", Content: "result"},
+			{ID: "m4", Role: RoleUser, Content: "next"},
+		},
+		"approval resume, no new text": {
+			{ID: "m1", Role: RoleUser, Content: "old"},
+			{ID: "m2", Role: RoleAssistant, ToolCalls: toolCall},
+		},
+		"empty": {},
+	}
+
+	for name, msgs := range cases {
+		t.Run(name, func(t *testing.T) {
+			full := &RunAgentInput{ThreadID: "t", Messages: msgs}
+
+			// What the client keeps is the same trailing block the server
+			// selects, so re-selecting from it must not move the boundary.
+			trimmed := &RunAgentInput{ThreadID: "t", Messages: newTurnOf(msgs)}
+
+			assert.Equal(t, full.NewTurnSDKMessages(), trimmed.NewTurnSDKMessages())
+		})
+	}
+}
+
+// newTurnOf is the Go twin of the UI's trimming, kept next to the test that
+// uses it so the two stay comparable by inspection.
+func newTurnOf(msgs []Message) []Message {
+	start := len(msgs)
+	for start > 0 {
+		switch msgs[start-1].Role {
+		case RoleUser, RoleSystem, RoleDeveloper:
+			start--
+		default:
+			return msgs[start:]
+		}
+	}
+	return msgs
+}

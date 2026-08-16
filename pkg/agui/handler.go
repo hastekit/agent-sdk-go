@@ -101,7 +101,16 @@ func NewHandler(registry Registry, opts ...Option) http.Handler {
 
 	mux.HandleFunc("GET /agents", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"agents": registry.AgentNames()})
+		// full_history tells a client whether this server needs the whole
+		// conversation on every run. It normally does not — the agent loads
+		// the thread itself from ThreadID — so a client that knows this can
+		// post just the new turn instead of re-uploading the thread as it
+		// grows. Under WithFullHistory there is no stored thread to load
+		// from, and the client's list is the only history there is.
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"agents":       registry.AgentNames(),
+			"full_history": o.fullHistory,
+		})
 	})
 
 	mux.HandleFunc("POST /agents/{agent}/run", func(w http.ResponseWriter, r *http.Request) {

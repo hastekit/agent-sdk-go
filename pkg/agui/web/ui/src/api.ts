@@ -21,10 +21,18 @@ export interface ThreadInfo {
   updated_at: string;
 }
 
-export async function fetchAgents(): Promise<string[]> {
+// fetchAgents returns the registered agent names along with whether the
+// server wants the client's whole message list posted on every run. It
+// normally doesn't — the agent loads the thread itself — so the default
+// on an older server that omits the field is the cheap one.
+export async function fetchAgents(): Promise<{
+  agents: string[];
+  fullHistory: boolean;
+}> {
   const r = await fetch(`${API}/agents`);
   if (!r.ok) throw new Error(`agents → ${r.status}`);
-  return (await r.json()).agents ?? [];
+  const body = await r.json();
+  return { agents: body.agents ?? [], fullHistory: body.full_history === true };
 }
 
 // fetchThreads returns supported=false when the agent's persistence
