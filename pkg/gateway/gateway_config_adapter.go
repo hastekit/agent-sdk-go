@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm"
 )
 
 // InMemoryConfigStore implements gateway.ConfigStore for SDK use.

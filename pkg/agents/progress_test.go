@@ -5,11 +5,11 @@ import (
 	"testing"
 
 	"github.com/bytedance/sonic"
-	"github.com/hastekit/hastekit-sdk-go/pkg/agents"
-	"github.com/hastekit/hastekit-sdk-go/pkg/agents/agentstate"
-	"github.com/hastekit/hastekit-sdk-go/pkg/agents/streambroker"
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/constants"
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/responses"
+	"github.com/hastekit/agent-sdk-go/pkg/agents"
+	"github.com/hastekit/agent-sdk-go/pkg/agents/agentstate"
+	"github.com/hastekit/agent-sdk-go/pkg/agents/streambroker"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/constants"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
 )
 
 // A tool that emits progress mid-execution has those updates delivered to the

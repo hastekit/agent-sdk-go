@@ -5,7 +5,7 @@ import (
 
 	"github.com/bytedance/sonic"
 	"github.com/google/uuid"
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/constants"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/constants"
 )
 
 type Response struct {

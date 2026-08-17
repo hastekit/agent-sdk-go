@@ -3,7 +3,7 @@ package gateway
 import (
 	"context"
 
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm"
 )
 
 type RequestHandler func(ctx context.Context, providerName llm.ProviderName, key string, r *llm.Request) (*llm.Response, error)

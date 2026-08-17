@@ -6,12 +6,12 @@ import (
 
 	"github.com/bytedance/sonic"
 	"github.com/google/uuid"
-	"github.com/hastekit/hastekit-sdk-go/pkg/agents"
-	"github.com/hastekit/hastekit-sdk-go/pkg/agents/agentstate"
-	"github.com/hastekit/hastekit-sdk-go/pkg/agents/history"
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/constants"
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/responses"
-	"github.com/hastekit/hastekit-sdk-go/pkg/utils"
+	"github.com/hastekit/agent-sdk-go/pkg/agents"
+	"github.com/hastekit/agent-sdk-go/pkg/agents/agentstate"
+	"github.com/hastekit/agent-sdk-go/pkg/agents/history"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/constants"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
+	"github.com/hastekit/agent-sdk-go/pkg/utils"
 )
 
 type SubAgentContextMode string

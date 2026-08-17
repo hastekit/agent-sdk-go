@@ -1,11 +1,11 @@
 package sdk
 
 import (
-	"github.com/hastekit/hastekit-sdk-go/pkg/agents"
-	"github.com/hastekit/hastekit-sdk-go/pkg/agents/history"
-	"github.com/hastekit/hastekit-sdk-go/pkg/agents/streambroker"
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm"
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/responses"
+	"github.com/hastekit/agent-sdk-go/pkg/agents"
+	"github.com/hastekit/agent-sdk-go/pkg/agents/history"
+	"github.com/hastekit/agent-sdk-go/pkg/agents/streambroker"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
 )
 
 var (

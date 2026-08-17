@@ -4,9 +4,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/constants"
-	responses "github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/responses"
-	"github.com/hastekit/hastekit-sdk-go/pkg/utils"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/constants"
+	responses "github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
+	"github.com/hastekit/agent-sdk-go/pkg/utils"
 )
 
 // ConverseStreamToNativeConverter converts Bedrock ConverseStream events to native ResponseChunks.

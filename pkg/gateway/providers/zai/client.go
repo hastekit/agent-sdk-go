@@ -12,7 +12,7 @@ package zai
 import (
 	"net/http"
 
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/providers/openaicompat"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/providers/openaicompat"
 )
 
 const DefaultBaseURL = "https://api.z.ai/api/paas/v4"

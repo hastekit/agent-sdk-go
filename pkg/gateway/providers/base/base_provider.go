@@ -4,13 +4,13 @@ import (
 	"context"
 	"net/http"
 
-	chat_completion2 "github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/chat_completion"
-	embeddings2 "github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/embeddings"
-	image_edit2 "github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/image_edit"
-	image_generation2 "github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/image_generation"
-	responses2 "github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/responses"
-	speech2 "github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/speech"
-	transcription2 "github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/transcription"
+	chat_completion2 "github.com/hastekit/agent-sdk-go/pkg/gateway/llm/chat_completion"
+	embeddings2 "github.com/hastekit/agent-sdk-go/pkg/gateway/llm/embeddings"
+	image_edit2 "github.com/hastekit/agent-sdk-go/pkg/gateway/llm/image_edit"
+	image_generation2 "github.com/hastekit/agent-sdk-go/pkg/gateway/llm/image_generation"
+	responses2 "github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
+	speech2 "github.com/hastekit/agent-sdk-go/pkg/gateway/llm/speech"
+	transcription2 "github.com/hastekit/agent-sdk-go/pkg/gateway/llm/transcription"
 )
 
 type BaseProvider struct{}

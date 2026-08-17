@@ -7,7 +7,7 @@ import (
 	"testing"
 	"testing/fstest"
 
-	"github.com/hastekit/hastekit-sdk-go/pkg/agents"
+	"github.com/hastekit/agent-sdk-go/pkg/agents"
 )
 
 func skillFS() fstest.MapFS {

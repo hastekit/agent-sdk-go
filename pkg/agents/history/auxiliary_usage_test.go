@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/responses"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
 )
 
 // usageReportingSummarizer reports a cost for the summary it produces, the way

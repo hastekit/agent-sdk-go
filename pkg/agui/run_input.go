@@ -7,8 +7,8 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/constants"
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/responses"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/constants"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
 )
 
 // RunAgentInput is the canonical AG-UI request body. Matches the

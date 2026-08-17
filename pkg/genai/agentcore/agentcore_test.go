@@ -3,7 +3,7 @@ package agentcore
 import (
 	"testing"
 
-	"github.com/hastekit/hastekit-sdk-go/pkg/genai"
+	"github.com/hastekit/agent-sdk-go/pkg/genai"
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
 )

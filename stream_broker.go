@@ -3,8 +3,8 @@ package sdk
 import (
 	"fmt"
 
-	"github.com/hastekit/hastekit-sdk-go/pkg/agents"
-	"github.com/hastekit/hastekit-sdk-go/pkg/agents/streambroker"
+	"github.com/hastekit/agent-sdk-go/pkg/agents"
+	"github.com/hastekit/agent-sdk-go/pkg/agents/streambroker"
 )
 
 func NewStreamBroker() (agents.StreamBroker, error) {

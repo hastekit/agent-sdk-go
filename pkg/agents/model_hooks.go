@@ -3,8 +3,8 @@ package agents
 import (
 	"context"
 
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/constants"
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/responses"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/constants"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
 )
 
 // ModelCallHook wraps a call to the model: it sees the call on the way out and

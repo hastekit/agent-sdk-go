@@ -3,8 +3,8 @@ package restate_runtime
 import (
 	"context"
 
-	"github.com/hastekit/hastekit-sdk-go/pkg/agents/history"
-	"github.com/hastekit/hastekit-sdk-go/pkg/agents/messages"
+	"github.com/hastekit/agent-sdk-go/pkg/agents/history"
+	"github.com/hastekit/agent-sdk-go/pkg/agents/messages"
 	restate "github.com/restatedev/sdk-go"
 )
 

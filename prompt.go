@@ -1,7 +1,7 @@
 package sdk
 
 import (
-	"github.com/hastekit/hastekit-sdk-go/pkg/agents/prompts"
+	"github.com/hastekit/agent-sdk-go/pkg/agents/prompts"
 )
 
 var NewPrompt = prompts.New

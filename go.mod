@@ -1,4 +1,4 @@
-module github.com/hastekit/hastekit-sdk-go
+module github.com/hastekit/agent-sdk-go
 
 go 1.25.3
 

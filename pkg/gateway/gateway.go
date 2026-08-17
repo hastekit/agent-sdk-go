@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm"
 	"go.opentelemetry.io/otel"
 )
 

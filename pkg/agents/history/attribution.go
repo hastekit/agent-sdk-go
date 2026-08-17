@@ -3,8 +3,8 @@ package history
 import (
 	"strings"
 
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/constants"
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/responses"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/constants"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
 )
 
 // attributeMessages flattens sender-grouped bundles into the flat provider

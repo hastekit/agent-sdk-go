@@ -1,7 +1,7 @@
 package sarvam_transcription
 
 import (
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/transcription"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/transcription"
 )
 
 // LanguageCodeUnknown asks Sarvam to auto-detect the spoken language.

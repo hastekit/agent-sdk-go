@@ -4,7 +4,7 @@ import (
 	"errors"
 
 	"github.com/bytedance/sonic"
-	"github.com/hastekit/hastekit-sdk-go/pkg/utils"
+	"github.com/hastekit/agent-sdk-go/pkg/utils"
 )
 
 type Request struct {

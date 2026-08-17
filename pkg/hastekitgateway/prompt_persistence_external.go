@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/hastekit/hastekit-sdk-go/pkg/agents/prompts"
-	"github.com/hastekit/hastekit-sdk-go/pkg/utils"
+	"github.com/hastekit/agent-sdk-go/pkg/agents/prompts"
+	"github.com/hastekit/agent-sdk-go/pkg/utils"
 )
 
 // ExternalPromptPersistence resolves a (prompt name, alias) pair

@@ -1,7 +1,7 @@
 package xai_responses
 
 import (
-	responses2 "github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/responses"
+	responses2 "github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
 )
 
 func (in *Request) ToNativeRequest() *responses2.Request {

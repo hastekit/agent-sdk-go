@@ -5,9 +5,9 @@ import (
 	"mime"
 	"path/filepath"
 
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/image_edit"
-	gemini_responses2 "github.com/hastekit/hastekit-sdk-go/pkg/gateway/providers/gemini/gemini_responses"
-	"github.com/hastekit/hastekit-sdk-go/pkg/utils"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/image_edit"
+	gemini_responses2 "github.com/hastekit/agent-sdk-go/pkg/gateway/providers/gemini/gemini_responses"
+	"github.com/hastekit/agent-sdk-go/pkg/utils"
 )
 
 // Request represents a Gemini Nano Banana image edit request.

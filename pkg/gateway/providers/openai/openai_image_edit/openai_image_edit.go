@@ -1,8 +1,8 @@
 package openai_image_edit
 
 import (
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/image_edit"
-	"github.com/hastekit/hastekit-sdk-go/pkg/utils"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/image_edit"
+	"github.com/hastekit/agent-sdk-go/pkg/utils"
 )
 
 // Response represents an OpenAI image edit response.

@@ -3,8 +3,8 @@ package agents
 import (
 	"context"
 
-	"github.com/hastekit/hastekit-sdk-go/pkg/agents/history"
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/responses"
+	"github.com/hastekit/agent-sdk-go/pkg/agents/history"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
 )
 
 type HandoffTarget interface {

@@ -3,8 +3,8 @@ package gateway
 import (
 	"context"
 
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm"
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/image_edit"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/image_edit"
 )
 
 // Tracing for these requests is handled by TracingMiddleware, not inline.

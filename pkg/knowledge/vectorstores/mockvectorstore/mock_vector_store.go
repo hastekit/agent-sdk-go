@@ -3,7 +3,7 @@ package mockvectorstore
 import (
 	"context"
 
-	"github.com/hastekit/hastekit-sdk-go/pkg/knowledge/vectorstores"
+	"github.com/hastekit/agent-sdk-go/pkg/knowledge/vectorstores"
 )
 
 // NoOpVectorStore is a placeholder implementation that does nothing.

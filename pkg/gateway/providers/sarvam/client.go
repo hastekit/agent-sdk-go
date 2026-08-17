@@ -11,15 +11,15 @@ import (
 	"net/http"
 
 	"github.com/bytedance/sonic"
-	chat_completion2 "github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/chat_completion"
-	responses2 "github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/responses"
-	speech2 "github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/speech"
-	transcription2 "github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/transcription"
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/providers/base"
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/providers/openaicompat"
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/providers/sarvam/sarvam_speech"
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/providers/sarvam/sarvam_transcription"
-	"github.com/hastekit/hastekit-sdk-go/pkg/utils"
+	chat_completion2 "github.com/hastekit/agent-sdk-go/pkg/gateway/llm/chat_completion"
+	responses2 "github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
+	speech2 "github.com/hastekit/agent-sdk-go/pkg/gateway/llm/speech"
+	transcription2 "github.com/hastekit/agent-sdk-go/pkg/gateway/llm/transcription"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/providers/base"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/providers/openaicompat"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/providers/sarvam/sarvam_speech"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/providers/sarvam/sarvam_transcription"
+	"github.com/hastekit/agent-sdk-go/pkg/utils"
 )
 
 // DefaultBaseURL is the Sarvam API root. Speech endpoints hang directly off

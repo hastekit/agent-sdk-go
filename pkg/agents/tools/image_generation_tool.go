@@ -3,8 +3,8 @@ package tools
 import (
 	"context"
 
-	"github.com/hastekit/hastekit-sdk-go/pkg/agents"
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/responses"
+	"github.com/hastekit/agent-sdk-go/pkg/agents"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
 )
 
 type ImageGenerationTool struct {

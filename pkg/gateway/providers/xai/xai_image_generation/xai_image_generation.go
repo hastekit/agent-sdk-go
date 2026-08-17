@@ -1,8 +1,8 @@
 package xai_image_generation
 
 import (
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/image_generation"
-	"github.com/hastekit/hastekit-sdk-go/pkg/utils"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/image_generation"
+	"github.com/hastekit/agent-sdk-go/pkg/utils"
 )
 
 // Request represents an xAI image generation request.

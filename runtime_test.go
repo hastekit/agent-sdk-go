@@ -4,10 +4,10 @@ import (
 	"context"
 	"testing"
 
-	"github.com/hastekit/hastekit-sdk-go/pkg/agents"
-	"github.com/hastekit/hastekit-sdk-go/pkg/agents/runtime/restate_runtime"
-	"github.com/hastekit/hastekit-sdk-go/pkg/agents/runtime/temporal_runtime"
-	"github.com/hastekit/hastekit-sdk-go/pkg/agents/streambroker"
+	"github.com/hastekit/agent-sdk-go/pkg/agents"
+	"github.com/hastekit/agent-sdk-go/pkg/agents/runtime/restate_runtime"
+	"github.com/hastekit/agent-sdk-go/pkg/agents/runtime/temporal_runtime"
+	"github.com/hastekit/agent-sdk-go/pkg/agents/streambroker"
 )
 
 // Registering an agent on a durable runtime must not change the broker it

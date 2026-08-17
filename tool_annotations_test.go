@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/hastekit/hastekit-sdk-go/pkg/agents"
+	"github.com/hastekit/agent-sdk-go/pkg/agents"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

@@ -1,7 +1,7 @@
 # HasteKit SDK - Go
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/hastekit/hastekit-sdk-go.svg)](https://pkg.go.dev/github.com/hastekit/hastekit-sdk-go)
-[![Go Report Card](https://goreportcard.com/badge/github.com/hastekit/hastekit-sdk-go)](https://goreportcard.com/report/github.com/hastekit/hastekit-sdk-go)
+[![Go Reference](https://pkg.go.dev/badge/github.com/hastekit/agent-sdk-go.svg)](https://pkg.go.dev/github.com/hastekit/agent-sdk-go)
+[![Go Report Card](https://goreportcard.com/badge/github.com/hastekit/agent-sdk-go)](https://goreportcard.com/report/github.com/hastekit/agent-sdk-go)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
 A powerful Golang SDK for building AI agents and making LLM calls across multiple providers with a unified API. Switch between OpenAI, Anthropic, Gemini, and more with just a single line change.
@@ -44,7 +44,7 @@ A powerful Golang SDK for building AI agents and making LLM calls across multipl
 ## Installation
 
 ```bash
-go get -u github.com/hastekit/hastekit-sdk-go
+go get -u github.com/hastekit/agent-sdk-go
 ```
 
 **Requirements:**
@@ -63,9 +63,9 @@ import (
     "log"
     "os"
 
-    hastekit "github.com/hastekit/hastekit-sdk-go"
-    "github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/responses"
-    "github.com/hastekit/hastekit-sdk-go/pkg/utils"
+    hastekit "github.com/hastekit/agent-sdk-go"
+    "github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
+    "github.com/hastekit/agent-sdk-go/pkg/utils"
 )
 
 func main() {
@@ -116,11 +116,11 @@ import (
     "log"
     "os"
 
-    hastekit "github.com/hastekit/hastekit-sdk-go"
-    "github.com/hastekit/hastekit-sdk-go/pkg/agents"
-    "github.com/hastekit/hastekit-sdk-go/pkg/agents/history"
-    "github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/responses"
-    "github.com/hastekit/hastekit-sdk-go/pkg/utils"
+    hastekit "github.com/hastekit/agent-sdk-go"
+    "github.com/hastekit/agent-sdk-go/pkg/agents"
+    "github.com/hastekit/agent-sdk-go/pkg/agents/history"
+    "github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
+    "github.com/hastekit/agent-sdk-go/pkg/utils"
 )
 
 func main() {
@@ -380,7 +380,7 @@ The `StreamID` on the handle (also returned in the `X-Stream-Id` HTTP header whe
 Agents are served to the browser over the [AG-UI protocol](https://github.com/ag-ui-protocol/ag-ui) — the standard event-stream protocol that frontend agent frameworks (CopilotKit, raw `@ag-ui/client`, etc.) speak. The `pkg/agui` package translates the SDK's streaming chunks into canonical AG-UI events (text messages, reasoning, tool calls, steps, human-in-the-loop interrupts) over SSE:
 
 ```go
-import "github.com/hastekit/hastekit-sdk-go/pkg/agui"
+import "github.com/hastekit/agent-sdk-go/pkg/agui"
 
 // Agents register into a package-global registry when created.
 hastekit.NewAgent(&hastekit.AgentConfig{
@@ -405,7 +405,7 @@ http.ListenAndServe(":8080", agui.NewHandler(registry))
 For a zero-setup browser chat UI, the `pkg/agui/web` package embeds a ready-made [CopilotKit](https://copilotkit.ai) chat into your binary with `go:embed` — no Node toolchain or separate frontend deploy needed to *run* it:
 
 ```go
-import "github.com/hastekit/hastekit-sdk-go/pkg/agui/web"
+import "github.com/hastekit/agent-sdk-go/pkg/agui/web"
 
 // Serves the embedded CopilotKit chat UI at / and the AG-UI protocol
 // endpoints under /api/agui/*.
@@ -441,7 +441,7 @@ Human-in-the-loop: when a run pauses for tool approval, the stream emits a `CUST
 Connect to MCP servers for access to standardized tools:
 
 ```go
-import "github.com/hastekit/hastekit-sdk-go/pkg/agents/mcpclient"
+import "github.com/hastekit/agent-sdk-go/pkg/agents/mcpclient"
 
 // Connect to MCP server
 mcpClient, err := mcpclient.NewSSEClient(
@@ -849,7 +849,7 @@ http.ListenAndServe(":8070", hastekit.NewHTTPHandler())
 Generate text embeddings for semantic search and RAG applications:
 
 ```go
-import "github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/embeddings"
+import "github.com/hastekit/agent-sdk-go/pkg/gateway/llm/embeddings"
 
 embedder := client.Model("OpenAI/text-embedding-3-small")
 
@@ -953,7 +953,7 @@ for _, output := range resp.Output {
 - **[Agent Guide](https://docs.hastekit.ai/hastekit-sdk/agents/simple-agent)** - Build AI agents
 - **[Tool Integration](https://docs.hastekit.ai/hastekit-sdk/agents/tools/function-tools)** - Custom tools and MCP
 - **[Durable Execution](https://docs.hastekit.ai/hastekit-sdk/agents/durable/restate)** - Fault-tolerant agents
-- **[API Reference](https://pkg.go.dev/github.com/hastekit/hastekit-sdk-go)** - Go package documentation
+- **[API Reference](https://pkg.go.dev/github.com/hastekit/agent-sdk-go)** - Go package documentation
 
 ## Examples
 
@@ -1016,7 +1016,7 @@ Any other OpenAI-compatible endpoint can be added the same way: point `openaicom
 ## Architecture
 
 ```
-hastekit-sdk-go/
+agent-sdk-go/
 └── pkg/
     ├── agents/              # Agent orchestration, hooks, tool annotations
     │   ├── runtime/         # Durable execution runtimes
@@ -1055,8 +1055,8 @@ This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENS
 ## Support
 
 - **Documentation**: [docs.hastekit.ai](https://docs.hastekit.ai)
-- **Issues**: [GitHub Issues](https://github.com/hastekit/hastekit-sdk-go/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/hastekit/hastekit-sdk-go/discussions)
+- **Issues**: [GitHub Issues](https://github.com/hastekit/agent-sdk-go/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/hastekit/agent-sdk-go/discussions)
 
 ## Related Projects
 

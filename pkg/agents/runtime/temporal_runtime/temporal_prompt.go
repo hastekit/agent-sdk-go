@@ -3,7 +3,7 @@ package temporal_runtime
 import (
 	"context"
 
-	"github.com/hastekit/hastekit-sdk-go/pkg/agents"
+	"github.com/hastekit/agent-sdk-go/pkg/agents"
 	"go.temporal.io/sdk/workflow"
 )
 

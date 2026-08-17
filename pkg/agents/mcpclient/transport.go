@@ -12,7 +12,7 @@ import (
 // (a *mcp.ClientSession), so a single shared client is sufficient — each
 // Connect call yields its own session.
 var sdkClient = mcp.NewClient(&mcp.Implementation{
-	Name:    "hastekit-sdk-go",
+	Name:    "agent-sdk-go",
 	Version: "0.1.0",
 }, &mcp.ClientOptions{
 	ProgressNotificationHandler: handleProgressNotification,

@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/bytedance/sonic"
-	"github.com/hastekit/hastekit-sdk-go/pkg/utils"
+	"github.com/hastekit/agent-sdk-go/pkg/utils"
 )
 
 // CreateSandboxRequest is the request body for creating a sandbox via the API.

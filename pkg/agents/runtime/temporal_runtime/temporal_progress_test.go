@@ -4,11 +4,11 @@ import (
 	"context"
 	"testing"
 
-	"github.com/hastekit/hastekit-sdk-go/pkg/agents"
-	"github.com/hastekit/hastekit-sdk-go/pkg/agents/runtime/temporal_runtime"
-	"github.com/hastekit/hastekit-sdk-go/pkg/agents/streambroker"
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/responses"
-	"github.com/hastekit/hastekit-sdk-go/pkg/utils"
+	"github.com/hastekit/agent-sdk-go/pkg/agents"
+	"github.com/hastekit/agent-sdk-go/pkg/agents/runtime/temporal_runtime"
+	"github.com/hastekit/agent-sdk-go/pkg/agents/streambroker"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
+	"github.com/hastekit/agent-sdk-go/pkg/utils"
 	"go.temporal.io/sdk/testsuite"
 )
 

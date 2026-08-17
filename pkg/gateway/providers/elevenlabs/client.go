@@ -11,12 +11,12 @@ import (
 	"strconv"
 
 	"github.com/bytedance/sonic"
-	speech2 "github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/speech"
-	transcription2 "github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/transcription"
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/providers/base"
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/providers/elevenlabs/elevenlabs_speech"
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/providers/elevenlabs/elevenlabs_transcription"
-	"github.com/hastekit/hastekit-sdk-go/pkg/utils"
+	speech2 "github.com/hastekit/agent-sdk-go/pkg/gateway/llm/speech"
+	transcription2 "github.com/hastekit/agent-sdk-go/pkg/gateway/llm/transcription"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/providers/base"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/providers/elevenlabs/elevenlabs_speech"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/providers/elevenlabs/elevenlabs_transcription"
+	"github.com/hastekit/agent-sdk-go/pkg/utils"
 )
 
 type ClientOptions struct {

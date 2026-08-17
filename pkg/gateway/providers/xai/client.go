@@ -13,16 +13,16 @@ import (
 	"strings"
 
 	"github.com/bytedance/sonic"
-	image_edit2 "github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/image_edit"
-	image_generation2 "github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/image_generation"
-	responses2 "github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/responses"
-	speech2 "github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/speech"
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/providers/base"
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/providers/xai/xai_image_edit"
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/providers/xai/xai_image_generation"
-	xai_responses2 "github.com/hastekit/hastekit-sdk-go/pkg/gateway/providers/xai/xai_responses"
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/providers/xai/xai_speech"
-	"github.com/hastekit/hastekit-sdk-go/pkg/utils"
+	image_edit2 "github.com/hastekit/agent-sdk-go/pkg/gateway/llm/image_edit"
+	image_generation2 "github.com/hastekit/agent-sdk-go/pkg/gateway/llm/image_generation"
+	responses2 "github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
+	speech2 "github.com/hastekit/agent-sdk-go/pkg/gateway/llm/speech"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/providers/base"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/providers/xai/xai_image_edit"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/providers/xai/xai_image_generation"
+	xai_responses2 "github.com/hastekit/agent-sdk-go/pkg/gateway/providers/xai/xai_responses"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/providers/xai/xai_speech"
+	"github.com/hastekit/agent-sdk-go/pkg/utils"
 )
 
 type ClientOptions struct {

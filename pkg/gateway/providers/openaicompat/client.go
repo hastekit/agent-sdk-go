@@ -9,10 +9,10 @@ import (
 	"strings"
 
 	"github.com/bytedance/sonic"
-	chat_completion2 "github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/chat_completion"
-	responses2 "github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/responses"
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/providers/base"
-	"github.com/hastekit/hastekit-sdk-go/pkg/utils"
+	chat_completion2 "github.com/hastekit/agent-sdk-go/pkg/gateway/llm/chat_completion"
+	responses2 "github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/providers/base"
+	"github.com/hastekit/agent-sdk-go/pkg/utils"
 )
 
 type ClientOptions struct {

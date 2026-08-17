@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"github.com/bytedance/sonic"
-	"github.com/hastekit/hastekit-sdk-go/pkg/agents/messages"
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/responses"
+	"github.com/hastekit/agent-sdk-go/pkg/agents/messages"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
 	"github.com/redis/go-redis/v9"
 )
 

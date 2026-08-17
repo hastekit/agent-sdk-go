@@ -37,7 +37,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
-	"github.com/hastekit/hastekit-sdk-go/pkg/genai"
+	"github.com/hastekit/agent-sdk-go/pkg/genai"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	collogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"

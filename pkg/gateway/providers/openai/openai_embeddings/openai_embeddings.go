@@ -1,7 +1,7 @@
 package openai_embeddings
 
 import (
-	embeddings2 "github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/embeddings"
+	embeddings2 "github.com/hastekit/agent-sdk-go/pkg/gateway/llm/embeddings"
 )
 
 type Request struct {

@@ -7,7 +7,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/hastekit/hastekit-sdk-go/pkg/knowledge/embedder"
+	"github.com/hastekit/agent-sdk-go/pkg/knowledge/embedder"
 )
 
 // SemanticSplitterOptions configures the semantic chunking behavior.

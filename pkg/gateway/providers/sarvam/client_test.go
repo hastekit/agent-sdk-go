@@ -9,11 +9,11 @@ import (
 	"testing"
 
 	"github.com/bytedance/sonic"
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/responses"
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/speech"
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/transcription"
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/providers/sarvam/sarvam_speech"
-	"github.com/hastekit/hastekit-sdk-go/pkg/utils"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/speech"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/transcription"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/providers/sarvam/sarvam_speech"
+	"github.com/hastekit/agent-sdk-go/pkg/utils"
 )
 
 func TestNewSpeech(t *testing.T) {

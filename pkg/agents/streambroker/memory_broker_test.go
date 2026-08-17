@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/hastekit/hastekit-sdk-go/pkg/agents/streambroker"
+	"github.com/hastekit/agent-sdk-go/pkg/agents/streambroker"
 )
 
 func TestMemoryBrokerWatchStop(t *testing.T) {

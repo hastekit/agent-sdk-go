@@ -3,7 +3,7 @@ package sarvam_speech
 import (
 	"encoding/base64"
 
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/speech"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/speech"
 )
 
 const (

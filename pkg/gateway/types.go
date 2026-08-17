@@ -1,7 +1,7 @@
 package gateway
 
 import (
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm"
 )
 
 // ProviderConfig contains provider-level configuration.

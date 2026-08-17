@@ -3,9 +3,9 @@ package restate_runtime
 import (
 	"fmt"
 
-	"github.com/hastekit/hastekit-sdk-go/pkg/agents"
-	"github.com/hastekit/hastekit-sdk-go/pkg/agents/agentstate"
-	"github.com/hastekit/hastekit-sdk-go/pkg/agents/history"
+	"github.com/hastekit/agent-sdk-go/pkg/agents"
+	"github.com/hastekit/agent-sdk-go/pkg/agents/agentstate"
+	"github.com/hastekit/agent-sdk-go/pkg/agents/history"
 	restate "github.com/restatedev/sdk-go"
 )
 

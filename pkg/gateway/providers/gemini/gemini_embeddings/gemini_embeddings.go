@@ -1,9 +1,9 @@
 package gemini_embeddings
 
 import (
-	embeddings2 "github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/embeddings"
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/providers/gemini/gemini_responses"
-	"github.com/hastekit/hastekit-sdk-go/pkg/utils"
+	embeddings2 "github.com/hastekit/agent-sdk-go/pkg/gateway/llm/embeddings"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/providers/gemini/gemini_responses"
+	"github.com/hastekit/agent-sdk-go/pkg/utils"
 )
 
 type Request struct {

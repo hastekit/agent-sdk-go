@@ -2,7 +2,7 @@ package chat_completion
 
 import (
 	"github.com/bytedance/sonic"
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/constants"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/constants"
 )
 
 type ResponseChunk struct {

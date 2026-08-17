@@ -5,8 +5,8 @@ import (
 	"maps"
 	"time"
 
-	"github.com/hastekit/hastekit-sdk-go/pkg/agents"
-	"github.com/hastekit/hastekit-sdk-go/pkg/agents/history"
+	"github.com/hastekit/agent-sdk-go/pkg/agents"
+	"github.com/hastekit/agent-sdk-go/pkg/agents/history"
 	"go.opentelemetry.io/otel/trace"
 	"go.temporal.io/sdk/contrib/opentelemetry"
 	"go.temporal.io/sdk/workflow"

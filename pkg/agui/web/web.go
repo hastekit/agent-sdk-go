@@ -63,7 +63,7 @@ import (
 	"io/fs"
 	"net/http"
 
-	"github.com/hastekit/hastekit-sdk-go/pkg/agui"
+	"github.com/hastekit/agent-sdk-go/pkg/agui"
 )
 
 //go:embed static

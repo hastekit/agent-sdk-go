@@ -5,9 +5,9 @@ import (
 	"strings"
 
 	"github.com/bytedance/sonic"
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/constants"
-	responses2 "github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/responses"
-	"github.com/hastekit/hastekit-sdk-go/pkg/utils"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/constants"
+	responses2 "github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
+	"github.com/hastekit/agent-sdk-go/pkg/utils"
 )
 
 func ResponsesInputToGeminiResponsesInput(in *responses2.Request) *Request {

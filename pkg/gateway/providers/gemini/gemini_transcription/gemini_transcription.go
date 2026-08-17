@@ -5,8 +5,8 @@ import (
 	"mime"
 	"path/filepath"
 
-	transcription2 "github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/transcription"
-	gemini_responses2 "github.com/hastekit/hastekit-sdk-go/pkg/gateway/providers/gemini/gemini_responses"
+	transcription2 "github.com/hastekit/agent-sdk-go/pkg/gateway/llm/transcription"
+	gemini_responses2 "github.com/hastekit/agent-sdk-go/pkg/gateway/providers/gemini/gemini_responses"
 )
 
 type Request struct {

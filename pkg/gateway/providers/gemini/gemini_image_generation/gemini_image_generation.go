@@ -1,9 +1,9 @@
 package gemini_image_generation
 
 import (
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/image_generation"
-	gemini_responses2 "github.com/hastekit/hastekit-sdk-go/pkg/gateway/providers/gemini/gemini_responses"
-	"github.com/hastekit/hastekit-sdk-go/pkg/utils"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/image_generation"
+	gemini_responses2 "github.com/hastekit/agent-sdk-go/pkg/gateway/providers/gemini/gemini_responses"
+	"github.com/hastekit/agent-sdk-go/pkg/utils"
 )
 
 // Request represents a Gemini Nano Banana image generation request.

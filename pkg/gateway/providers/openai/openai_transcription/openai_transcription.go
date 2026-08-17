@@ -1,7 +1,7 @@
 package openai_transcription
 
 import (
-	transcription2 "github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/transcription"
+	transcription2 "github.com/hastekit/agent-sdk-go/pkg/gateway/llm/transcription"
 )
 
 type Request struct {

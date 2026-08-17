@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hastekit/hastekit-sdk-go/pkg/agents"
-	"github.com/hastekit/hastekit-sdk-go/pkg/agents/streambroker"
+	"github.com/hastekit/agent-sdk-go/pkg/agents"
+	"github.com/hastekit/agent-sdk-go/pkg/agents/streambroker"
 )
 
 // The generic exists for call sites whose result isn't a tool response —

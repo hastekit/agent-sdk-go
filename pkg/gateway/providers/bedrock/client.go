@@ -11,10 +11,10 @@ import (
 	"strings"
 
 	"github.com/bytedance/sonic"
-	responses2 "github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/responses"
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/providers/base"
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/providers/bedrock/bedrock_responses"
-	"github.com/hastekit/hastekit-sdk-go/pkg/utils"
+	responses2 "github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/providers/base"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/providers/bedrock/bedrock_responses"
+	"github.com/hastekit/agent-sdk-go/pkg/utils"
 )
 
 type ClientOptions struct {

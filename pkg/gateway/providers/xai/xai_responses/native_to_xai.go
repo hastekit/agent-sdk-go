@@ -1,8 +1,8 @@
 package xai_responses
 
 import (
-	responses2 "github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/responses"
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/providers/openai/openai_responses"
+	responses2 "github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/providers/openai/openai_responses"
 )
 
 func NativeRequestToRequest(in *responses2.Request) *Request {

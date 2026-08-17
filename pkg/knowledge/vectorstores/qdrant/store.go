@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strconv"
 
-	"github.com/hastekit/hastekit-sdk-go/pkg/knowledge/vectorstores"
+	"github.com/hastekit/agent-sdk-go/pkg/knowledge/vectorstores"
 	"github.com/qdrant/go-client/qdrant"
 )
 

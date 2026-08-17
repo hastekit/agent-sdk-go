@@ -1,7 +1,7 @@
 package openai_speech
 
 import (
-	speech2 "github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/speech"
+	speech2 "github.com/hastekit/agent-sdk-go/pkg/gateway/llm/speech"
 )
 
 type Request struct {

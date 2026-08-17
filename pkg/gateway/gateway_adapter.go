@@ -3,14 +3,14 @@ package gateway
 import (
 	"context"
 
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm"
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/chat_completion"
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/embeddings"
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/image_edit"
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/image_generation"
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/responses"
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/speech"
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/transcription"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/chat_completion"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/embeddings"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/image_edit"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/image_generation"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/speech"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/transcription"
 )
 
 // InternalLLMGateway uses the internal LLMGatewayAdapter for server-side use.

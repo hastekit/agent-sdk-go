@@ -6,8 +6,8 @@ import (
 	"mime"
 	"path/filepath"
 
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/image_edit"
-	"github.com/hastekit/hastekit-sdk-go/pkg/utils"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/image_edit"
+	"github.com/hastekit/agent-sdk-go/pkg/utils"
 )
 
 // Request represents an xAI image edit request.

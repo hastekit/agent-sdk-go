@@ -6,8 +6,8 @@ import (
 	"net/http"
 	"net/url"
 
-	"github.com/hastekit/hastekit-sdk-go/pkg/knowledge/vectorstores"
-	"github.com/hastekit/hastekit-sdk-go/pkg/utils"
+	"github.com/hastekit/agent-sdk-go/pkg/knowledge/vectorstores"
+	"github.com/hastekit/agent-sdk-go/pkg/utils"
 )
 
 type ExternalKnowledgePersistence struct {

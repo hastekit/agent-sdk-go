@@ -9,8 +9,8 @@ import (
 	"strings"
 
 	"github.com/bytedance/sonic"
-	"github.com/hastekit/hastekit-sdk-go/pkg/agents/sandbox"
-	"github.com/hastekit/hastekit-sdk-go/pkg/utils"
+	"github.com/hastekit/agent-sdk-go/pkg/agents/sandbox"
+	"github.com/hastekit/agent-sdk-go/pkg/utils"
 )
 
 // apiResponse is the JSON shape returned by the agent-server sandbox endpoints.

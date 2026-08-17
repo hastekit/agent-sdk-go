@@ -5,15 +5,15 @@ import (
 	"errors"
 	"strings"
 
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm"
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/chat_completion"
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/embeddings"
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/image_edit"
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/image_generation"
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/responses"
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/speech"
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/transcription"
-	utils2 "github.com/hastekit/hastekit-sdk-go/pkg/utils"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/chat_completion"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/embeddings"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/image_edit"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/image_generation"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/speech"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/transcription"
+	utils2 "github.com/hastekit/agent-sdk-go/pkg/utils"
 )
 
 // LLMGatewayAdapter is the interface for making LLM calls.

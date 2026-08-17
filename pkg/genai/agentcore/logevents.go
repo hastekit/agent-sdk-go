@@ -3,7 +3,7 @@ package agentcore
 import (
 	"strings"
 
-	"github.com/hastekit/hastekit-sdk-go/pkg/genai"
+	"github.com/hastekit/agent-sdk-go/pkg/genai"
 )
 
 // This file derives the AgentCore-specific message log-event shapes from the

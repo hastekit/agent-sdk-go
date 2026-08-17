@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/responses"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
 )
 
 // texts flattens an outgoing provider list to its plain text, for asserting on

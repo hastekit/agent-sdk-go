@@ -3,7 +3,7 @@ package history
 import (
 	"context"
 
-	"github.com/hastekit/hastekit-sdk-go/pkg/agents/messages"
+	"github.com/hastekit/agent-sdk-go/pkg/agents/messages"
 )
 
 // MessageFilter transforms a run's message bundles before they are

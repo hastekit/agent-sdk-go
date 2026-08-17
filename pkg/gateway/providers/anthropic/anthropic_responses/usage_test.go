@@ -3,7 +3,7 @@ package anthropic_responses
 import (
 	"testing"
 
-	responses2 "github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/responses"
+	responses2 "github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
 )
 
 // TestUsageRoundTrip checks the two directions agree: normalizing an Anthropic

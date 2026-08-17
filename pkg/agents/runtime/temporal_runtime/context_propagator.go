@@ -6,7 +6,7 @@ import (
 	"go.temporal.io/sdk/converter"
 	"go.temporal.io/sdk/workflow"
 
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway"
 )
 
 // providerConfigKeyHeader is the Temporal header slot that carries the

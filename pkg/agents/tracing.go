@@ -4,7 +4,7 @@ import (
 	"context"
 
 	"github.com/bytedance/sonic"
-	"github.com/hastekit/hastekit-sdk-go/pkg/genai"
+	"github.com/hastekit/agent-sdk-go/pkg/genai"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 )

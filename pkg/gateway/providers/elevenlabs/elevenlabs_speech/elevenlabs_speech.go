@@ -3,7 +3,7 @@ package elevenlabs_speech
 import (
 	"net/http"
 
-	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm/speech"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/speech"
 )
 
 type Request struct {

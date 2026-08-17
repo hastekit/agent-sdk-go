@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/hastekit/hastekit-sdk-go/pkg/agents"
-	"github.com/hastekit/hastekit-sdk-go/pkg/agents/prompts"
+	"github.com/hastekit/agent-sdk-go/pkg/agents"
+	"github.com/hastekit/agent-sdk-go/pkg/agents/prompts"
 )
 
 func skillDeps() *agents.Dependencies {

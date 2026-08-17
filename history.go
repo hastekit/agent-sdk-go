@@ -1,6 +1,6 @@
 package sdk
 
-import "github.com/hastekit/hastekit-sdk-go/pkg/agents/history"
+import "github.com/hastekit/agent-sdk-go/pkg/agents/history"
 
 type History = history.CommonConversationManager
 
