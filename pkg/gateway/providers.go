@@ -7,10 +7,14 @@ import (
 	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/llm"
 	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/providers/anthropic"
 	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/providers/bedrock"
+	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/providers/deepseek"
 	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/providers/elevenlabs"
 	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/providers/gemini"
+	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/providers/moonshot"
 	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/providers/openai"
+	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/providers/sarvam"
 	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/providers/xai"
+	"github.com/hastekit/hastekit-sdk-go/pkg/gateway/providers/zai"
 )
 
 func (g *LLMGateway) getProvider(ctx context.Context, providerName llm.ProviderName, req *llm.Request, key string) (llm.Provider, error) {
@@ -81,6 +85,34 @@ func (g *LLMGateway) getProvider(ctx context.Context, providerName llm.ProviderN
 
 	case llm.ProviderNameBedrock:
 		return bedrock.NewClient(&bedrock.ClientOptions{
+			BaseURL: baseUrl,
+			ApiKey:  key,
+			Headers: customHeaders,
+		}), nil
+
+	case llm.ProviderNameSarvam:
+		return sarvam.NewClient(&sarvam.ClientOptions{
+			BaseURL: baseUrl,
+			ApiKey:  key,
+			Headers: customHeaders,
+		}), nil
+
+	case llm.ProviderNameDeepSeek:
+		return deepseek.NewClient(&deepseek.ClientOptions{
+			BaseURL: baseUrl,
+			ApiKey:  key,
+			Headers: customHeaders,
+		}), nil
+
+	case llm.ProviderNameMoonshot:
+		return moonshot.NewClient(&moonshot.ClientOptions{
+			BaseURL: baseUrl,
+			ApiKey:  key,
+			Headers: customHeaders,
+		}), nil
+
+	case llm.ProviderNameZAI:
+		return zai.NewClient(&zai.ClientOptions{
 			BaseURL: baseUrl,
 			ApiKey:  key,
 			Headers: customHeaders,

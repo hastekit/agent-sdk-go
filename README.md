@@ -222,7 +222,9 @@ claude := client.Model("Anthropic/claude-sonnet-4-5")
 
 Provider constants: `hastekit.ProviderOpenAI`, `ProviderAnthropic`,
 `ProviderGemini`, `ProviderXAI`, `ProviderBedrock`, `ProviderOllama`,
-`ProviderOpenRouter`, `ProviderElevenLabs`.
+`ProviderOpenRouter`, `ProviderElevenLabs`, `ProviderSarvam`,
+`ProviderDeepSeek`, `ProviderMoonshot` (Kimi models), `ProviderZAI` (GLM
+models).
 
 ### LLM Calls
 
@@ -992,12 +994,22 @@ Explore complete working examples in the [documentation repository](https://gith
 | **xAI** | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅¹ | ❌ |
 | **Bedrock** | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | **ElevenLabs** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ |
+| **Sarvam** | ✅² | ✅² | ✅² | ✅² | ❌ | ❌ | ❌ | ✅³ | ✅ |
+| **DeepSeek** | ✅² | ✅² | ✅² | ✅² | ❌ | ❌ | ❌ | ❌ | ❌ |
+| **Moonshot** (Kimi) | ✅² | ✅² | ✅² | ✅² | ❌ | ❌ | ❌ | ❌ | ❌ |
+| **Z.ai** (GLM) | ✅² | ✅² | ✅² | ✅² | ❌ | ❌ | ❌ | ❌ | ❌ |
 
 ¹ Non-streaming only — xAI has no `NewStreamingSpeech`.
+² Served by the chat-completions bridge (see below); vision depends on the model.
+³ `NewStreamingSpeech` synthesizes in one call and emits a single audio delta — Sarvam's incremental TTS is a WebSocket API, not an HTTP stream.
 
-**Text** is the Responses API (`NewResponses`), which is what agents use. OpenAI additionally implements the older Chat Completions API (`NewChatCompletion` / `NewStreamingChatCompletion`); no other provider does.
+**Text** is the Responses API (`NewResponses`), which is what agents use. OpenAI additionally implements the older Chat Completions API (`NewChatCompletion` / `NewStreamingChatCompletion`); so do the bridged providers below.
 
-`ProviderOllama` and `ProviderOpenRouter` are not in the table because their capabilities aren't the SDK's to state: both are served by the OpenAI-compatible client, so every method is wired up and each call is passed straight through. What actually answers depends on the endpoint and the model behind it. OpenRouter defaults to `https://openrouter.ai/api/v1`; Ollama needs an explicit `BaseURL` on its provider config.
+Sarvam, DeepSeek, Moonshot and Z.ai speak the OpenAI `/chat/completions` format but have no `/responses` endpoint. They are served by `providers/openaicompat`, a generic translation in both directions: a native Responses request becomes a chat completion (instructions → system message, parallel function calls collapsed onto one assistant message, tool results → `tool` messages, `text.format` → `response_format`), and the reply — including a streamed one — is reassembled into Responses output items and events. `reasoning_content` becomes a native reasoning item. Server-side tools (web search, image generation, code interpreter) have no equivalent and are dropped from the request. Default base URLs: Sarvam `https://api.sarvam.ai`, DeepSeek `https://api.deepseek.com`, Moonshot `https://api.moonshot.ai/v1`, Z.ai `https://api.z.ai/api/paas/v4` — each overridable through `BaseURL` on the provider config (Moonshot's mainland endpoint, Z.ai's Coding Plan or Zhipu endpoints, a self-hosted proxy).
+
+Any other OpenAI-compatible endpoint can be added the same way: point `openaicompat.NewClient` at its base URL.
+
+`ProviderOllama` and `ProviderOpenRouter` are not in the table because their capabilities aren't the SDK's to state: both are served by the OpenAI client, so every method is wired up and each call is passed straight through. What actually answers depends on the endpoint and the model behind it. OpenRouter defaults to `https://openrouter.ai/api/v1`; Ollama needs an explicit `BaseURL` on its provider config.
 
 > A ❌ is not a graceful "unsupported" error. Unimplemented methods fall through to the embedded base provider, where the text and embedding methods `panic` and the media methods return `(nil, nil)` — so a call for a capability a provider doesn't have will either crash or hand back a silent nil. Check this table before reaching for a non-text method on a non-OpenAI provider.
 
@@ -1021,8 +1033,9 @@ hastekit-sdk-go/
     ├── gateway/             # LLM gateway
     │   ├── llm/             # LLM request/response types
     │   └── providers/       # Provider implementations
-    │       ├── openai/      # anthropic, gemini, xai,
-    │       └── bedrock/     # elevenlabs, ollama, ...
+    │       ├── openai/      # anthropic, gemini, xai, bedrock,
+    │       ├── openaicompat/# chat-completions <-> responses bridge
+    │       └── sarvam/      # deepseek, moonshot, zai, elevenlabs, ...
     ├── hastekitgateway/     # HasteKit Gateway adapters
     ├── knowledge/           # Knowledge / retrieval
     ├── telemetry/           # Tracing and metrics

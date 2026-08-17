@@ -21,6 +21,10 @@ var (
 	ProviderXAI        = llm.ProviderNameXAI
 	ProviderOllama     = llm.ProviderNameOllama
 	ProviderOpenRouter = llm.ProviderNameOpenRouter
+	ProviderSarvam     = llm.ProviderNameSarvam
+	ProviderDeepSeek   = llm.ProviderNameDeepSeek
+	ProviderMoonshot   = llm.ProviderNameMoonshot // Kimi models
+	ProviderZAI        = llm.ProviderNameZAI      // GLM models
 )
 
 type LLMClient struct {
