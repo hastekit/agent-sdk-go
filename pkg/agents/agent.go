@@ -890,6 +890,15 @@ func (e *Agent) ExecuteWithRun(ctx context.Context, in *AgentInput, run *history
 						slog.InfoContext(ctx, "tool execution cancelled by stop signal", slog.String("tool_name", pe.ToolCall.Name))
 						toolResults[pe.Index] = toolResponse(*pe.ToolCall.FunctionCallMessage, toolCancelledDuringExec)
 
+					case IsToolCallAborted(result.Err):
+						// A hook gave up on the run rather than refusing the
+						// call. Reporting this to the model would be the
+						// opposite of what it asked for: the run ends here,
+						// leaving the function_call unanswered the same way a
+						// cancelled context does.
+						slog.ErrorContext(ctx, "tool call aborted by hook", slog.String("tool_name", pe.ToolCall.Name), slog.Any("error", result.Err))
+						return &AgentOutput{Status: agentstate.RunStatusError, RunID: runId}, result.Err
+
 					case result.Err != nil:
 						// Tool error — report to LLM as error result
 						slog.ErrorContext(ctx, "tool execution failed", slog.String("tool_name", pe.ToolCall.Name), slog.Any("error", result.Err))

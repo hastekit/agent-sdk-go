@@ -2,10 +2,41 @@ package temporal_runtime
 
 import (
 	"context"
+	"errors"
 
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
+	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 )
+
+// ToolCallAbortedErrorType marks the activity failure a hook reports when it
+// returns an error, which ends the run.
+const ToolCallAbortedErrorType = "ToolCallAborted"
+
+// abortError converts a hook's error into an activity failure Temporal will not
+// retry. No RetryPolicy is set anywhere here, so the server default of unlimited
+// attempts applies, and a retryable failure would keep asking a hook that has
+// already said no — the run would hang on the refusal instead of ending on it.
+//
+// Only what the hook itself returned passes through here. A failure Temporal
+// raises around it — a timeout, a lost worker — is not the hook's answer and
+// stays retryable, which is what should happen to those.
+func abortError(err error) error {
+	if err == nil {
+		return err
+	}
+	return temporal.NewNonRetryableApplicationError(err.Error(), ToolCallAbortedErrorType, nil)
+}
+
+// WasAborted reports whether an activity failed because a hook ended the run,
+// rather than because the work itself failed. The agent loop does not need it —
+// a hook error is recognised by where it came from, not by its type — but a
+// worker that registers activities of its own has only the error to go on, the
+// same way WasStopped serves one.
+func WasAborted(err error) bool {
+	var appErr *temporal.ApplicationError
+	return errors.As(err, &appErr) && appErr.Type() == ToolCallAbortedErrorType
+}
 
 // Activity name suffixes for a hook's two methods. Each is registered and
 // executed separately so a hook that calls out to another service is journaled
@@ -40,10 +71,21 @@ func hookActivities(agentName string, hooks []agents.Hook) map[string]any {
 			continue
 		}
 		name := hookActivityName(agentName, hook.GetName())
-		activities[name+beforeToolCallActivitySuffix] = hook.BeforeToolCall
-		activities[name+afterToolCallActivitySuffix] = hook.AfterToolCall
-		activities[name+beforeModelCallActivitySuffix] = hook.BeforeModelCall
-		activities[name+afterModelCallActivitySuffix] = hook.AfterModelCall
+		h := hook
+		// The tool-call methods are wrapped so a hook's error leaves the activity
+		// as a failure Temporal will not retry. The model-call ones need no
+		// wrapping: an error there fails the run either way, and retrying a
+		// budget check that could not answer is the right thing to do.
+		activities[name+beforeToolCallActivitySuffix] = func(ctx context.Context, call *agents.ToolCall) (agents.ToolCallHookResult, error) {
+			res, err := h.BeforeToolCall(ctx, call)
+			return res, abortError(err)
+		}
+		activities[name+afterToolCallActivitySuffix] = func(ctx context.Context, call *agents.ToolCall, result *agents.ToolCallResponse) (agents.ToolCallHookResult, error) {
+			res, err := h.AfterToolCall(ctx, call, result)
+			return res, abortError(err)
+		}
+		activities[name+beforeModelCallActivitySuffix] = h.BeforeModelCall
+		activities[name+afterModelCallActivitySuffix] = h.AfterModelCall
 	}
 	return activities
 }

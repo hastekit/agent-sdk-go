@@ -2,10 +2,42 @@ package agents
 
 import (
 	"context"
+	"errors"
+	"fmt"
 
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
 	"github.com/hastekit/agent-sdk-go/pkg/utils"
 )
+
+// ErrToolCallAborted is what a run fails with when a hook returned an error.
+// Every hook error is wrapped in it on the way out of RunWithToolCallHooks, so
+// a caller can tell a run a hook stopped from one a tool broke.
+var ErrToolCallAborted = errors.New("tool call aborted by hook")
+
+// abortedByHook marks a hook's error as the reason the run is ending.
+//
+// The mark records where the error came from, not what it means: an error out of
+// a hook ends the run, an error out of the tool is reported to the model, and by
+// the time both are ToolExecutionResult.Err the loop can no longer tell them
+// apart. Only RunWithToolCallHooks is in a position to say, so only it marks —
+// which is also why nothing has to carry the distinction across a durable
+// boundary. A hook error is whatever the hook returned, wherever it ran.
+func abortedByHook(err error) error {
+	if err == nil {
+		return ErrToolCallAborted
+	}
+	if IsToolCallAborted(err) {
+		return err
+	}
+	return fmt.Errorf("%w: %w", ErrToolCallAborted, err)
+}
+
+// IsToolCallAborted reports whether a run ended because a hook returned an
+// error, as opposed to a tool failing or the caller going away. The hook's own
+// error stays reachable with errors.Is and errors.As.
+func IsToolCallAborted(err error) bool {
+	return errors.Is(err, ErrToolCallAborted)
+}
 
 // ToolCallHook wraps a tool call: it sees the call on the way out and the
 // result on the way back, and can settle either one itself.
@@ -30,16 +62,24 @@ type ToolCallHook interface {
 
 	// BeforeToolCall runs before the call leaves for the tool. Return
 	// ContinueToolCall to let it through, HandleToolCall to answer it here, or
-	// an error to refuse it — the error's text becomes the call's result.
+	// an error to end the run.
 	//
-	// Neither refusing nor handling fails the run. An answer the model can read
-	// and work around is almost always more useful than a broken run.
+	// An error is a hard stop, not a refusal: the chain stops where it is, the
+	// tool never runs, and the run fails carrying that error. To refuse a call
+	// and let the run carry on, answer it — HandleToolCall with the refusal as
+	// the tool's output, which is what the model reads and works around:
+	//
+	//	return agents.HandleToolCall(agents.ToolCallResult(call, "not allowed for this user")), nil
+	//
+	// That is usually the kinder refusal, and it is a different decision from
+	// failing, so it is said differently. Reserve the error for when continuing
+	// would be worse than stopping.
 	BeforeToolCall(ctx context.Context, call *ToolCall) (ToolCallHookResult, error)
 
 	// AfterToolCall runs once the call has a result — whichever produced it,
 	// the tool or an earlier hook. Return ContinueToolCall to leave that result
-	// alone, HandleToolCall to replace it, or an error to replace it with the
-	// error's text.
+	// alone, HandleToolCall to replace it, or an error to end the run, though
+	// the tool has already run by then.
 	//
 	// It does not run on a paused call: a pause has no result yet, and the call
 	// comes back through here when the run resumes.
@@ -100,9 +140,11 @@ func ToolCallResult(call *ToolCall, output string) *ToolCallResponse {
 // journal each method as its own step and exec is the tool's activity — same
 // order, same decisions, one execution each.
 //
-// An error from exec is returned as-is rather than turned into a result: that
-// is a run-level failure (a cancelled context, an activity that gave up), not
-// an answer, and the after-hooks have nothing to observe.
+// Errors end the call rather than answering it, and which one failed decides
+// what happens next. A hook's error ends the run, and is marked on the way out
+// so the loop knows not to hand it to the model. exec's error is returned
+// unmarked, leaving the loop free to report a broken tool to the model and let
+// it try something else. Either way the after-hooks have nothing to observe.
 func RunWithToolCallHooks(
 	ctx context.Context,
 	hooks []ToolCallHook,
@@ -118,8 +160,7 @@ func RunWithToolCallHooks(
 		}
 		res, err := hook.BeforeToolCall(ctx, call)
 		if err != nil {
-			result, handled = ToolCallResult(call, err.Error()), true
-			break
+			return nil, abortedByHook(err)
 		}
 		if res.Handled {
 			result, handled = answerFor(call, res.Response), true
@@ -148,8 +189,7 @@ func RunWithToolCallHooks(
 		}
 		res, err := hook.AfterToolCall(ctx, call, result)
 		if err != nil {
-			result = ToolCallResult(call, err.Error())
-			break
+			return nil, abortedByHook(err)
 		}
 		if res.Handled {
 			result = answerFor(call, res.Response)

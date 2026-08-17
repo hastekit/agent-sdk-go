@@ -2,7 +2,6 @@ package agents_test
 
 import (
 	"context"
-	"errors"
 	"testing"
 
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
@@ -84,7 +83,10 @@ func TestAgentToolCallHooks_CanRefuseAnyTool(t *testing.T) {
 			name: "authz",
 			log:  &log,
 			before: func(call *agents.ToolCall) (agents.ToolCallHookResult, error) {
-				return agents.ContinueToolCall(), errors.New("not allowed for this user")
+				// A refusal is an answer, not a failure: the reason goes in the
+				// response, where the model reads it and works around it. An
+				// error here would end the run instead.
+				return agents.HandleToolCall(agents.ToolCallResult(call, "not allowed for this user")), nil
 			},
 		}},
 	}).WithLLM(llm)
@@ -221,7 +223,7 @@ func TestToolCallHooks_AfterSeesARefusedCall(t *testing.T) {
 			name: "authz",
 			log:  &log,
 			before: func(call *agents.ToolCall) (agents.ToolCallHookResult, error) {
-				return agents.ContinueToolCall(), errors.New("denied")
+				return agents.HandleToolCall(agents.ToolCallResult(call, "denied")), nil
 			},
 		},
 		&tracingHook{
@@ -238,7 +240,9 @@ func TestToolCallHooks_AfterSeesARefusedCall(t *testing.T) {
 }
 
 // An after-hook can replace the result — redaction, or a post-filter that must
-// not let something through. An error from one replaces it too, failing closed.
+// not let something through. Withholding a result is still an answer, so it is
+// said with HandleToolCall; an error there would end the run (see
+// TestHookError_AfterStopsTheChain).
 func TestToolCallHooks_AfterCanReplaceTheResult(t *testing.T) {
 	var log []string
 
@@ -255,7 +259,7 @@ func TestToolCallHooks_AfterCanReplaceTheResult(t *testing.T) {
 		name: "filter",
 		log:  &log,
 		after: func(call *agents.ToolCall, result *agents.ToolCallResponse) (agents.ToolCallHookResult, error) {
-			return agents.ContinueToolCall(), errors.New("result withheld")
+			return agents.HandleToolCall(agents.ToolCallResult(call, "result withheld")), nil
 		},
 	}}, "secret")
 	assert.Equal(t, "result withheld", *resp.Output.OfString)
