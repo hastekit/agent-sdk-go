@@ -64,7 +64,7 @@ func TestLazyToolAnnotations(t *testing.T) {
 	tool := NewLazyMcpTool(&mcp.Tool{
 		Name:        "read_file",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: utils.Ptr(false)},
-	}, "https://example.test/mcp", "streamable-http", nil, nil, false, false, false)
+	}, "https://example.test/mcp", "streamable-http", nil, nil, false, false, false, "")
 
 	annotations := agents.AnnotationsOf(tool)
 	require.NotNil(t, annotations)

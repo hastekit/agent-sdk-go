@@ -219,7 +219,7 @@ func TestElicitation_LazyToolOverHTTP(t *testing.T) {
 	var serverCalls int
 	hs := elicitingHTTPServer(t, &serverCalls, true)
 
-	tool := NewLazyMcpTool(&mcp.Tool{Name: "book"}, hs, "streamable-http", nil, nil, true, false, false)
+	tool := NewLazyMcpTool(&mcp.Tool{Name: "book"}, hs, "streamable-http", nil, nil, true, false, false, "")
 
 	resp, err := tool.Execute(context.Background(), toolCall("call_1", nil))
 	require.NoError(t, err)
@@ -245,7 +245,7 @@ func TestElicitation_StatefulServerIsRefusedClearly(t *testing.T) {
 	var serverCalls int
 	hs := elicitingHTTPServer(t, &serverCalls, false)
 
-	tool := NewLazyMcpTool(&mcp.Tool{Name: "book"}, hs, "streamable-http", nil, nil, true, false, false)
+	tool := NewLazyMcpTool(&mcp.Tool{Name: "book"}, hs, "streamable-http", nil, nil, true, false, false, "")
 	resp, err := tool.Execute(context.Background(), toolCall("call_1", nil))
 	require.NoError(t, err)
 	assert.Empty(t, resp.Interrupts)

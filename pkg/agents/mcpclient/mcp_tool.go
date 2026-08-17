@@ -3,6 +3,7 @@ package mcpclient
 import (
 	"context"
 	"errors"
+	"strings"
 
 	"github.com/bytedance/sonic"
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
@@ -10,6 +11,30 @@ import (
 	"github.com/hastekit/agent-sdk-go/pkg/utils"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
+
+// ToolPrefixSeparator joins a tool prefix to the server's own tool name in the
+// name the model sees: prefix "xyz" over tool "search" is exposed as
+// "xyz__search".
+const ToolPrefixSeparator = "__"
+
+// PrefixedToolName is the name a tool is exposed to the model under. An empty
+// prefix leaves the name exactly as the server gave it.
+func PrefixedToolName(prefix, name string) string {
+	if prefix == "" {
+		return name
+	}
+	return prefix + ToolPrefixSeparator + name
+}
+
+// StripToolPrefix undoes PrefixedToolName, recovering the name the MCP server
+// knows the tool by. A name that doesn't carry the prefix comes back unchanged,
+// so an already-unprefixed call still resolves.
+func StripToolPrefix(prefix, name string) string {
+	if prefix == "" {
+		return name
+	}
+	return strings.TrimPrefix(name, prefix+ToolPrefixSeparator)
+}
 
 type McpTool struct {
 	*agents.BaseTool
@@ -148,9 +173,10 @@ type LazyMcpTool struct {
 	meta                 mcp.Meta
 	toolName             string
 	disableStandaloneSSE bool
+	toolPrefix           string
 }
 
-func NewLazyMcpTool(t *mcp.Tool, endpoint, transportType string, resolvedHeaders map[string]string, meta mcp.Meta, disableStandaloneSSE bool, requiresApproval bool, deferred bool) *LazyMcpTool {
+func NewLazyMcpTool(t *mcp.Tool, endpoint, transportType string, resolvedHeaders map[string]string, meta mcp.Meta, disableStandaloneSSE bool, requiresApproval bool, deferred bool, toolPrefix string) *LazyMcpTool {
 	inputSchema := map[string]any{
 		"type":       "object",
 		"properties": map[string]any{},
@@ -179,8 +205,19 @@ func NewLazyMcpTool(t *mcp.Tool, endpoint, transportType string, resolvedHeaders
 		resolvedHeaders:      resolvedHeaders,
 		meta:                 meta,
 		toolName:             t.Name,
+		toolPrefix:           toolPrefix,
 		disableStandaloneSSE: disableStandaloneSSE,
 	}
+}
+
+// serverToolName is the name to ask the server for: the model-facing name with
+// the prefix taken back off.
+func (c *LazyMcpTool) serverToolName(params *agents.ToolCall) string {
+	name := c.toolName
+	if name == "" {
+		name = params.Name
+	}
+	return StripToolPrefix(c.toolPrefix, name)
 }
 
 func (c *LazyMcpTool) Execute(ctx context.Context, params *agents.ToolCall) (*agents.ToolCallResponse, error) {
@@ -217,7 +254,7 @@ func (c *LazyMcpTool) Execute(ctx context.Context, params *agents.ToolCall) (*ag
 	// Call the MCP tool directly by name — no ListTools needed. When the run
 	// wired a progress sink, attach a progress token so the server streams
 	// notifications/progress back through handleProgressNotification.
-	callParams, cleanup := newCallToolParams(c.meta, params.Name, args, params)
+	callParams, cleanup := newCallToolParams(c.meta, c.serverToolName(params), args, params)
 	defer cleanup()
 
 	// When resuming, carry the user's answer to the question the server asked
