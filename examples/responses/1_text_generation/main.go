@@ -36,7 +36,7 @@ func main() {
 			Parameters: responses.Parameters{
 				Temperature: utils.Ptr(0.2),
 				ExtraFields: map[string]any{
-					"additional_headers": map[string]string{
+					"additional_headers": map[string]any{
 						"X-Custom-Header": "Custom Header Value",
 					},
 				},
