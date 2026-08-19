@@ -54,9 +54,9 @@ func main() {
 				responses.UserMessage("What is the current time?"),
 			},
 		},
-		Namespace:         "default",
-		ThreadID:          "",
-		PreviousMessageID: "",
+		Namespace:     "default",
+		ThreadID:      "",
+		PreviousRunID: "",
 	})
 	if err != nil {
 		log.Fatal(err)
