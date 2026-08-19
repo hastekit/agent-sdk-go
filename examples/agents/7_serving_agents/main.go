@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"log"
 	"net/http"
 	"os"
 
@@ -10,7 +9,6 @@ import (
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
 	"github.com/hastekit/agent-sdk-go/pkg/utils"
-	"github.com/joho/godotenv"
 )
 
 type CustomTool struct {
@@ -54,10 +52,6 @@ func (t *CustomTool) Execute(ctx context.Context, params *agents.ToolCall) (*age
 }
 
 func main() {
-	if err := godotenv.Load(".env"); err != nil {
-		log.Fatal("Error loading .env file")
-	}
-
 	shutdownTelemetry := NewProvider(os.Getenv("LANGFUSE_BASE_URL"))
 	defer shutdownTelemetry()
 

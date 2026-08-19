@@ -8,14 +8,9 @@ import (
 	hastekit "github.com/hastekit/agent-sdk-go"
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/tools"
-	"github.com/joho/godotenv"
 )
 
 func main() {
-	if err := godotenv.Load(".env"); err != nil {
-		log.Fatal("Error loading .env file")
-	}
-
 	shutdownTelemetry := NewProvider(os.Getenv("LANGFUSE_BASE_URL"))
 	defer shutdownTelemetry()
 
