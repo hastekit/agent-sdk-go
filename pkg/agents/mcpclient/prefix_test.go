@@ -33,7 +33,7 @@ func TestToolPrefixIsUsedVerbatim(t *testing.T) {
 func TestToolPrefixKeepsBothNames(t *testing.T) {
 	srv := &MCPClient{ToolPrefix: "xyz__"}
 
-	tools := srv.buildLazyTools([]*mcp.Tool{{Name: "search"}, {Name: "book"}}, nil, nil)
+	tools := srv.buildLazyTools([]*mcp.Tool{{Name: "search"}, {Name: "book"}}, nil, serverConn{})
 
 	require.Len(t, tools, 2)
 	assert.Equal(t, []string{"xyz__search", "xyz__book"}, exposedNames(tools))
@@ -55,7 +55,7 @@ func TestToolPrefixKeepsUnprefixedOptionsWorking(t *testing.T) {
 
 	tools := srv.buildLazyTools([]*mcp.Tool{
 		{Name: "search"}, {Name: "book"}, {Name: "cancel"},
-	}, nil, nil)
+	}, nil, serverConn{})
 
 	require.Len(t, tools, 2, "the filter selects by the server's own names")
 	assert.Equal(t, []string{"xyz__search", "xyz__book"}, exposedNames(tools))
@@ -78,7 +78,7 @@ func TestOptionsWithoutToolPrefix(t *testing.T) {
 
 	tools := srv.buildLazyTools([]*mcp.Tool{
 		{Name: "search"}, {Name: "book"}, {Name: "cancel"},
-	}, nil, nil)
+	}, nil, serverConn{})
 
 	require.Len(t, tools, 2)
 	assert.Equal(t, []string{"search", "book"}, exposedNames(tools))
@@ -91,7 +91,7 @@ func TestOptionsWithoutToolPrefix(t *testing.T) {
 func TestToolPrefixKeepsDeferredWildcard(t *testing.T) {
 	srv := &MCPClient{ToolPrefix: "xyz__", DeferredTools: []string{"*"}}
 
-	tools := srv.buildLazyTools([]*mcp.Tool{{Name: "search"}, {Name: "book"}}, nil, nil)
+	tools := srv.buildLazyTools([]*mcp.Tool{{Name: "search"}, {Name: "book"}}, nil, serverConn{})
 
 	require.Len(t, tools, 2)
 	for i, tool := range tools {

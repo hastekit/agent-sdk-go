@@ -16,8 +16,8 @@ A powerful Golang SDK for building AI agents and making LLM calls across multipl
 - **🪝 Hooks** - Intercept tool calls and model calls for auth, budgets, and audit
 - **🏷️ Tool Annotations** - MCP-style behavioural hints on both MCP and function tools
 - **💾 Conversation History** - Maintain context across interactions with built-in persistence
-- **📊 Embeddings** - Generate text embeddings for semantic search and RAG applications
-- **🎨 Image Processing & Generation** - Vision capabilities and image generation tools
+- **🧩 Sub-Agents & Handoffs** - Call a specialist as a tool, or transfer the conversation to it
+- **🎚️ Steering** - Send a correction into a run already in flight
 - **🌊 Streaming Support** - Real-time streaming responses for better UX
 - **🛑 Cancellation** - Stop in-flight runs cleanly, including mid-stream and mid-tool-call
 - **📝 Structured Output** - JSON schema validation for reliable structured responses
@@ -27,16 +27,17 @@ A powerful Golang SDK for building AI agents and making LLM calls across multipl
 - [Installation](#installation)
 - [Quick Start](#quick-start)
 - [Usage](#usage)
-  - [LLM Calls](#llm-calls)
+  - [LLM Client](#llm-client)
   - [Agents](#agents)
+    - [Sub-Agents](#sub-agents)
+    - [Handoffs](#handoffs)
+    - [Steering a Running Agent](#steering-a-running-agent)
   - [AG-UI](#ag-ui)
   - [Tools](#tools)
   - [Skills](#skills)
   - [Hooks](#hooks)
   - [Conversation History](#conversation-history)
   - [Durable Agents](#durable-agents)
-  - [Embeddings](#embeddings)
-  - [Image Generation](#image-generation)
 - [Documentation](#documentation)
 - [Examples](#examples)
 - [License](#license)
@@ -51,59 +52,6 @@ go get -u github.com/hastekit/agent-sdk-go
 - Go 1.25.0 or higher
 
 ## Quick Start
-
-### Basic LLM Call
-
-```go
-package main
-
-import (
-    "context"
-    "fmt"
-    "log"
-    "os"
-
-    hastekit "github.com/hastekit/agent-sdk-go"
-    "github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
-    "github.com/hastekit/agent-sdk-go/pkg/utils"
-)
-
-func main() {
-    // Configure an LLM client with one or more providers.
-    client := hastekit.NewLLMClient([]hastekit.ProviderConfig{
-        {
-            ProviderName: hastekit.ProviderOpenAI,
-            ApiKeys: []*hastekit.APIKeyConfig{
-                {Name: "default", APIKey: os.Getenv("OPENAI_API_KEY")},
-            },
-        },
-    })
-
-    // Bind a model, then make an LLM call.
-    model := client.Model("OpenAI/gpt-4o-mini")
-
-    resp, err := model.NewResponses(context.Background(), &responses.Request{
-        Instructions: utils.Ptr("You are a helpful assistant."),
-        Input: responses.InputUnion{
-            OfString: utils.Ptr("What is the capital of France?"),
-        },
-    })
-    if err != nil {
-        log.Fatal(err)
-    }
-
-    // Extract the response
-    for _, output := range resp.Output {
-        if output.OfOutputMessage != nil {
-            for _, content := range output.OfOutputMessage.Content {
-                if content.OfOutputText != nil {
-                    fmt.Println(content.OfOutputText.Text)
-                }
-            }
-        }
-    }
-}
-```
 
 ### Simple Agent
 
@@ -186,8 +134,8 @@ func (h *AgentHandle) Result() (*AgentOutput, error)     // drain Chunks + retur
 
 `hastekit.NewLLMClient` takes a list of provider configs and returns a client.
 Bind a model with `client.Model("Provider/model")` — the returned value satisfies
-the `llm.Provider` interface and exposes `NewResponses`, `NewStreamingResponses`,
-`NewEmbedding`, `NewSpeech`, and friends.
+the `llm.Provider` interface and exposes `NewResponses`,
+`NewStreamingResponses`, and friends.
 
 ```go
 // Single provider
@@ -225,73 +173,6 @@ Provider constants: `hastekit.ProviderOpenAI`, `ProviderAnthropic`,
 `ProviderOpenRouter`, `ProviderElevenLabs`, `ProviderSarvam`,
 `ProviderDeepSeek`, `ProviderMoonshot` (Kimi models), `ProviderZAI` (GLM
 models).
-
-### LLM Calls
-
-#### Streaming Responses
-
-```go
-model := client.Model("OpenAI/gpt-4o-mini")
-
-stream, err := model.NewStreamingResponses(context.Background(), &responses.Request{
-    Input: responses.InputUnion{
-        OfString: utils.Ptr("Write a poem about coding."),
-    },
-})
-if err != nil {
-    panic(err)
-}
-
-for chunk := range stream {
-    if chunk.OfOutputTextDelta != nil {
-        fmt.Print(chunk.OfOutputTextDelta.Delta)
-    }
-}
-```
-
-#### Multi-Turn Conversations
-
-```go
-resp, err := model.NewResponses(ctx, &responses.Request{
-    Input: responses.InputUnion{
-        OfInputMessageList: responses.InputMessageList{
-            {
-                OfEasyInput: &responses.EasyMessage{
-                    Role:    "user",
-                    Content: responses.EasyInputContentUnion{OfString: utils.Ptr("Hi!")},
-                },
-            },
-            {
-                OfEasyInput: &responses.EasyMessage{
-                    Role:    "assistant",
-                    Content: responses.EasyInputContentUnion{OfString: utils.Ptr("Hello! How can I help?")},
-                },
-            },
-            {
-                OfEasyInput: &responses.EasyMessage{
-                    Role:    "user",
-                    Content: responses.EasyInputContentUnion{OfString: utils.Ptr("Tell me a joke.")},
-                },
-            },
-        },
-    },
-})
-```
-
-#### Switching Providers
-
-Simply change the model string to switch providers—your code stays the same:
-
-```go
-// OpenAI
-Model: "OpenAI/gpt-4o-mini"
-
-// Anthropic
-Model: "Anthropic/claude-sonnet-4-5"
-
-// Gemini
-Model: "Gemini/gemini-2.5-flash"
-```
 
 ### Agents
 
@@ -337,6 +218,70 @@ Tools that implement the `agents.Tool` interface directly (embedding
 `agents.BaseTool` and defining `Execute`) also work and can be mixed into the
 same `Tools` slice.
 
+#### Sub-Agents
+
+An agent can be given to another agent as a tool, so a specialist is called the
+same way a function is — the caller stays in charge and gets the sub-agent's
+answer back as a tool result:
+
+```go
+import "github.com/hastekit/agent-sdk-go/pkg/agents/tools"
+
+researcher := hastekit.NewAgent(&hastekit.AgentConfig{
+    Name:        "Researcher",
+    Instruction: hastekit.NewPrompt("You research topics thoroughly."),
+    LLM:         model,
+})
+
+agent := hastekit.NewAgent(&hastekit.AgentConfig{
+    Name:        "Assistant",
+    Instruction: hastekit.NewPrompt("You are a helpful assistant."),
+    LLM:         model,
+    Tools: []agents.Tool{
+        tools.NewAgentTool(
+            "research",
+            "Research a topic in depth",
+            researcher,
+            tools.SubAgentContextModeNone,
+        ),
+    },
+})
+```
+
+The context mode decides who keeps track of the sub-agent's conversation. Under
+`SubAgentContextModeNone` the calling model does: `thread_id` is one of the tool's
+parameters, and the thread the sub-agent ran on comes back in the result for it to
+pass in next time. Under `SubAgentContextModeIsolated` the tool does, holding the
+thread in the call's own state, so the sub-agent remembers its earlier turns
+without the model having to carry an id around.
+
+A sub-agent that pauses for approval pauses the whole run, however deeply it is
+nested, and resuming resumes it in place rather than starting it again.
+
+#### Handoffs
+
+A handoff transfers the conversation instead of borrowing an answer: the target
+agent takes over the thread and replies to the user directly.
+
+```go
+agent := hastekit.NewAgent(&hastekit.AgentConfig{
+    Name:        "Triage",
+    Instruction: hastekit.NewPrompt("Route the user to the right specialist."),
+    LLM:         model,
+    Handoffs: []*agents.Handoff{
+        agents.NewHandoff("Billing", "Questions about invoices and payments", billingAgent),
+        agents.NewHandoff("Support", "Technical troubleshooting", supportAgent),
+    },
+})
+```
+
+The model picks a target by calling the generated `transfer_to_agent` tool.
+
+By default the next turn starts at the root agent again. Set `StickyHandoff: true`
+on the agent to keep the thread with whichever specialist last handled it, so a
+user mid-conversation with Billing is not re-triaged on every message — a later
+handoff moves the thread on, and a handoff back to the root unsticks it.
+
 #### Streaming Chunks and Cancellation
 
 `agent.Execute` returns a handle. Range over `handle.Chunks` to forward live deltas (UI, SSE, logs); call `handle.Stop(ctx)` to stop the run — it records a "Cancelled by user" assistant turn in history and emits `run.completed` cleanly.
@@ -374,6 +319,24 @@ out, err := handle.Wait()
 ```
 
 The `StreamID` on the handle (also returned in the `X-Stream-Id` HTTP header when serving over HTTP) lets you re-subscribe to the same broker channel — useful for resuming a stream after a page refresh, or for stopping the run from a different process.
+
+#### Steering a Running Agent
+
+A run does not have to be left alone until it finishes. The same broker that
+carries a stop can carry a message into a run already in flight — the loop drains
+the queue at iteration boundaries, the same cadence at which it checks for a stop,
+and folds what it finds into the conversation before the next model call:
+
+```go
+err := broker.EnqueueMessage(ctx, streamID, history.Message{
+    Messages: []responses.InputMessageUnion{
+        responses.UserMessage("Actually, focus on the last quarter only."),
+    },
+})
+```
+
+The agent finishes the tool calls already running, then continues with the new
+instruction in context, so a correction lands without losing the work so far.
 
 ### AG-UI
 
@@ -444,9 +407,10 @@ Connect to MCP servers for access to standardized tools:
 import "github.com/hastekit/agent-sdk-go/pkg/agents/mcpclient"
 
 // Connect to MCP server
-mcpClient, err := mcpclient.NewSSEClient(
-    context.Background(), 
+mcpClient, err := mcpclient.NewClient(
+    context.Background(),
     "http://localhost:9001/sse",
+    mcpclient.WithTransport("sse"), // or "streamable-http"
     mcpclient.WithHeaders(map[string]string{
         "Authorization": "Bearer token",
     }),
@@ -464,6 +428,42 @@ agent := hastekit.NewAgent(&hastekit.AgentConfig{
     McpServers:  []agents.MCPToolset{mcpClient},
 })
 ```
+
+#### MCP Servers over stdio
+
+Many MCP servers ship as a command rather than a URL. `WithCommand` runs one as a
+child process and speaks to it over stdin/stdout — there is nothing to deploy, and
+the process is started on demand and reused across tool calls:
+
+```go
+mcpClient, err := mcpclient.NewClient(context.Background(), "", // no endpoint
+    mcpclient.WithCommand("npx", "-y", "@modelcontextprotocol/server-filesystem", "/tmp"),
+    mcpclient.WithEnv(map[string]string{
+        "GITHUB_TOKEN": "{{github_token}}", // templated from the run context
+    }),
+)
+```
+
+`WithCommand` selects the stdio transport on its own. The environment is added to
+the one the host process already has, so the command stays findable on `PATH`.
+
+Everything else is transport-agnostic: `WithToolFilter`, `WithApprovalRequiredTools`,
+`WithDeferredTools`, `WithToolPrefix`, and the schema cache all behave the same
+whichever transport carries the server.
+
+#### Namespacing Tools from Several Servers
+
+Two servers that both publish a `search` would collide in the single list of names
+the model chooses from. `WithToolPrefix` namespaces one server's tools in the name
+the model sees, while calls are still made on the server under its own name:
+
+```go
+mcpclient.WithToolPrefix("fs__") // exposes "read_file" as "fs__read_file"
+```
+
+The prefix is used verbatim, separator included — pass `"fs__"`, not `"fs"`. Tool
+filters, approval, and deferred lists are written against the server's own names,
+so adding a prefix does not change them.
 
 #### Tool Annotations
 
@@ -844,108 +844,6 @@ rt.Start()
 http.ListenAndServe(":8070", hastekit.NewHTTPHandler())
 ```
 
-### Embeddings
-
-Generate text embeddings for semantic search and RAG applications:
-
-```go
-import "github.com/hastekit/agent-sdk-go/pkg/gateway/llm/embeddings"
-
-embedder := client.Model("OpenAI/text-embedding-3-small")
-
-// Single text embedding
-resp, err := embedder.NewEmbedding(context.Background(), &embeddings.Request{
-    Input: embeddings.InputUnion{
-        OfString: utils.Ptr("The food was delicious"),
-    },
-})
-if err != nil {
-    log.Fatal(err)
-}
-
-// Access embedding vector
-for _, data := range resp.Data {
-    if data.Embedding.OfFloat != nil {
-        fmt.Println("Dimensions:", len(data.Embedding.OfFloat))
-        fmt.Println("Vector:", data.Embedding.OfFloat)
-    }
-}
-
-// Batch embeddings
-resp, err = embedder.NewEmbedding(context.Background(), &embeddings.Request{
-    Input: embeddings.InputUnion{
-        OfList: []string{
-            "The food was delicious",
-            "The service was excellent",
-            "Great atmosphere",
-        },
-    },
-})
-```
-
-### Image Generation
-
-Process images (vision) and generate new images:
-
-#### Image Processing (Vision)
-
-```go
-model := client.Model("OpenAI/gpt-4o-mini")
-
-resp, err := model.NewResponses(context.Background(), &responses.Request{
-    Instructions: utils.Ptr("Describe this image"),
-    Input: responses.InputUnion{
-        OfInputMessageList: responses.InputMessageList{
-            {
-                OfInputMessage: &responses.InputMessage{
-                    Role: constants.RoleUser,
-                    Content: responses.InputContent{
-                        {
-                            OfInputImage: &responses.InputImageContent{
-                                ImageURL: utils.Ptr("https://example.com/image.jpg"),
-                                // Or use base64: "data:image/png;base64,..."
-                                Detail: "auto",
-                            },
-                        },
-                    },
-                },
-            },
-        },
-    },
-})
-```
-
-#### Image Generation
-
-```go
-model := client.Model("OpenAI/gpt-4o-mini")
-
-resp, err := model.NewResponses(context.Background(), &responses.Request{
-    Input: responses.InputUnion{
-        OfString: utils.Ptr("Generate a beautiful sunset over mountains"),
-    },
-    Tools: []responses.ToolUnion{
-        {
-            OfImageGeneration: &responses.ImageGenerationTool{},
-        },
-    },
-})
-
-// Process generated image
-for _, output := range resp.Output {
-    if output.OfImageGenerationCall != nil {
-        imgCall := output.OfImageGenerationCall
-        
-        // Decode base64 image
-        imageData, _ := base64.StdEncoding.DecodeString(imgCall.Result)
-        
-        // Save to file
-        filename := fmt.Sprintf("image.%s", imgCall.OutputFormat)
-        os.WriteFile(filename, imageData, 0644)
-    }
-}
-```
-
 ## Documentation
 
 - **[Full Documentation](https://docs.hastekit.ai/hastekit-sdk/introduction)** - Comprehensive guides and API reference
@@ -959,15 +857,6 @@ for _, output := range resp.Output {
 
 Explore complete working examples in the [documentation repository](https://github.com/hastekit/hastekit-docs/tree/master/examples):
 
-### Responses API
-- [Text Generation](https://github.com/hastekit/hastekit-docs/tree/master/examples/responses/1_text_generation)
-- [Tool Calling](https://github.com/hastekit/hastekit-docs/tree/master/examples/responses/2_tool_calling)
-- [Reasoning](https://github.com/hastekit/hastekit-docs/tree/master/examples/responses/3_reasoning)
-- [Image Processing](https://github.com/hastekit/hastekit-docs/tree/master/examples/responses/4_image_processing)
-- [Image Generation](https://github.com/hastekit/hastekit-docs/tree/master/examples/responses/5_image_generation)
-- [Web Search](https://github.com/hastekit/hastekit-docs/tree/master/examples/responses/6_web_search)
-- [Code Execution](https://github.com/hastekit/hastekit-docs/tree/master/examples/responses/7_code_execution)
-
 ### Agents
 - [Simple Agent](https://github.com/hastekit/hastekit-docs/tree/master/examples/agents/1_simple_agent)
 - [Tool Calling Agent](https://github.com/hastekit/hastekit-docs/tree/master/examples/agents/2_tool_calling_agent)
@@ -979,10 +868,9 @@ Explore complete working examples in the [documentation repository](https://gith
 - [Restate Agent](https://github.com/hastekit/hastekit-docs/tree/master/examples/agents/8_restate_agent)
 - [Temporal Agent](https://github.com/hastekit/hastekit-docs/tree/master/examples/agents/9_temporal_agent)
 - [Agent with Sandbox](https://github.com/hastekit/hastekit-docs/tree/master/examples/agents/10_agent_with_sandbox)
-
-### Other
-- [Embeddings](https://github.com/hastekit/hastekit-docs/tree/master/examples/embeddings/1_embeddings)
-- [Speech](https://github.com/hastekit/hastekit-docs/tree/master/examples/speech/1_speech)
+- [Sandbox Bash Tool](https://github.com/hastekit/hastekit-docs/tree/master/examples/agents/11_agent_with_sandbox_bash_tool)
+- [Agent Handoff](https://github.com/hastekit/hastekit-docs/tree/master/examples/agents/12_agent_handoff)
+- [MCP Tools over stdio](https://github.com/hastekit/hastekit-docs/tree/master/examples/agents/14_agent_with_stdio_mcp_tools)
 
 ## Supported Providers
 

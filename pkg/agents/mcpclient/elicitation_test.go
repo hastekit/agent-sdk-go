@@ -219,7 +219,7 @@ func TestElicitation_LazyToolOverHTTP(t *testing.T) {
 	var serverCalls int
 	hs := elicitingHTTPServer(t, &serverCalls, true)
 
-	tool := NewLazyMcpTool(&mcp.Tool{Name: "book"}, hs, "streamable-http", nil, nil, true, false, false, "")
+	tool := NewLazyMcpTool(&mcp.Tool{Name: "book"}, serverConn{Endpoint: hs, Transport: TransportStreamableHTTP, DisableStandaloneSSE: true}, nil, false, false, "")
 
 	resp, err := tool.Execute(context.Background(), toolCall("call_1", nil))
 	require.NoError(t, err)
@@ -245,7 +245,7 @@ func TestElicitation_StatefulServerIsRefusedClearly(t *testing.T) {
 	var serverCalls int
 	hs := elicitingHTTPServer(t, &serverCalls, false)
 
-	tool := NewLazyMcpTool(&mcp.Tool{Name: "book"}, hs, "streamable-http", nil, nil, true, false, false, "")
+	tool := NewLazyMcpTool(&mcp.Tool{Name: "book"}, serverConn{Endpoint: hs, Transport: TransportStreamableHTTP, DisableStandaloneSSE: true}, nil, false, false, "")
 	resp, err := tool.Execute(context.Background(), toolCall("call_1", nil))
 	require.NoError(t, err)
 	assert.Empty(t, resp.Interrupts)
@@ -286,6 +286,8 @@ func elicitingHTTPServer(t *testing.T, calls *int, stateless bool) string {
 		func(*http.Request) *mcp.Server { return server }, opts))
 
 	t.Cleanup(hs.Close)
-	t.Cleanup(func() { globalPool.Remove(hs.URL, "streamable-http", nil) })
+	t.Cleanup(func() {
+		globalPool.Remove(serverConn{Endpoint: hs.URL, Transport: TransportStreamableHTTP, DisableStandaloneSSE: true})
+	})
 	return hs.URL
 }

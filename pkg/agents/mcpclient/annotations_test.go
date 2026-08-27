@@ -64,7 +64,7 @@ func TestLazyToolAnnotations(t *testing.T) {
 	tool := NewLazyMcpTool(&mcp.Tool{
 		Name:        "read_file",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: utils.Ptr(false)},
-	}, "https://example.test/mcp", "streamable-http", nil, nil, false, false, false, "")
+	}, serverConn{Endpoint: "https://example.test/mcp", Transport: TransportStreamableHTTP}, nil, false, false, "")
 
 	annotations := annotationsOf(t, tool)
 	require.NotNil(t, annotations)
@@ -81,7 +81,7 @@ func TestBuildLazyToolsKeepsAnnotations(t *testing.T) {
 		{Name: "search", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true}},
 		{Name: "delete_all", Annotations: &mcp.ToolAnnotations{DestructiveHint: utils.Ptr(true)}},
 		{Name: "unannotated"},
-	}, nil, nil)
+	}, nil, serverConn{})
 
 	require.Len(t, tools, 3)
 	assert.True(t, annotationsOf(t, tools[0]).IsReadOnly())

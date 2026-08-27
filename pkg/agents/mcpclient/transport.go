@@ -3,6 +3,8 @@ package mcpclient
 import (
 	"context"
 	"net/http"
+	"os"
+	"os/exec"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -68,26 +70,53 @@ func httpClientWithHeaders(headers map[string]string) *http.Client {
 	return &http.Client{Transport: &headerRoundTripper{headers: headers}}
 }
 
+// Transport names accepted by WithTransport.
+const (
+	TransportSSE            = "sse"
+	TransportStreamableHTTP = "streamable-http"
+
+	// TransportStdio runs the server as a child process and speaks to it over
+	// its stdin and stdout, which is how servers that ship as a command rather
+	// than a URL are reached.
+	TransportStdio = "stdio"
+)
+
 // newClientTransport builds the right SDK transport for the configured
-// transport type, with custom headers layered on via the HTTP client.
+// transport type: a child process for stdio, otherwise an HTTP transport with
+// custom headers layered on via the HTTP client.
 //
-// disableStandaloneSSE skips the post-init GET that opens a server→client
+// DisableStandaloneSSE skips the post-init GET that opens a server→client
 // SSE stream on the streamable-http transport. We only do request/response
 // tool calls, so the stream is unused; some servers never answer that GET,
 // leaving the client hung waiting on a stream that never opens. Callers
 // opt those servers out via WithDisableStandaloneSSE.
-func newClientTransport(endpoint, transportType string, headers map[string]string, disableStandaloneSSE bool) mcp.Transport {
-	hc := httpClientWithHeaders(headers)
-	switch transportType {
-	case "streamable-http":
-		return &mcp.StreamableClientTransport{Endpoint: endpoint, HTTPClient: hc, DisableStandaloneSSE: disableStandaloneSSE}
+//
+// ctx bounds a stdio server's process: it is killed when ctx is done. The pool
+// connects on context.Background() for exactly that reason — see Checkout.
+func newClientTransport(ctx context.Context, conn serverConn) mcp.Transport {
+	if conn.isStdio() {
+		cmd := exec.CommandContext(ctx, conn.Command[0], conn.Command[1:]...)
+		cmd.Env = conn.childEnv()
+		// A server writing diagnostics to stderr should not be silently
+		// swallowed; its stdout is the protocol and stays untouched.
+		cmd.Stderr = os.Stderr
+		return &mcp.CommandTransport{Command: cmd}
+	}
+
+	hc := httpClientWithHeaders(conn.Headers)
+	switch conn.Transport {
+	case TransportStreamableHTTP:
+		return &mcp.StreamableClientTransport{Endpoint: conn.Endpoint, HTTPClient: hc, DisableStandaloneSSE: conn.DisableStandaloneSSE}
 	default:
-		return &mcp.SSEClientTransport{Endpoint: endpoint, HTTPClient: hc}
+		return &mcp.SSEClientTransport{Endpoint: conn.Endpoint, HTTPClient: hc}
 	}
 }
 
 // connect opens a live MCP session over the given transport. Connect
 // performs the initialize handshake internally (no separate Start/Initialize).
-func connect(ctx context.Context, endpoint, transportType string, headers map[string]string, disableStandaloneSSE bool) (*mcp.ClientSession, error) {
-	return sdkClient.Connect(ctx, newClientTransport(endpoint, transportType, headers, disableStandaloneSSE), nil)
+func connect(ctx context.Context, conn serverConn) (*mcp.ClientSession, error) {
+	if err := conn.validate(); err != nil {
+		return nil, err
+	}
+	return sdkClient.Connect(ctx, newClientTransport(ctx, conn), nil)
 }

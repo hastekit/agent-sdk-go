@@ -62,13 +62,9 @@ func newConnectionPool(idleTimeout time.Duration) *connectionPool {
 	return p
 }
 
-// poolKey generates a key for the connection pool.
-// Uses endpoint + transport + sorted headers (without tool filters, since connections are server-level).
-func poolKey(endpoint, transportType string, headers map[string]string) string {
-	return fmt.Sprintf("%s|%s|%s", endpoint, transportType, sortedHeadersString(headers))
-}
-
-// Checkout returns an existing healthy connection or creates a new one.
+// Checkout returns an existing healthy connection or creates a new one. For a
+// stdio server that connection is a running child process, so pooling is what
+// keeps a tool call from paying a process launch every time.
 // The mcp-go SSE client supports concurrent CallTool calls via JSON-RPC request IDs,
 // so a single connection per server is sufficient.
 //
@@ -77,8 +73,8 @@ func poolKey(endpoint, transportType string, headers map[string]string) string {
 // the activity/handler context is cancelled after the function returns. If the SSE
 // reader goroutine were tied to that context, it would die after the first tool call,
 // making the pooled connection unusable for subsequent calls.
-func (p *connectionPool) Checkout(ctx context.Context, endpoint, transportType string, headers map[string]string, disableStandaloneSSE bool) (*mcp.ClientSession, error) {
-	key := poolKey(endpoint, transportType, headers)
+func (p *connectionPool) Checkout(ctx context.Context, conn serverConn) (*mcp.ClientSession, error) {
+	key := conn.key()
 
 	p.mu.RLock()
 	entry, exists := p.connections[key]
@@ -95,9 +91,10 @@ func (p *connectionPool) Checkout(ctx context.Context, endpoint, transportType s
 		}
 	}
 
-	// Create new connection using context.Background() so the SSE stream
-	// survives beyond the caller's context (e.g. a Temporal activity context).
-	cli, err := createConnection(context.Background(), endpoint, transportType, headers, disableStandaloneSSE)
+	// Create new connection using context.Background() so the SSE stream — or,
+	// for stdio, the server process itself — survives beyond the caller's
+	// context (e.g. a Temporal activity context).
+	cli, err := createConnection(context.Background(), conn)
 	if err != nil {
 		return nil, err
 	}
@@ -113,8 +110,8 @@ func (p *connectionPool) Checkout(ctx context.Context, endpoint, transportType s
 }
 
 // Remove removes a connection from the pool (e.g., when it's known to be dead).
-func (p *connectionPool) Remove(endpoint, transportType string, headers map[string]string) {
-	key := poolKey(endpoint, transportType, headers)
+func (p *connectionPool) Remove(conn serverConn) {
+	key := conn.key()
 	p.mu.Lock()
 	if entry, ok := p.connections[key]; ok {
 		entry.mu.Lock()
@@ -178,33 +175,10 @@ func (p *connectionPool) Close() {
 
 // createConnection establishes a new MCP connection (Connect performs
 // the initialize handshake; no separate ListTools).
-func createConnection(ctx context.Context, endpoint, transportType string, headers map[string]string, disableStandaloneSSE bool) (*mcp.ClientSession, error) {
-	session, err := connect(ctx, endpoint, transportType, headers, disableStandaloneSSE)
+func createConnection(ctx context.Context, conn serverConn) (*mcp.ClientSession, error) {
+	session, err := connect(ctx, conn)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect MCP client: %w", err)
 	}
 	return session, nil
-}
-
-// sortedHeadersString produces a deterministic string from headers for use as cache/pool key.
-func sortedHeadersString(headers map[string]string) string {
-	if len(headers) == 0 {
-		return ""
-	}
-	keys := make([]string, 0, len(headers))
-	for k := range headers {
-		keys = append(keys, k)
-	}
-	for i := 0; i < len(keys); i++ {
-		for j := i + 1; j < len(keys); j++ {
-			if keys[i] > keys[j] {
-				keys[i], keys[j] = keys[j], keys[i]
-			}
-		}
-	}
-	result := ""
-	for _, k := range keys {
-		result += k + "=" + headers[k] + ";"
-	}
-	return result
 }

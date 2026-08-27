@@ -153,14 +153,14 @@ func (c *McpTool) Execute(ctx context.Context, params *agents.ToolCall) (*agents
 // This allows ListTools() to return tool definitions without establishing a live connection.
 type LazyMcpTool struct {
 	*agents.BaseTool
-	endpoint             string
-	transportType        string
-	resolvedHeaders      map[string]string
-	meta                 mcp.Meta
-	disableStandaloneSSE bool
+
+	// conn says which server to reach and how, and is what the pool is keyed
+	// by. meta is the client's own, sent with every call.
+	conn serverConn
+	meta mcp.Meta
 }
 
-func NewLazyMcpTool(t *mcp.Tool, endpoint, transportType string, resolvedHeaders map[string]string, meta mcp.Meta, disableStandaloneSSE bool, requiresApproval bool, deferred bool, toolPrefix string) *LazyMcpTool {
+func NewLazyMcpTool(t *mcp.Tool, conn serverConn, meta mcp.Meta, requiresApproval bool, deferred bool, toolPrefix string) *LazyMcpTool {
 	inputSchema := map[string]any{
 		"type":       "object",
 		"properties": map[string]any{},
@@ -193,11 +193,8 @@ func NewLazyMcpTool(t *mcp.Tool, endpoint, transportType string, resolvedHeaders
 				},
 			},
 		},
-		endpoint:             endpoint,
-		transportType:        transportType,
-		resolvedHeaders:      resolvedHeaders,
-		meta:                 meta,
-		disableStandaloneSSE: disableStandaloneSSE,
+		conn: conn,
+		meta: meta,
 	}
 }
 
@@ -219,7 +216,7 @@ func (c *LazyMcpTool) Execute(ctx context.Context, params *agents.ToolCall) (*ag
 	}
 
 	// Get a connection from the pool (or create a new one)
-	cli, err := globalPool.Checkout(ctx, c.endpoint, c.transportType, c.resolvedHeaders, c.disableStandaloneSSE)
+	cli, err := globalPool.Checkout(ctx, c.conn)
 	if err != nil {
 		return &agents.ToolCallResponse{
 			FunctionCallOutputMessage: &responses.FunctionCallOutputMessage{
@@ -253,8 +250,8 @@ func (c *LazyMcpTool) Execute(ctx context.Context, params *agents.ToolCall) (*ag
 		}
 
 		// Connection might be dead — remove from pool and retry once
-		globalPool.Remove(c.endpoint, c.transportType, c.resolvedHeaders)
-		cli, retryErr := globalPool.Checkout(ctx, c.endpoint, c.transportType, c.resolvedHeaders, c.disableStandaloneSSE)
+		globalPool.Remove(c.conn)
+		cli, retryErr := globalPool.Checkout(ctx, c.conn)
 		if retryErr != nil {
 			return &agents.ToolCallResponse{
 				FunctionCallOutputMessage: &responses.FunctionCallOutputMessage{
