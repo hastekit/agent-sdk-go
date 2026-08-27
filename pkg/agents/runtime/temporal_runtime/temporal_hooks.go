@@ -76,12 +76,12 @@ func hookActivities(agentName string, hooks []agents.Hook) map[string]any {
 		// as a failure Temporal will not retry. The model-call ones need no
 		// wrapping: an error there fails the run either way, and retrying a
 		// budget check that could not answer is the right thing to do.
-		activities[name+beforeToolCallActivitySuffix] = func(ctx context.Context, call *agents.ToolCall) (agents.ToolCallHookResult, error) {
-			res, err := h.BeforeToolCall(ctx, call)
+		activities[name+beforeToolCallActivitySuffix] = func(ctx context.Context, serializedTool *agents.BaseTool, call *agents.ToolCall) (agents.ToolCallHookResult, error) {
+			res, err := h.BeforeToolCall(ctx, serializedTool, call)
 			return res, abortError(err)
 		}
-		activities[name+afterToolCallActivitySuffix] = func(ctx context.Context, call *agents.ToolCall, result *agents.ToolCallResponse) (agents.ToolCallHookResult, error) {
-			res, err := h.AfterToolCall(ctx, call, result)
+		activities[name+afterToolCallActivitySuffix] = func(ctx context.Context, serializedTool *agents.BaseTool, call *agents.ToolCall, result *agents.ToolCallResponse) (agents.ToolCallHookResult, error) {
+			res, err := h.AfterToolCall(ctx, serializedTool, call, result)
 			return res, abortError(err)
 		}
 		activities[name+beforeModelCallActivitySuffix] = h.BeforeModelCall
@@ -108,18 +108,18 @@ func NewTemporalHookProxy(workflowCtx workflow.Context, name string) *TemporalHo
 
 func (h *TemporalHookProxy) GetName() string { return h.name }
 
-func (h *TemporalHookProxy) BeforeToolCall(ctx context.Context, call *agents.ToolCall) (agents.ToolCallHookResult, error) {
+func (h *TemporalHookProxy) BeforeToolCall(ctx context.Context, serializedTool *agents.BaseTool, call *agents.ToolCall) (agents.ToolCallHookResult, error) {
 	var out agents.ToolCallHookResult
-	err := workflow.ExecuteActivity(h.workflowCtx, h.name+beforeToolCallActivitySuffix, call).Get(h.workflowCtx, &out)
+	err := workflow.ExecuteActivity(h.workflowCtx, h.name+beforeToolCallActivitySuffix, serializedTool, call).Get(h.workflowCtx, &out)
 	if err != nil {
 		return agents.ContinueToolCall(), err
 	}
 	return out, nil
 }
 
-func (h *TemporalHookProxy) AfterToolCall(ctx context.Context, call *agents.ToolCall, result *agents.ToolCallResponse) (agents.ToolCallHookResult, error) {
+func (h *TemporalHookProxy) AfterToolCall(ctx context.Context, serializedTool *agents.BaseTool, call *agents.ToolCall, result *agents.ToolCallResponse) (agents.ToolCallHookResult, error) {
 	var out agents.ToolCallHookResult
-	err := workflow.ExecuteActivity(h.workflowCtx, h.name+afterToolCallActivitySuffix, call, result).Get(h.workflowCtx, &out)
+	err := workflow.ExecuteActivity(h.workflowCtx, h.name+afterToolCallActivitySuffix, serializedTool, call, result).Get(h.workflowCtx, &out)
 	if err != nil {
 		return agents.ContinueToolCall(), err
 	}

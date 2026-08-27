@@ -138,6 +138,7 @@ func (w *wrappedTool) Execute(ctx context.Context, params *ToolCall) (*ToolCallR
 func (w *wrappedTool) Tool(ctx context.Context) *responses.ToolUnion { return w.inner.Tool(ctx) }
 func (w *wrappedTool) NeedApproval() bool                            { return w.inner.NeedApproval() }
 func (w *wrappedTool) IsDeferred() bool                              { return w.inner.IsDeferred() }
+func (w *wrappedTool) GetBaseTool() (*BaseTool, error)               { return w.inner.GetBaseTool() }
 
 func TestAgentWithoutSkillsIsUnchanged(t *testing.T) {
 	agent := NewAgent(&AgentOptions{Name: "Plain_Agent"})

@@ -67,10 +67,10 @@ func TestListMCPToolsActivity_CarriesAnnotations(t *testing.T) {
 
 	// Read-only survives, so the loop lets it run unattended.
 	require.NotNil(t, got[0].Annotations)
-	assert.True(t, got[0].GetAnnotations().IsReadOnly())
+	assert.True(t, got[0].Annotations.IsReadOnly())
 
 	// Destructive survives, so the loop still knows to ask.
-	assert.True(t, got[1].GetAnnotations().IsDeclaredDestructive())
+	assert.True(t, got[1].Annotations.IsDeclaredDestructive())
 
 	// No annotations stays no annotations rather than becoming a claim.
 	assert.Nil(t, got[2].Annotations)
@@ -85,5 +85,14 @@ func TestTemporalToolProxy_ForwardsAnnotations(t *testing.T) {
 
 	proxy := temporal_runtime.NewTemporalToolProxy(nil, "prefix", tool)
 
-	assert.True(t, agents.AnnotationsOf(proxy).IsDeclaredDestructive())
+	assert.True(t, annotationsOf(t, proxy).IsDeclaredDestructive())
+}
+
+// annotationsOf reads a tool's annotations the one way there is: through the
+// BaseTool it reports. Nil is a usable answer — every Is* helper is nil-safe.
+func annotationsOf(t *testing.T, tool agents.Tool) *agents.ToolAnnotations {
+	t.Helper()
+	base, err := tool.GetBaseTool()
+	require.NoError(t, err)
+	return base.Annotations
 }

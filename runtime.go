@@ -2,13 +2,11 @@ package sdk
 
 import (
 	"context"
-	"fmt"
 	"log"
 
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/runtime/restate_runtime"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/runtime/temporal_runtime"
-	"github.com/hastekit/agent-sdk-go/pkg/agents/streambroker"
 	restate "github.com/restatedev/sdk-go"
 	"github.com/restatedev/sdk-go/server"
 	"go.temporal.io/sdk/activity"
@@ -22,12 +20,11 @@ import (
 type TemporalRuntime struct {
 	*temporal_runtime.TemporalRuntime
 	temporalEndpoint string
-	redisEndpoint    string
 	broker           agents.StreamBroker
 }
 
 // NewTemporalRuntime creates a new Temporal runtime
-func NewTemporalRuntime(temporalEndpoint string, redisEndpoint string) (*TemporalRuntime, error) {
+func NewTemporalRuntime(temporalEndpoint string, broker agents.StreamBroker) (*TemporalRuntime, error) {
 	otelInterceptor, err := opentelemetry.NewTracingInterceptor(
 		opentelemetry.TracerOptions{},
 	)
@@ -49,18 +46,9 @@ func NewTemporalRuntime(temporalEndpoint string, redisEndpoint string) (*Tempora
 		return nil, err
 	}
 
-	// Create a redis broker
-	broker, err := streambroker.NewRedisStreamBroker(streambroker.RedisStreamBrokerOptions{
-		Addr: redisEndpoint,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("error creating redis stream broker: %w", err)
-	}
-
 	return &TemporalRuntime{
 		TemporalRuntime:  temporal_runtime.NewTemporalRuntime(cli, broker),
 		temporalEndpoint: temporalEndpoint,
-		redisEndpoint:    redisEndpoint,
 		broker:           broker,
 	}, nil
 }
@@ -106,24 +94,14 @@ func (r *TemporalRuntime) Start() {
 type RestateRuntime struct {
 	*restate_runtime.RestateRuntime
 	restateEndpoint string
-	redisEndpoint   string
 	broker          agents.StreamBroker
 }
 
-func NewRestateRuntime(restateEndpoint string, redisEndpoint string) (*RestateRuntime, error) {
-	// Create a redis broker
-	broker, err := streambroker.NewRedisStreamBroker(streambroker.RedisStreamBrokerOptions{
-		Addr: redisEndpoint,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("error creating redis stream broker: %w", err)
-	}
-
+func NewRestateRuntime(restateEndpoint string, broker agents.StreamBroker) (*RestateRuntime, error) {
 	return &RestateRuntime{
 		RestateRuntime:  restate_runtime.NewRestateRuntime(restateEndpoint, broker),
 		broker:          broker,
 		restateEndpoint: "localhost:8082",
-		redisEndpoint:   redisEndpoint,
 	}, nil
 }
 

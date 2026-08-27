@@ -3,6 +3,7 @@ package mcpclient
 import (
 	"context"
 	"fmt"
+	"maps"
 	"slices"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 )
 
 type MCPClient struct {
+	Name      string            `json:"-"`
 	Endpoint  string            `json:"-"`
 	Transport string            `json:"-"`
 	Headers   map[string]string `json:"-"`
@@ -37,10 +39,28 @@ func NewClient(ctx context.Context, endpoint string, options ...McpServerOption)
 		option(srv)
 	}
 
+	if srv.Name == "" {
+		srv.Name = srv.Endpoint
+	}
+
+	// Copied, not written into: WithMeta stores the caller's own map, and two
+	// clients built from one map would otherwise overwrite each other's
+	// server_name — and the caller's map besides.
+	meta := map[string]any{}
+	maps.Copy(meta, srv.Meta)
+	meta["server_name"] = srv.Name
+	srv.Meta = meta
+
 	return srv, nil
 }
 
 type McpServerOption func(*MCPClient)
+
+func WithName(name string) McpServerOption {
+	return func(server *MCPClient) {
+		server.Name = name
+	}
+}
 
 func WithHeaders(headers map[string]string) McpServerOption {
 	return func(server *MCPClient) {
@@ -54,8 +74,17 @@ func WithToolFilter(toolFilter ...string) McpServerOption {
 	}
 }
 
-// WithToolPrefix namespaces this server's tools in the name the model sees:
-// prefix "xyz" exposes the server's "search" as "xyz__search"
+// WithToolPrefix namespaces this server's tools in the name the model sees,
+// which keeps two servers that both publish a "search" from colliding.
+//
+// The prefix is used verbatim, separator included: WithToolPrefix("xyz__")
+// exposes the server's "search" as "xyz__search". Passing "xyz" would produce
+// "xyzsearch", so carry the separator in the prefix.
+//
+// The prefix is presentation only. Calls are made on the server under its own
+// name, and WithToolFilter, WithApprovalRequiredTools and WithDeferredTools are
+// all written against the server's own tool names, so they keep working
+// unchanged when a prefix is added.
 func WithToolPrefix(prefix string) McpServerOption {
 	return func(srv *MCPClient) {
 		srv.ToolPrefix = prefix
@@ -109,6 +138,12 @@ func WithSchemaCache(cache SchemaCache) McpServerOption {
 	}
 }
 
+func WithMeta(m map[string]any) McpServerOption {
+	return func(srv *MCPClient) {
+		srv.Meta = m
+	}
+}
+
 func (srv *MCPClient) GetName() string {
 	return "MCPClient"
 }
@@ -143,9 +178,22 @@ func (srv *MCPClient) ListTools(ctx context.Context, runContext map[string]any) 
 	return srv.buildLazyTools(tools, meta, resolvedHeaders), nil
 }
 
-// CallToolDirect calls an MCP tool by name without listing tools first.
-// Uses the connection pool for efficient connection reuse.
-func (srv *MCPClient) CallToolDirect(ctx context.Context, runContext map[string]any, params *agents.ToolCall) (*agents.ToolCallResponse, error) {
+// CallToolDirect runs one tool against this server without listing tools first,
+// reusing a pooled connection. Listing instead would cost a fresh MCP session
+// and a tools/list before every single call, since schemas are only cached when
+// a SchemaCache is injected.
+//
+// It takes the tool rather than looking one up by name. A durable runtime's
+// workflow already holds the tool as serialized data and hands it back here, so
+// there is nothing to resolve: tool.Name is the name the server knows, already
+// free of any prefix the model-facing name carries. That also means a tool the
+// filter excluded cannot be called here — one that was never listed has no
+// BaseTool to pass.
+func (srv *MCPClient) CallToolDirect(ctx context.Context, runContext map[string]any, tool *agents.BaseTool, params *agents.ToolCall) (*agents.ToolCallResponse, error) {
+	if tool == nil || tool.Name == "" {
+		return nil, fmt.Errorf("mcp: cannot call %q without the tool it names", params.Name)
+	}
+
 	resolvedHeaders := srv.resolveHeaders(runContext)
 
 	// The run context comes in as its own argument on this path — a durable
@@ -156,16 +204,15 @@ func (srv *MCPClient) CallToolDirect(ctx context.Context, runContext map[string]
 		params.RunContext = runContext
 	}
 
-	tool := &LazyMcpTool{
+	lazy := &LazyMcpTool{
+		BaseTool:             tool,
 		endpoint:             srv.Endpoint,
 		transportType:        srv.Transport,
 		resolvedHeaders:      resolvedHeaders,
 		meta:                 srv.Meta,
-		toolName:             params.Name,
-		toolPrefix:           srv.ToolPrefix,
 		disableStandaloneSSE: srv.DisableStandaloneSSE,
 	}
-	return tool.Execute(ctx, params)
+	return lazy.Execute(ctx, params)
 }
 
 // InvalidateToolCache removes cached tool schemas for this MCP server.
@@ -212,10 +259,8 @@ func (srv *MCPClient) schemaCacheKey(resolvedHeaders map[string]string) string {
 			filterStr += f + ","
 		}
 	}
-	// The prefix is part of the key because cached schemas carry it: without it,
-	// two clients on the same endpoint under different prefixes would read each
-	// other's names out of a shared cache.
-	return fmt.Sprintf("mcp:schema:%s|%s|%s|%s|%s", srv.Endpoint, srv.Transport, sortedHeadersString(resolvedHeaders), filterStr, srv.ToolPrefix)
+
+	return fmt.Sprintf("mcp:schema:%s|%s|%s|%s", srv.Endpoint, srv.Transport, sortedHeadersString(resolvedHeaders), filterStr)
 }
 
 // fetchToolSchemas connects to the MCP server, fetches tool schemas, and closes the connection.
@@ -235,14 +280,6 @@ func (srv *MCPClient) fetchToolSchemas(ctx context.Context, resolvedHeaders map[
 	// Actual tool execution will use the connection pool.
 	session.Close()
 
-	if srv.ToolPrefix != "" {
-		for _, tool := range tools.Tools {
-			if tool != nil {
-				tool.Name = PrefixedToolName(srv.ToolPrefix, tool.Name)
-			}
-		}
-	}
-
 	return tools.Tools, srv.Meta, nil
 }
 
@@ -253,27 +290,14 @@ func (srv *MCPClient) fetchToolSchemas(ctx context.Context, resolvedHeaders map[
 func (srv *MCPClient) buildLazyTools(tools []*mcp.Tool, meta mcp.Meta, resolvedHeaders map[string]string) []agents.Tool {
 	var result []agents.Tool
 	for _, tool := range tools {
-		if len(srv.ToolFilter) > 0 && !srv.namesTool(srv.ToolFilter, tool.Name) {
+		if len(srv.ToolFilter) > 0 && !slices.Contains(srv.ToolFilter, tool.Name) {
 			continue
 		}
 
-		requiresApproval := srv.namesTool(srv.ApprovalRequiredTools, tool.Name)
-		deferred := srv.namesTool(srv.DeferredTools, tool.Name) || slices.Contains(srv.DeferredTools, "*")
+		requiresApproval := slices.Contains(srv.ApprovalRequiredTools, tool.Name)
+		deferred := slices.Contains(srv.DeferredTools, tool.Name) || slices.Contains(srv.DeferredTools, "*")
 
 		result = append(result, NewLazyMcpTool(tool, srv.Endpoint, srv.Transport, resolvedHeaders, meta, srv.DisableStandaloneSSE, requiresApproval, deferred, srv.ToolPrefix))
 	}
 	return result
-}
-
-// namesTool reports whether a configured tool list names the tool called name.
-// name is prefixed, so each entry is prefixed before comparing — which is what
-// lets WithToolFilter, WithApprovalRequiredTools and WithDeferredTools go on
-// being written against the server's own tool names.
-func (srv *MCPClient) namesTool(list []string, name string) bool {
-	for _, entry := range list {
-		if PrefixedToolName(srv.ToolPrefix, entry) == name {
-			return true
-		}
-	}
-	return false
 }

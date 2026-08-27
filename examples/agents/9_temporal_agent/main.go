@@ -29,11 +29,12 @@ func main() {
 	model := client.Model("OpenAI/gpt-4.1-mini")
 
 	// Temporal server endpoint + Redis for streaming
-	rt, err := hastekit.NewTemporalRuntime("0.0.0.0:7233", "localhost:6379")
+	// The broker carries the run's stream; the runtime is built around it.
+	broker, err := hastekit.NewRedisStreamBroker("localhost:6379", "", 0)
 	if err != nil {
 		log.Fatal(err)
 	}
-	broker, err := hastekit.NewRedisStreamBroker("localhost:6379")
+	rt, err := hastekit.NewTemporalRuntime("0.0.0.0:7233", broker)
 	if err != nil {
 		log.Fatal(err)
 	}

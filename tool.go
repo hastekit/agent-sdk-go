@@ -2,6 +2,7 @@ package sdk
 
 import (
 	"context"
+	"maps"
 	"reflect"
 	"runtime"
 	"strings"
@@ -25,6 +26,7 @@ type FunctionTool[T any, S any] struct {
 	needsApproval bool
 	deferred      bool
 	annotations   *agents.ToolAnnotations
+	meta          map[string]any
 	fn            ToolFunc[T, S]
 }
 
@@ -51,9 +53,19 @@ func (t *FunctionTool[T, S]) SetAnnotations(annotations *agents.ToolAnnotations)
 	t.annotations = annotations
 }
 
-// GetAnnotations implements agents.AnnotatedTool.
+// GetAnnotations implements ToolConfig, which is how the per-hint options
+// (WithReadOnly, WithDestructive, ...) amend the set rather than clobber it.
 func (t *FunctionTool[T, S]) GetAnnotations() *agents.ToolAnnotations {
 	return t.annotations
+}
+
+func (t *FunctionTool[T, S]) SetMeta(meta map[string]any) {
+	t.meta = meta
+}
+
+// GetMeta implements ToolConfig, letting WithMeta add to what is already there.
+func (t *FunctionTool[T, S]) GetMeta() map[string]any {
+	return t.meta
 }
 
 type ToolConfig interface {
@@ -66,6 +78,11 @@ type ToolConfig interface {
 	// instead of overwriting them, so WithReadOnly and WithIdempotent can be
 	// passed to the same tool.
 	GetAnnotations() *agents.ToolAnnotations
+
+	SetMeta(map[string]any)
+	// GetMeta lets WithMeta add to what is already there, for the same reason
+	// GetAnnotations exists.
+	GetMeta() map[string]any
 }
 
 type ToolFunc[T any, S any] func(ctx context.Context, in T) (S, error)
@@ -150,6 +167,23 @@ func WithTitle(title string) ToolOption {
 	return annotate(func(a *agents.ToolAnnotations) { a.Title = title })
 }
 
+// WithMeta attaches metadata to the tool. It is not sent to the model and has
+// no meaning to the SDK: it rides along on the BaseTool, which is what a tool
+// call hook is shown, so a policy can key off where a tool came from or what it
+// belongs to without having to recognise it by name.
+//
+// Repeated use merges rather than replaces, so several options can each
+// contribute a key, and a later one wins on a key both set. It works on a copy:
+// a map handed to several tools must not pick up one tool's keys on another.
+func WithMeta(meta map[string]any) ToolOption {
+	return func(ft ToolConfig) {
+		merged := map[string]any{}
+		maps.Copy(merged, ft.GetMeta())
+		maps.Copy(merged, meta)
+		ft.SetMeta(merged)
+	}
+}
+
 // annotate applies one hint to the tool's annotations, creating the set on
 // first use so the hint options compose rather than clobber each other. It
 // works on a copy: a set handed to several tools via WithAnnotations must not
@@ -212,4 +246,17 @@ func (t *FunctionTool[T, S]) NeedApproval() bool {
 
 func (t *FunctionTool[T, S]) IsDeferred() bool {
 	return t.deferred
+}
+
+// GetBaseTool implements agents.Tool. A function tool keeps its state in its own
+// fields rather than an embedded BaseTool, so the projection is built here.
+// Name is left empty: the tool has one name, and it is the one in ToolUnion.
+func (t *FunctionTool[T, S]) GetBaseTool() (*agents.BaseTool, error) {
+	return &agents.BaseTool{
+		ToolUnion:        *t.Tool(context.Background()),
+		RequiresApproval: t.needsApproval,
+		Deferred:         t.deferred,
+		Annotations:      t.annotations,
+		Meta:             t.meta,
+	}, nil
 }

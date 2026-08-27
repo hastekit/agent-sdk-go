@@ -84,6 +84,14 @@ func (t *TemporalToolProxy) IsDeferred() bool {
 	return t.wrappedTool.IsDeferred()
 }
 
-func (t *TemporalToolProxy) GetAnnotations() *agents.ToolAnnotations {
-	return agents.AnnotationsOf(t.wrappedTool)
+// GetBaseTool reports the wrapped tool's own identity, not this wrapper's: the
+// wrapper is a way of running the tool, not a different tool, and it is what a
+// hook is shown.
+func (t *TemporalToolProxy) GetBaseTool() (*agents.BaseTool, error) {
+	// Nil-safe because this one is asked on every tool call, by the hook runner,
+	// where losing the tool's identity is a far better outcome than a panic.
+	if t.wrappedTool == nil {
+		return &agents.BaseTool{}, nil
+	}
+	return t.wrappedTool.GetBaseTool()
 }

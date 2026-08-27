@@ -19,12 +19,12 @@ type bothHook struct {
 
 func (h *bothHook) GetName() string { return h.name }
 
-func (h *bothHook) BeforeToolCall(ctx context.Context, call *agents.ToolCall) (agents.ToolCallHookResult, error) {
+func (h *bothHook) BeforeToolCall(ctx context.Context, tool *agents.BaseTool, call *agents.ToolCall) (agents.ToolCallHookResult, error) {
 	*h.log = append(*h.log, "tool:before")
 	return agents.ContinueToolCall(), nil
 }
 
-func (h *bothHook) AfterToolCall(ctx context.Context, call *agents.ToolCall, result *agents.ToolCallResponse) (agents.ToolCallHookResult, error) {
+func (h *bothHook) AfterToolCall(ctx context.Context, tool *agents.BaseTool, call *agents.ToolCall, result *agents.ToolCallResponse) (agents.ToolCallHookResult, error) {
 	*h.log = append(*h.log, "tool:after")
 	return agents.ContinueToolCall(), nil
 }
@@ -49,12 +49,12 @@ type toolOnlyHook struct {
 
 func (h *toolOnlyHook) GetName() string { return h.name }
 
-func (h *toolOnlyHook) BeforeToolCall(ctx context.Context, call *agents.ToolCall) (agents.ToolCallHookResult, error) {
+func (h *toolOnlyHook) BeforeToolCall(ctx context.Context, tool *agents.BaseTool, call *agents.ToolCall) (agents.ToolCallHookResult, error) {
 	*h.log = append(*h.log, "tool:before")
 	return agents.ContinueToolCall(), nil
 }
 
-func (h *toolOnlyHook) AfterToolCall(ctx context.Context, call *agents.ToolCall, result *agents.ToolCallResponse) (agents.ToolCallHookResult, error) {
+func (h *toolOnlyHook) AfterToolCall(ctx context.Context, tool *agents.BaseTool, call *agents.ToolCall, result *agents.ToolCallResponse) (agents.ToolCallHookResult, error) {
 	*h.log = append(*h.log, "tool:after")
 	return agents.ContinueToolCall(), nil
 }
@@ -81,7 +81,7 @@ func TestNoopHalves_SatisfyTheirSide(t *testing.T) {
 	assert.False(t, res.Handled, "a no-op half must never settle a call")
 
 	var noopTool agents.NoopToolCallHook
-	toolRes, err := noopTool.BeforeToolCall(context.Background(), &agents.ToolCall{})
+	toolRes, err := noopTool.BeforeToolCall(context.Background(), &agents.BaseTool{}, &agents.ToolCall{})
 	require.NoError(t, err)
 	assert.False(t, toolRes.Handled)
 }

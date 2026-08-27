@@ -60,7 +60,7 @@ func TestCallToolDirect_CancellationReachesServer(t *testing.T) {
 
 	callDone := make(chan error, 1)
 	go func() {
-		_, err := client.CallToolDirect(ctx, nil, &agents.ToolCall{
+		_, err := client.CallToolDirect(ctx, nil, &agents.BaseTool{Name: "block"}, &agents.ToolCall{
 			FunctionCallMessage: &responses.FunctionCallMessage{
 				ID:        "fc_block",
 				CallID:    "call_block",

@@ -28,17 +28,17 @@ func NewRestateHook(restateCtx restate.WorkflowContext, wrappedHook agents.Hook)
 
 func (h *RestateHook) GetName() string { return h.wrappedHook.GetName() }
 
-func (h *RestateHook) BeforeToolCall(ctx context.Context, call *agents.ToolCall) (agents.ToolCallHookResult, error) {
+func (h *RestateHook) BeforeToolCall(ctx context.Context, serializedTool *agents.BaseTool, call *agents.ToolCall) (agents.ToolCallHookResult, error) {
 	res, err := restate.Run(h.restateCtx, func(restate.RunContext) (agents.ToolCallHookResult, error) {
-		res, err := h.wrappedHook.BeforeToolCall(ctx, call)
+		res, err := h.wrappedHook.BeforeToolCall(ctx, serializedTool, call)
 		return res, abortError(err)
 	}, restate.WithName(h.GetName()+"_BeforeToolCall"))
 	return res, err
 }
 
-func (h *RestateHook) AfterToolCall(ctx context.Context, call *agents.ToolCall, result *agents.ToolCallResponse) (agents.ToolCallHookResult, error) {
+func (h *RestateHook) AfterToolCall(ctx context.Context, serializedTool *agents.BaseTool, call *agents.ToolCall, result *agents.ToolCallResponse) (agents.ToolCallHookResult, error) {
 	res, err := restate.Run(h.restateCtx, func(restate.RunContext) (agents.ToolCallHookResult, error) {
-		res, err := h.wrappedHook.AfterToolCall(ctx, call, result)
+		res, err := h.wrappedHook.AfterToolCall(ctx, serializedTool, call, result)
 		return res, abortError(err)
 	}, restate.WithName(h.GetName()+"_AfterToolCall"))
 	return res, err

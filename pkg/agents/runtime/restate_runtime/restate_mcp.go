@@ -33,14 +33,17 @@ func (t *RestateMCPServer) ListTools(ctx context.Context, runContext map[string]
 			return nil, err
 		}
 
+		// GetBaseTool rather than a field-by-field copy: this is the only
+		// crossing a tool makes into the workflow, and anything left out here
+		// is gone for good on the far side — the tool's own name and its meta
+		// included, which is exactly what a hook over there is looking at.
 		var tools []agents.BaseTool
 		for _, tool := range mcpTools {
-			tools = append(tools, agents.BaseTool{
-				ToolUnion:        *tool.Tool(ctx),
-				RequiresApproval: tool.NeedApproval(),
-				Deferred:         tool.IsDeferred(),
-				Annotations:      agents.AnnotationsOf(tool),
-			})
+			encoded, err := tool.GetBaseTool()
+			if err != nil {
+				return nil, err
+			}
+			tools = append(tools, *encoded)
 		}
 
 		return tools, nil
@@ -94,11 +97,11 @@ func (t *RestateMCPTool) callTool(ctx context.Context, params *agents.ToolCall) 
 	// Use CallToolDirect on the wrapped MCPToolset if it supports it,
 	// otherwise fall back to ListTools + find (for non-MCPClient implementations).
 	type directCaller interface {
-		CallToolDirect(ctx context.Context, runContext map[string]any, params *agents.ToolCall) (*agents.ToolCallResponse, error)
+		CallToolDirect(ctx context.Context, runContext map[string]any, tool *agents.BaseTool, params *agents.ToolCall) (*agents.ToolCallResponse, error)
 	}
 
 	if dc, ok := t.wrappedMcpServer.(directCaller); ok {
-		return dc.CallToolDirect(ctx, t.runContext, params)
+		return dc.CallToolDirect(ctx, t.runContext, t.BaseTool, params)
 	}
 
 	// Fallback: ListTools uses schema cache so this is still fast

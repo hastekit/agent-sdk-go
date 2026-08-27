@@ -31,11 +31,11 @@ type Hook interface {
 // a hook that only wraps model calls.
 type NoopToolCallHook struct{}
 
-func (NoopToolCallHook) BeforeToolCall(context.Context, *ToolCall) (ToolCallHookResult, error) {
+func (NoopToolCallHook) BeforeToolCall(context.Context, *BaseTool, *ToolCall) (ToolCallHookResult, error) {
 	return ContinueToolCall(), nil
 }
 
-func (NoopToolCallHook) AfterToolCall(context.Context, *ToolCall, *ToolCallResponse) (ToolCallHookResult, error) {
+func (NoopToolCallHook) AfterToolCall(context.Context, *BaseTool, *ToolCall, *ToolCallResponse) (ToolCallHookResult, error) {
 	return ContinueToolCall(), nil
 }
 

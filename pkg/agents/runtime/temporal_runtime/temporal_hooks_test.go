@@ -30,7 +30,7 @@ type authzHook struct {
 
 func (h *authzHook) GetName() string { return h.name }
 
-func (h *authzHook) BeforeToolCall(ctx context.Context, call *agents.ToolCall) (agents.ToolCallHookResult, error) {
+func (h *authzHook) BeforeToolCall(ctx context.Context, tool *agents.BaseTool, call *agents.ToolCall) (agents.ToolCallHookResult, error) {
 	*h.befores++
 	if h.deny {
 		return agents.HandleToolCall(agents.ToolCallResult(call, "denied by "+h.name)), nil
@@ -38,9 +38,21 @@ func (h *authzHook) BeforeToolCall(ctx context.Context, call *agents.ToolCall) (
 	return agents.ContinueToolCall(), nil
 }
 
-func (h *authzHook) AfterToolCall(ctx context.Context, call *agents.ToolCall, result *agents.ToolCallResponse) (agents.ToolCallHookResult, error) {
+func (h *authzHook) AfterToolCall(ctx context.Context, tool *agents.BaseTool, call *agents.ToolCall, result *agents.ToolCallResponse) (agents.ToolCallHookResult, error) {
 	*h.afters++
 	return agents.ContinueToolCall(), nil
+}
+
+// hookBaseTool is the tool a hook is shown. It carries a ToolUnion because that
+// is what crosses to the activity: a BaseTool with an empty union cannot be
+// encoded at all.
+func hookBaseTool() *agents.BaseTool {
+	return &agents.BaseTool{
+		Name: "search",
+		ToolUnion: responses.ToolUnion{
+			OfFunction: &responses.FunctionTool{Name: "xyz__search"},
+		},
+	}
 }
 
 func hookCall() *agents.ToolCall {
@@ -98,7 +110,7 @@ func TestToolCallHookActivity_RunsTheHook(t *testing.T) {
 	env := suite.NewTestActivityEnvironment()
 	env.RegisterActivity(hook.BeforeToolCall)
 
-	val, err := env.ExecuteActivity(hook.BeforeToolCall, hookCall())
+	val, err := env.ExecuteActivity(hook.BeforeToolCall, hookBaseTool(), hookCall())
 	require.NoError(t, err)
 
 	var out agents.ToolCallHookResult
@@ -120,12 +132,12 @@ func TestTemporalToolExecutor_RunsHooksAsSeparateActivities(t *testing.T) {
 	// Each hook method and the tool call are registered separately; recording
 	// the order they run in is what proves they are distinct steps.
 	env.RegisterActivityWithOptions(
-		func(ctx context.Context, call *agents.ToolCall) (agents.ToolCallHookResult, error) {
+		func(ctx context.Context, tool *agents.BaseTool, call *agents.ToolCall) (agents.ToolCallHookResult, error) {
 			calls = append(calls, "before:authz")
 			return agents.ContinueToolCall(), nil
 		}, activityNamed("authz_BeforeToolCallActivity"))
 	env.RegisterActivityWithOptions(
-		func(ctx context.Context, call *agents.ToolCall, result *agents.ToolCallResponse) (agents.ToolCallHookResult, error) {
+		func(ctx context.Context, tool *agents.BaseTool, call *agents.ToolCall, result *agents.ToolCallResponse) (agents.ToolCallHookResult, error) {
 			calls = append(calls, "after:authz")
 			return agents.ContinueToolCall(), nil
 		}, activityNamed("authz_AfterToolCallActivity"))

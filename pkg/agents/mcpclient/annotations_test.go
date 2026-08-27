@@ -21,7 +21,7 @@ func TestToolAnnotationsReadThrough(t *testing.T) {
 		},
 	}, nil, nil, false, false)
 
-	annotations := agents.AnnotationsOf(tool)
+	annotations := annotationsOf(t, tool)
 	require.NotNil(t, annotations)
 	assert.Equal(t, "Search", annotations.Title)
 	assert.True(t, annotations.IsReadOnly())
@@ -37,13 +37,13 @@ func TestToolAnnotationsDestructive(t *testing.T) {
 		Name:        "append_row",
 		Annotations: &mcp.ToolAnnotations{DestructiveHint: utils.Ptr(false)},
 	}, nil, nil, false, false)
-	assert.False(t, agents.AnnotationsOf(additive).IsDestructive())
+	assert.False(t, annotationsOf(t, additive).IsDestructive())
 
 	silent := NewMcpTool(&mcp.Tool{
 		Name:        "do_something",
 		Annotations: &mcp.ToolAnnotations{},
 	}, nil, nil, false, false)
-	assert.True(t, agents.AnnotationsOf(silent).IsDestructive(), "an unstated hint is destructive")
+	assert.True(t, annotationsOf(t, silent).IsDestructive(), "an unstated hint is destructive")
 }
 
 // A tool with no annotations block at all leaves the SDK's annotations nil,
@@ -51,7 +51,7 @@ func TestToolAnnotationsDestructive(t *testing.T) {
 func TestToolAnnotationsAbsent(t *testing.T) {
 	tool := NewMcpTool(&mcp.Tool{Name: "mystery"}, nil, nil, false, false)
 
-	annotations := agents.AnnotationsOf(tool)
+	annotations := annotationsOf(t, tool)
 	assert.Nil(t, annotations)
 	assert.False(t, annotations.IsReadOnly())
 	assert.True(t, annotations.IsDestructive())
@@ -66,7 +66,7 @@ func TestLazyToolAnnotations(t *testing.T) {
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: utils.Ptr(false)},
 	}, "https://example.test/mcp", "streamable-http", nil, nil, false, false, false, "")
 
-	annotations := agents.AnnotationsOf(tool)
+	annotations := annotationsOf(t, tool)
 	require.NotNil(t, annotations)
 	assert.True(t, annotations.IsReadOnly())
 	assert.False(t, annotations.IsOpenWorld())
@@ -84,7 +84,16 @@ func TestBuildLazyToolsKeepsAnnotations(t *testing.T) {
 	}, nil, nil)
 
 	require.Len(t, tools, 3)
-	assert.True(t, agents.AnnotationsOf(tools[0]).IsReadOnly())
-	assert.True(t, agents.AnnotationsOf(tools[1]).IsDestructive())
-	assert.Nil(t, agents.AnnotationsOf(tools[2]))
+	assert.True(t, annotationsOf(t, tools[0]).IsReadOnly())
+	assert.True(t, annotationsOf(t, tools[1]).IsDestructive())
+	assert.Nil(t, annotationsOf(t, tools[2]))
+}
+
+// annotationsOf reads a tool's annotations the one way there is: through the
+// BaseTool it reports. Nil is a usable answer — every Is* helper is nil-safe.
+func annotationsOf(t *testing.T, tool agents.Tool) *agents.ToolAnnotations {
+	t.Helper()
+	base, err := tool.GetBaseTool()
+	require.NoError(t, err)
+	return base.Annotations
 }

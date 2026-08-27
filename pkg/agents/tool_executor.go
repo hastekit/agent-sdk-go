@@ -136,7 +136,7 @@ func (e *DefaultToolExecutor) ExecuteAll(ctx context.Context, executions []Execu
 			// which stays a measure of the tool.
 			resp, err := RunStoppableTool(ctx, e.StopWatcher, e.CancelGracePeriod, ex.ToolCall,
 				func(callCtx context.Context, params *ToolCall) (*ToolCallResponse, error) {
-					return RunWithToolCallHooks(callCtx, e.Hooks, params,
+					return RunWithToolCallHooks(callCtx, e.Hooks, ex,
 						func(hookedCtx context.Context, p *ToolCall) (*ToolCallResponse, error) {
 							return ExecuteWithTrace(hookedCtx, ex.Tool, p, ex.Tool.Execute)
 						})

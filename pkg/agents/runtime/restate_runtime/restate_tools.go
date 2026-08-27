@@ -48,6 +48,9 @@ func (t *RestateTool) IsDeferred() bool {
 	return t.wrappedTool.IsDeferred()
 }
 
-func (t *RestateTool) GetAnnotations() *agents.ToolAnnotations {
-	return agents.AnnotationsOf(t.wrappedTool)
+// GetBaseTool reports the wrapped tool's own identity, not this wrapper's: the
+// wrapper is a way of running the tool, not a different tool, and it is what a
+// hook is shown.
+func (t *RestateTool) GetBaseTool() (*agents.BaseTool, error) {
+	return t.wrappedTool.GetBaseTool()
 }

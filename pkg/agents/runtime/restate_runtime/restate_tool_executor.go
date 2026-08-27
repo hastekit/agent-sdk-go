@@ -77,7 +77,7 @@ func (e *RestateToolExecutor) ExecuteAll(ctx context.Context, executions []agent
 			continue
 		}
 
-		resp, err := agents.RunWithToolCallHooks(ctx, e.hooks, exec.ToolCall, exec.Tool.Execute)
+		resp, err := agents.RunWithToolCallHooks(ctx, e.hooks, exec, exec.Tool.Execute)
 		results[i] = agents.ToolExecutionResult{
 			Response:  resp,
 			Err:       err,

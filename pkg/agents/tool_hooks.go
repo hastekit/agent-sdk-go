@@ -74,7 +74,7 @@ type ToolCallHook interface {
 	// That is usually the kinder refusal, and it is a different decision from
 	// failing, so it is said differently. Reserve the error for when continuing
 	// would be worse than stopping.
-	BeforeToolCall(ctx context.Context, call *ToolCall) (ToolCallHookResult, error)
+	BeforeToolCall(ctx context.Context, serialisedTool *BaseTool, call *ToolCall) (ToolCallHookResult, error)
 
 	// AfterToolCall runs once the call has a result — whichever produced it,
 	// the tool or an earlier hook. Return ContinueToolCall to leave that result
@@ -83,7 +83,7 @@ type ToolCallHook interface {
 	//
 	// It does not run on a paused call: a pause has no result yet, and the call
 	// comes back through here when the run resumes.
-	AfterToolCall(ctx context.Context, call *ToolCall, result *ToolCallResponse) (ToolCallHookResult, error)
+	AfterToolCall(ctx context.Context, serialisedTool *BaseTool, call *ToolCall, result *ToolCallResponse) (ToolCallHookResult, error)
 }
 
 // ToolCallHookResult is a hook's answer about one call: whether it handled the
@@ -148,29 +148,32 @@ func ToolCallResult(call *ToolCall, output string) *ToolCallResponse {
 func RunWithToolCallHooks(
 	ctx context.Context,
 	hooks []ToolCallHook,
-	call *ToolCall,
-	exec func(context.Context, *ToolCall) (*ToolCallResponse, error),
+	exec ExecutableToolCall,
+	fn func(context.Context, *ToolCall) (*ToolCallResponse, error),
 ) (*ToolCallResponse, error) {
 	var result *ToolCallResponse
 	handled := false
+
+	baseTool := serializeTool(exec)
 
 	for _, hook := range hooks {
 		if hook == nil {
 			continue
 		}
-		res, err := hook.BeforeToolCall(ctx, call)
+
+		res, err := hook.BeforeToolCall(ctx, baseTool, exec.ToolCall)
 		if err != nil {
 			return nil, abortedByHook(err)
 		}
 		if res.Handled {
-			result, handled = answerFor(call, res.Response), true
+			result, handled = answerFor(exec.ToolCall, res.Response), true
 			break
 		}
 	}
 
 	if !handled {
 		var err error
-		result, err = exec(ctx, call)
+		result, err = fn(ctx, exec.ToolCall)
 		if err != nil {
 			return nil, err
 		}
@@ -187,16 +190,56 @@ func RunWithToolCallHooks(
 		if hook == nil {
 			continue
 		}
-		res, err := hook.AfterToolCall(ctx, call, result)
+		res, err := hook.AfterToolCall(ctx, baseTool, exec.ToolCall, result)
 		if err != nil {
 			return nil, abortedByHook(err)
 		}
 		if res.Handled {
-			result = answerFor(call, res.Response)
+			result = answerFor(exec.ToolCall, res.Response)
 		}
 	}
 
 	return result, nil
+}
+
+// serializeTool is the tool as a hook is shown it: plain data, because the real tool
+// may be a proxy for one running in another process, and there is nothing else
+// a hook could portably be handed.
+//
+// A tool that cannot describe itself still gets its call checked — refusing to
+// run hooks over it would fail open — so this always returns something. That
+// something has to carry a ToolUnion: under a durable runtime it crosses to the
+// hook's own step as an argument, and a BaseTool whose union is empty cannot be
+// encoded at all (ToolUnion.MarshalJSON yields no bytes), which would fail the
+// call rather than the identity. Naming it from the call is both encodable and
+// more use to a hook than nothing.
+func serializeTool(exec ExecutableToolCall) *BaseTool {
+	if exec.Tool != nil {
+		if encoded, err := exec.Tool.GetBaseTool(); err == nil && encoded != nil && encoded.ToolUnion.OfFunction != nil {
+			if encoded.Name != "" {
+				return encoded
+			}
+
+			// Only a tool with a name of its own sets Name — an MCP server's
+			// does, a function tool does not, because for it the model-facing
+			// name is its name. Fill it in rather than making every hook know
+			// that, on a copy: GetBaseTool may well have handed back the tool's
+			// own embedded BaseTool, which is not ours to write to.
+			named := *encoded
+			named.Name = named.ToolUnion.OfFunction.Name
+			return &named
+		}
+	}
+
+	name := exec.ToolName
+	if name == "" && exec.ToolCall != nil && exec.ToolCall.FunctionCallMessage != nil {
+		name = exec.ToolCall.Name
+	}
+
+	return &BaseTool{
+		Name:      name,
+		ToolUnion: responses.ToolUnion{OfFunction: &responses.FunctionTool{Name: name}},
+	}
 }
 
 // answerFor holds the invariant the whole loop rests on: every function_call in

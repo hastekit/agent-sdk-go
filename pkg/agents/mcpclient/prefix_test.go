@@ -22,22 +22,42 @@ func exposedNames(tools []agents.Tool) []string {
 	return names
 }
 
+// The prefix is used verbatim, so the separator lives in what the caller passes.
+func TestToolPrefixIsUsedVerbatim(t *testing.T) {
+	assert.Equal(t, "xyz__search", PrefixedToolName("xyz__", "search"))
+	assert.Equal(t, "search", PrefixedToolName("", "search"))
+}
+
+// The model sees the prefixed name; the tool keeps the server's own name, which
+// is what the call is finally made under.
+func TestToolPrefixKeepsBothNames(t *testing.T) {
+	srv := &MCPClient{ToolPrefix: "xyz__"}
+
+	tools := srv.buildLazyTools([]*mcp.Tool{{Name: "search"}, {Name: "book"}}, nil, nil)
+
+	require.Len(t, tools, 2)
+	assert.Equal(t, []string{"xyz__search", "xyz__book"}, exposedNames(tools))
+
+	encoded, err := tools[0].GetBaseTool()
+	require.NoError(t, err)
+	assert.Equal(t, "search", encoded.Name, "the server's own name is kept alongside")
+}
+
 // The filter, approval and deferred lists are written against the server's own
 // tool names. Adding a prefix must not silently empty them out.
 func TestToolPrefixKeepsUnprefixedOptionsWorking(t *testing.T) {
 	srv := &MCPClient{
-		ToolPrefix:            "xyz",
+		ToolPrefix:            "xyz__",
 		ToolFilter:            []string{"search", "book"},
 		ApprovalRequiredTools: []string{"book"},
 		DeferredTools:         []string{"search"},
 	}
 
-	// buildLazyTools sees what fetchToolSchemas produced: prefixed names.
 	tools := srv.buildLazyTools([]*mcp.Tool{
-		{Name: "xyz__search"}, {Name: "xyz__book"}, {Name: "xyz__cancel"},
+		{Name: "search"}, {Name: "book"}, {Name: "cancel"},
 	}, nil, nil)
 
-	require.Len(t, tools, 2, "the filter still selects by the server's own names")
+	require.Len(t, tools, 2, "the filter selects by the server's own names")
 	assert.Equal(t, []string{"xyz__search", "xyz__book"}, exposedNames(tools))
 
 	assert.True(t, tools[0].IsDeferred(), "search was deferred by its unprefixed name")
@@ -69,24 +89,14 @@ func TestOptionsWithoutToolPrefix(t *testing.T) {
 // The "defer everything" wildcard is not a tool name, so a prefix leaves it
 // alone.
 func TestToolPrefixKeepsDeferredWildcard(t *testing.T) {
-	srv := &MCPClient{ToolPrefix: "xyz", DeferredTools: []string{"*"}}
+	srv := &MCPClient{ToolPrefix: "xyz__", DeferredTools: []string{"*"}}
 
-	tools := srv.buildLazyTools([]*mcp.Tool{{Name: "xyz__search"}, {Name: "xyz__book"}}, nil, nil)
+	tools := srv.buildLazyTools([]*mcp.Tool{{Name: "search"}, {Name: "book"}}, nil, nil)
 
 	require.Len(t, tools, 2)
 	for i, tool := range tools {
 		assert.True(t, tool.IsDeferred(), "tool %d should be deferred by the wildcard", i)
 	}
-}
-
-// Cached schemas carry the prefix, so the prefix has to be part of the key.
-func TestSchemaCacheKeyIncludesToolPrefix(t *testing.T) {
-	a := &MCPClient{Endpoint: "https://example.test/mcp", Transport: "streamable-http", ToolPrefix: "a"}
-	b := &MCPClient{Endpoint: "https://example.test/mcp", Transport: "streamable-http", ToolPrefix: "b"}
-	none := &MCPClient{Endpoint: "https://example.test/mcp", Transport: "streamable-http"}
-
-	assert.NotEqual(t, a.schemaCacheKey(nil), b.schemaCacheKey(nil))
-	assert.NotEqual(t, a.schemaCacheKey(nil), none.schemaCacheKey(nil))
 }
 
 // memCache is a SchemaCache standing in for the Redis-backed one a multi-pod
@@ -121,6 +131,12 @@ func (m *memCache) Clear(_ context.Context) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.entries = map[string]*CachedToolEntry{}
+}
+
+func (m *memCache) size() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.entries)
 }
 
 // echoServer serves one "echo" tool and records the name each call arrived
@@ -180,7 +196,7 @@ func TestToolPrefixCallsServerUnderItsOwnName(t *testing.T) {
 	ctx := context.Background()
 	client, err := NewClient(ctx, url,
 		WithTransport("streamable-http"),
-		WithToolPrefix("xyz"),
+		WithToolPrefix("xyz__"),
 	)
 	require.NoError(t, err)
 
@@ -196,9 +212,12 @@ func TestToolPrefixCallsServerUnderItsOwnName(t *testing.T) {
 	require.NotNil(t, res.FunctionCallOutputMessage)
 	assert.Equal(t, "called as echo", *res.FunctionCallOutputMessage.Output.OfString)
 
-	// The durable-runtime path: only a serialized tool call crosses the boundary,
-	// so the prefix has to come off here too.
-	res, err = client.CallToolDirect(ctx, nil, echoCall("xyz__echo"))
+	// The durable-runtime path: the tool crosses the boundary as data alongside
+	// the call, so its own name is already in hand and nothing is resolved here.
+	encoded, err := tools[0].GetBaseTool()
+	require.NoError(t, err)
+
+	res, err = client.CallToolDirect(ctx, nil, encoded, echoCall("xyz__echo"))
 	require.NoError(t, err)
 	require.NotNil(t, res.FunctionCallOutputMessage)
 	assert.Equal(t, "called as echo", *res.FunctionCallOutputMessage.Output.OfString)
@@ -207,9 +226,9 @@ func TestToolPrefixCallsServerUnderItsOwnName(t *testing.T) {
 		"the server should never see the prefix")
 }
 
-// Prefixed names are what get cached, so two clients sharing a cache over one
-// endpoint must each still see their own prefix rather than the other's.
-func TestToolPrefixIsNotSharedThroughSchemaCache(t *testing.T) {
+// Cached schemas are the server's own, so one entry serves every prefix — which
+// is why the prefix is not part of the cache key.
+func TestSchemaCacheIsSharedAcrossPrefixes(t *testing.T) {
 	url, namesSeen := echoServer(t)
 	cache := newMemCache()
 
@@ -224,31 +243,44 @@ func TestToolPrefixIsNotSharedThroughSchemaCache(t *testing.T) {
 		return client
 	}
 
-	for _, prefix := range []string{"alpha", "beta", ""} {
+	for _, prefix := range []string{"alpha__", "beta__", ""} {
 		client := newPrefixed(prefix)
 
-		tools, err := client.ListTools(ctx, nil)
-		require.NoError(t, err)
-		require.Len(t, tools, 1)
+		for pass := range 2 { // the second pass reads the cache
+			tools, err := client.ListTools(ctx, nil)
+			require.NoError(t, err)
+			require.Len(t, tools, 1)
 
-		want := "echo"
-		if prefix != "" {
-			want = prefix + "__echo"
+			assert.Equal(t, prefix+"echo", tools[0].Tool(ctx).OfFunction.Name,
+				"prefix %q, pass %d", prefix, pass)
+
+			res, err := tools[0].Execute(ctx, echoCall(prefix+"echo"))
+			require.NoError(t, err)
+			assert.Equal(t, "called as echo", *res.FunctionCallOutputMessage.Output.OfString)
 		}
-		require.Equal(t, want, tools[0].Tool(ctx).OfFunction.Name,
-			"prefix %q read the wrong name out of the shared cache", prefix)
-
-		// A second pass goes through the cache rather than the wire — the name
-		// must not pick up the prefix twice.
-		tools, err = client.ListTools(ctx, nil)
-		require.NoError(t, err)
-		require.Len(t, tools, 1)
-		require.Equal(t, want, tools[0].Tool(ctx).OfFunction.Name, "cached name changed on re-read")
-
-		res, err := tools[0].Execute(ctx, echoCall(want))
-		require.NoError(t, err)
-		assert.Equal(t, "called as echo", *res.FunctionCallOutputMessage.Output.OfString)
 	}
 
-	assert.Equal(t, []string{"echo", "echo", "echo"}, namesSeen())
+	assert.Equal(t, 1, cache.size(),
+		"raw schemas cache once and every prefix reads the same entry")
+	assert.Equal(t, []string{"echo", "echo", "echo", "echo", "echo", "echo"}, namesSeen())
+}
+
+// CallToolDirect runs the tool it is handed, not a name it resolves. Refusing
+// without one is what keeps it from reaching a tool the filter excluded — a tool
+// that was never listed has no BaseTool to pass.
+func TestCallToolDirectNeedsTheTool(t *testing.T) {
+	url, namesSeen := echoServer(t)
+
+	ctx := context.Background()
+	client, err := NewClient(ctx, url, WithTransport("streamable-http"), WithToolPrefix("xyz__"))
+	require.NoError(t, err)
+
+	_, err = client.CallToolDirect(ctx, nil, nil, echoCall("xyz__echo"))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "xyz__echo")
+
+	_, err = client.CallToolDirect(ctx, nil, &agents.BaseTool{}, echoCall("xyz__echo"))
+	require.Error(t, err, "a tool with no name of its own is no better than none")
+
+	assert.Empty(t, namesSeen(), "nothing reached the server")
 }

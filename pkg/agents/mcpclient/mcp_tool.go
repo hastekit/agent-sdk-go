@@ -3,7 +3,7 @@ package mcpclient
 import (
 	"context"
 	"errors"
-	"strings"
+	"maps"
 
 	"github.com/bytedance/sonic"
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
@@ -12,28 +12,14 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// ToolPrefixSeparator joins a tool prefix to the server's own tool name in the
-// name the model sees: prefix "xyz" over tool "search" is exposed as
-// "xyz__search".
-const ToolPrefixSeparator = "__"
-
-// PrefixedToolName is the name a tool is exposed to the model under. An empty
-// prefix leaves the name exactly as the server gave it.
+// PrefixedToolName is the name a tool is exposed to the model under. The prefix
+// is used verbatim — a caller wanting "xyz__search" passes "xyz__" — and an
+// empty one leaves the name exactly as the server gave it.
 func PrefixedToolName(prefix, name string) string {
 	if prefix == "" {
 		return name
 	}
-	return prefix + ToolPrefixSeparator + name
-}
-
-// StripToolPrefix undoes PrefixedToolName, recovering the name the MCP server
-// knows the tool by. A name that doesn't carry the prefix comes back unchanged,
-// so an already-unprefixed call still resolves.
-func StripToolPrefix(prefix, name string) string {
-	if prefix == "" {
-		return name
-	}
-	return strings.TrimPrefix(name, prefix+ToolPrefixSeparator)
+	return prefix + name
 }
 
 type McpTool struct {
@@ -171,9 +157,7 @@ type LazyMcpTool struct {
 	transportType        string
 	resolvedHeaders      map[string]string
 	meta                 mcp.Meta
-	toolName             string
 	disableStandaloneSSE bool
-	toolPrefix           string
 }
 
 func NewLazyMcpTool(t *mcp.Tool, endpoint, transportType string, resolvedHeaders map[string]string, meta mcp.Meta, disableStandaloneSSE bool, requiresApproval bool, deferred bool, toolPrefix string) *LazyMcpTool {
@@ -186,14 +170,23 @@ func NewLazyMcpTool(t *mcp.Tool, endpoint, transportType string, resolvedHeaders
 		_ = sonic.Unmarshal(inputSchemaBytes, &inputSchema)
 	}
 
+	mergedMeta := map[string]any{}
+	maps.Copy(mergedMeta, t.GetMeta())
+	maps.Copy(mergedMeta, meta)
+
 	return &LazyMcpTool{
 		BaseTool: &agents.BaseTool{
+			// The server's own name. Every call this tool makes is made under
+			// it, while the model sees the prefixed one below — so the prefix
+			// never has to be undone at call time.
+			Name:             t.Name,
 			RequiresApproval: requiresApproval,
 			Deferred:         deferred,
 			Annotations:      toolAnnotations(t),
+			Meta:             mergedMeta,
 			ToolUnion: responses.ToolUnion{
 				OfFunction: &responses.FunctionTool{
-					Name:        t.Name,
+					Name:        PrefixedToolName(toolPrefix, t.Name),
 					Description: utils.Ptr(t.Description),
 					Parameters:  inputSchema,
 					Strict:      utils.Ptr(false),
@@ -204,20 +197,8 @@ func NewLazyMcpTool(t *mcp.Tool, endpoint, transportType string, resolvedHeaders
 		transportType:        transportType,
 		resolvedHeaders:      resolvedHeaders,
 		meta:                 meta,
-		toolName:             t.Name,
-		toolPrefix:           toolPrefix,
 		disableStandaloneSSE: disableStandaloneSSE,
 	}
-}
-
-// serverToolName is the name to ask the server for: the model-facing name with
-// the prefix taken back off.
-func (c *LazyMcpTool) serverToolName(params *agents.ToolCall) string {
-	name := c.toolName
-	if name == "" {
-		name = params.Name
-	}
-	return StripToolPrefix(c.toolPrefix, name)
 }
 
 func (c *LazyMcpTool) Execute(ctx context.Context, params *agents.ToolCall) (*agents.ToolCallResponse, error) {
@@ -254,7 +235,7 @@ func (c *LazyMcpTool) Execute(ctx context.Context, params *agents.ToolCall) (*ag
 	// Call the MCP tool directly by name — no ListTools needed. When the run
 	// wired a progress sink, attach a progress token so the server streams
 	// notifications/progress back through handleProgressNotification.
-	callParams, cleanup := newCallToolParams(c.meta, c.serverToolName(params), args, params)
+	callParams, cleanup := newCallToolParams(c.meta, c.Name, args, params)
 	defer cleanup()
 
 	// When resuming, carry the user's answer to the question the server asked

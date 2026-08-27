@@ -72,7 +72,7 @@ func TestReadSkillErrorsOnUnknownSkill(t *testing.T) {
 func TestReadSkillIsAnnotatedReadOnly(t *testing.T) {
 	tool := readSkillTool(t)
 
-	if !tool.GetAnnotations().IsReadOnly() {
+	if !skillAnnotations(t, tool).IsReadOnly() {
 		t.Error("read_skill is not annotated read-only")
 	}
 	if tool.NeedApproval() {
@@ -81,4 +81,15 @@ func TestReadSkillIsAnnotatedReadOnly(t *testing.T) {
 	if name := tool.Tool(context.Background()).OfFunction.Name; name != "read_skill" {
 		t.Errorf("tool name = %q", name)
 	}
+}
+
+// skillAnnotations reads the tool's annotations the one way there is: through
+// the BaseTool it reports.
+func skillAnnotations(t *testing.T, tool agents.Tool) *agents.ToolAnnotations {
+	t.Helper()
+	base, err := tool.GetBaseTool()
+	if err != nil {
+		t.Fatalf("GetBaseTool: %v", err)
+	}
+	return base.Annotations
 }

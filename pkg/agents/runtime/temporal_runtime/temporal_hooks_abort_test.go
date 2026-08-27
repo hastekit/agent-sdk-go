@@ -25,14 +25,14 @@ type abortingHook struct {
 
 func (h *abortingHook) GetName() string { return h.name }
 
-func (h *abortingHook) BeforeToolCall(ctx context.Context, call *agents.ToolCall) (agents.ToolCallHookResult, error) {
+func (h *abortingHook) BeforeToolCall(ctx context.Context, tool *agents.BaseTool, call *agents.ToolCall) (agents.ToolCallHookResult, error) {
 	if h.befores != nil {
 		*h.befores++
 	}
 	return agents.ContinueToolCall(), h.err
 }
 
-func (h *abortingHook) AfterToolCall(ctx context.Context, call *agents.ToolCall, result *agents.ToolCallResponse) (agents.ToolCallHookResult, error) {
+func (h *abortingHook) AfterToolCall(ctx context.Context, tool *agents.BaseTool, call *agents.ToolCall, result *agents.ToolCallResponse) (agents.ToolCallHookResult, error) {
 	return agents.ContinueToolCall(), nil
 }
 
@@ -48,10 +48,10 @@ func TestHookActivity_MakesAHookErrorNonRetryable(t *testing.T) {
 		Hooks:   []agents.Hook{&abortingHook{name: "authz", err: errors.New("tenant mismatch"), befores: &befores}},
 	}, nil)
 
-	fn, ok := agent.GetActivities()["Agent_authz_BeforeToolCallActivity"].(func(context.Context, *agents.ToolCall) (agents.ToolCallHookResult, error))
+	fn, ok := agent.GetActivities()["Agent_authz_BeforeToolCallActivity"].(func(context.Context, *agents.BaseTool, *agents.ToolCall) (agents.ToolCallHookResult, error))
 	require.True(t, ok, "the before-tool-call activity is registered with the wrapped signature")
 
-	_, err := fn(context.Background(), hookCall())
+	_, err := fn(context.Background(), hookBaseTool(), hookCall())
 	require.Error(t, err)
 	assert.Equal(t, 1, befores, "the real hook ran")
 
@@ -72,10 +72,10 @@ func TestHookActivity_LeavesASuccessfulHookAlone(t *testing.T) {
 		Hooks:   []agents.Hook{&abortingHook{name: "authz"}},
 	}, nil)
 
-	fn, ok := agent.GetActivities()["Agent_authz_BeforeToolCallActivity"].(func(context.Context, *agents.ToolCall) (agents.ToolCallHookResult, error))
+	fn, ok := agent.GetActivities()["Agent_authz_BeforeToolCallActivity"].(func(context.Context, *agents.BaseTool, *agents.ToolCall) (agents.ToolCallHookResult, error))
 	require.True(t, ok)
 
-	res, err := fn(context.Background(), hookCall())
+	res, err := fn(context.Background(), hookBaseTool(), hookCall())
 	require.NoError(t, err)
 	assert.False(t, res.Handled, "the call carries on to the tool")
 }
@@ -90,14 +90,14 @@ func TestTemporalHookProxy_HookFailureReachesTheExecutorAsAnAbort(t *testing.T) 
 	env := suite.NewTestWorkflowEnvironment()
 
 	env.RegisterActivityWithOptions(
-		func(ctx context.Context, call *agents.ToolCall) (agents.ToolCallHookResult, error) {
+		func(ctx context.Context, tool *agents.BaseTool, call *agents.ToolCall) (agents.ToolCallHookResult, error) {
 			ran = append(ran, "before:authz")
 			// What the registered wrapper produces for a hook error.
 			return agents.ContinueToolCall(), temporal.NewNonRetryableApplicationError(
 				"tenant mismatch", temporal_runtime.ToolCallAbortedErrorType, nil)
 		}, activityNamed("authz_BeforeToolCallActivity"))
 	env.RegisterActivityWithOptions(
-		func(ctx context.Context, call *agents.ToolCall, result *agents.ToolCallResponse) (agents.ToolCallHookResult, error) {
+		func(ctx context.Context, tool *agents.BaseTool, call *agents.ToolCall, result *agents.ToolCallResponse) (agents.ToolCallHookResult, error) {
 			ran = append(ran, "after:authz")
 			return agents.ContinueToolCall(), nil
 		}, activityNamed("authz_AfterToolCallActivity"))

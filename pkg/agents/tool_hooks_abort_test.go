@@ -27,7 +27,7 @@ type abortingHook struct {
 
 func (h *abortingHook) GetName() string { return h.name }
 
-func (h *abortingHook) BeforeToolCall(ctx context.Context, call *agents.ToolCall) (agents.ToolCallHookResult, error) {
+func (h *abortingHook) BeforeToolCall(ctx context.Context, tool *agents.BaseTool, call *agents.ToolCall) (agents.ToolCallHookResult, error) {
 	if h.befores != nil {
 		*h.befores++
 	}
@@ -37,7 +37,7 @@ func (h *abortingHook) BeforeToolCall(ctx context.Context, call *agents.ToolCall
 	return agents.ContinueToolCall(), nil
 }
 
-func (h *abortingHook) AfterToolCall(ctx context.Context, call *agents.ToolCall, result *agents.ToolCallResponse) (agents.ToolCallHookResult, error) {
+func (h *abortingHook) AfterToolCall(ctx context.Context, tool *agents.BaseTool, call *agents.ToolCall, result *agents.ToolCallResponse) (agents.ToolCallHookResult, error) {
 	if h.afters != nil {
 		*h.afters++
 	}
@@ -53,6 +53,16 @@ func abortTestCall() *agents.ToolCall {
 	}}
 }
 
+// abortTestExecution pairs the call with the tool it names, which is what the
+// runner needs to show a hook what it is being asked about.
+func abortTestExecution() agents.ExecutableToolCall {
+	return agents.ExecutableToolCall{
+		ToolName: "search",
+		Tool:     newFakeTool("search", false, "tool ran"),
+		ToolCall: abortTestCall(),
+	}
+}
+
 // An error from a hook is a hard stop: the chain stops where it is, no later
 // hook runs, the tool never runs, and the error comes back out rather than
 // becoming the call's result.
@@ -66,7 +76,7 @@ func TestHookError_BeforeStopsTheChain(t *testing.T) {
 	}
 
 	ran := false
-	resp, err := agents.RunWithToolCallHooks(t.Context(), hooks, abortTestCall(),
+	resp, err := agents.RunWithToolCallHooks(t.Context(), hooks, abortTestExecution(),
 		func(context.Context, *agents.ToolCall) (*agents.ToolCallResponse, error) {
 			ran = true
 			return agents.ToolCallResult(abortTestCall(), "tool ran"), nil
@@ -94,7 +104,7 @@ func TestHookError_AfterStopsTheChain(t *testing.T) {
 		&abortingHook{name: "later", afters: &laterAfters},
 	}
 
-	resp, err := agents.RunWithToolCallHooks(t.Context(), hooks, abortTestCall(),
+	resp, err := agents.RunWithToolCallHooks(t.Context(), hooks, abortTestExecution(),
 		func(context.Context, *agents.ToolCall) (*agents.ToolCallResponse, error) {
 			return agents.ToolCallResult(abortTestCall(), "tool ran"), nil
 		})
@@ -111,7 +121,7 @@ func TestHookError_AfterStopsTheChain(t *testing.T) {
 func TestHookRefusal_GoesInTheResponse(t *testing.T) {
 	hooks := []agents.ToolCallHook{&refusingHook{name: "authz", reason: "not allowed for this user"}}
 
-	resp, err := agents.RunWithToolCallHooks(t.Context(), hooks, abortTestCall(),
+	resp, err := agents.RunWithToolCallHooks(t.Context(), hooks, abortTestExecution(),
 		func(context.Context, *agents.ToolCall) (*agents.ToolCallResponse, error) {
 			t.Fatal("the tool should not run when a hook answers the call")
 			return nil, nil
@@ -132,11 +142,11 @@ type refusingHook struct {
 
 func (h *refusingHook) GetName() string { return h.name }
 
-func (h *refusingHook) BeforeToolCall(ctx context.Context, call *agents.ToolCall) (agents.ToolCallHookResult, error) {
+func (h *refusingHook) BeforeToolCall(ctx context.Context, tool *agents.BaseTool, call *agents.ToolCall) (agents.ToolCallHookResult, error) {
 	return agents.HandleToolCall(agents.ToolCallResult(call, h.reason)), nil
 }
 
-func (h *refusingHook) AfterToolCall(ctx context.Context, call *agents.ToolCall, result *agents.ToolCallResponse) (agents.ToolCallHookResult, error) {
+func (h *refusingHook) AfterToolCall(ctx context.Context, tool *agents.BaseTool, call *agents.ToolCall, result *agents.ToolCallResponse) (agents.ToolCallHookResult, error) {
 	return agents.ContinueToolCall(), nil
 }
 
@@ -146,7 +156,7 @@ func TestToolErrorIsNotAnAbort(t *testing.T) {
 	broken := errors.New("disk on fire")
 
 	resp, err := agents.RunWithToolCallHooks(t.Context(),
-		[]agents.ToolCallHook{&abortingHook{name: "audit"}}, abortTestCall(),
+		[]agents.ToolCallHook{&abortingHook{name: "audit"}}, abortTestExecution(),
 		func(context.Context, *agents.ToolCall) (*agents.ToolCallResponse, error) {
 			return nil, broken
 		})

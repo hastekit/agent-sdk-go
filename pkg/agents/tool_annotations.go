@@ -92,20 +92,3 @@ func (a *ToolAnnotations) IsOpenWorld() bool {
 	}
 	return *a.OpenWorldHint
 }
-
-// AnnotatedTool is implemented by tools that carry annotations. It is an
-// optional interface rather than part of Tool so existing implementations keep
-// compiling; reach for AnnotationsOf instead of asserting it by hand.
-type AnnotatedTool interface {
-	GetAnnotations() *ToolAnnotations
-}
-
-// AnnotationsOf returns a tool's annotations, or nil when the tool carries
-// none. The nil is usable: every Is* helper is nil-safe and answers with the
-// MCP default.
-func AnnotationsOf(tool Tool) *ToolAnnotations {
-	if at, ok := tool.(AnnotatedTool); ok {
-		return at.GetAnnotations()
-	}
-	return nil
-}

@@ -28,11 +28,12 @@ func main() {
 	model := client.Model("OpenAI/gpt-4.1-mini")
 
 	// Restate service bind address + Redis for streaming
-	rt, err := hastekit.NewRestateRuntime("0.0.0.0:9081", "localhost:6379")
+	// The broker carries the run's stream; the runtime is built around it.
+	broker, err := hastekit.NewRedisStreamBroker("localhost:6379", "", 0)
 	if err != nil {
 		log.Fatal(err)
 	}
-	broker, err := hastekit.NewRedisStreamBroker("localhost:6379")
+	rt, err := hastekit.NewRestateRuntime("0.0.0.0:9081", broker)
 	if err != nil {
 		log.Fatal(err)
 	}

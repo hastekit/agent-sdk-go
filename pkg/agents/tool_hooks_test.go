@@ -2,6 +2,7 @@ package agents_test
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
@@ -25,7 +26,7 @@ type tracingHook struct {
 
 func (h *tracingHook) GetName() string { return h.name }
 
-func (h *tracingHook) BeforeToolCall(ctx context.Context, call *agents.ToolCall) (agents.ToolCallHookResult, error) {
+func (h *tracingHook) BeforeToolCall(ctx context.Context, tool *agents.BaseTool, call *agents.ToolCall) (agents.ToolCallHookResult, error) {
 	*h.log = append(*h.log, "before:"+h.name)
 	if h.before == nil {
 		return agents.ContinueToolCall(), nil
@@ -33,7 +34,7 @@ func (h *tracingHook) BeforeToolCall(ctx context.Context, call *agents.ToolCall)
 	return h.before(call)
 }
 
-func (h *tracingHook) AfterToolCall(ctx context.Context, call *agents.ToolCall, result *agents.ToolCallResponse) (agents.ToolCallHookResult, error) {
+func (h *tracingHook) AfterToolCall(ctx context.Context, tool *agents.BaseTool, call *agents.ToolCall, result *agents.ToolCallResponse) (agents.ToolCallHookResult, error) {
 	*h.log = append(*h.log, "after:"+h.name)
 	if h.after == nil {
 		return agents.ContinueToolCall(), nil
@@ -159,7 +160,8 @@ func runHooks(t *testing.T, hooks []agents.ToolCallHook, output string) (*agents
 		FunctionCallMessage: &responses.FunctionCallMessage{ID: "fc_1", CallID: "call_1", Name: "worker"},
 	}
 
-	resp, err := agents.RunWithToolCallHooks(t.Context(), hooks, call,
+	resp, err := agents.RunWithToolCallHooks(t.Context(), hooks,
+		agents.ExecutableToolCall{ToolName: "worker", Tool: newFakeTool("worker", false, output), ToolCall: call},
 		func(context.Context, *agents.ToolCall) (*agents.ToolCallResponse, error) {
 			toolRan = true
 			return agents.ToolCallResult(call, output), nil
@@ -308,4 +310,108 @@ func TestToolCallHooks_StampIdsOnAHandBuiltResponse(t *testing.T) {
 	assert.Equal(t, "hand built", *resp.Output.OfString)
 	assert.Equal(t, "call_1", resp.CallID)
 	assert.Equal(t, "fc_1", resp.ID)
+}
+
+// What a hook is shown is the tool itself, under the name the tool has rather
+// than the one the model called it by — a prefixed MCP tool answers to
+// "xyz__search" but is "search" to the server, and a policy is written against
+// the latter. Its meta comes along for the same reason.
+func TestToolCallHooks_AreShownTheToolsOwnIdentity(t *testing.T) {
+	var seen *agents.BaseTool
+
+	tool := newFakeTool("xyz__search", false, "tool ran")
+	tool.Name = "search"
+	tool.Meta = map[string]any{"server_name": "search-server"}
+
+	call := &agents.ToolCall{FunctionCallMessage: &responses.FunctionCallMessage{
+		ID: "fc_1", CallID: "call_1", Name: "xyz__search",
+	}}
+
+	_, err := agents.RunWithToolCallHooks(t.Context(),
+		[]agents.ToolCallHook{&tracingHook{
+			name: "authz",
+			log:  new([]string),
+			before: func(*agents.ToolCall) (agents.ToolCallHookResult, error) {
+				return agents.ContinueToolCall(), nil
+			},
+		}, &recordingToolHook{seen: &seen}},
+		agents.ExecutableToolCall{ToolName: "xyz__search", Tool: tool, ToolCall: call},
+		func(context.Context, *agents.ToolCall) (*agents.ToolCallResponse, error) {
+			return agents.ToolCallResult(call, "tool ran"), nil
+		})
+	require.NoError(t, err)
+
+	require.NotNil(t, seen)
+	assert.Equal(t, "search", seen.Name, "the tool's own name, not the model-facing one")
+	assert.Equal(t, "xyz__search", seen.ToolUnion.OfFunction.Name, "and the model-facing one too")
+	assert.Equal(t, "search-server", seen.Meta["server_name"])
+}
+
+// A tool that cannot describe itself still gets its call checked, under the name
+// the call carries — and the stand-in has to be encodable, since under a durable
+// runtime it crosses to the hook as an argument.
+func TestToolCallHooks_UndescribableToolStillReachesTheHook(t *testing.T) {
+	var seen *agents.BaseTool
+
+	call := &agents.ToolCall{FunctionCallMessage: &responses.FunctionCallMessage{
+		ID: "fc_1", CallID: "call_1", Name: "worker",
+	}}
+
+	_, err := agents.RunWithToolCallHooks(t.Context(),
+		[]agents.ToolCallHook{&recordingToolHook{seen: &seen}},
+		agents.ExecutableToolCall{ToolName: "worker", ToolCall: call},
+		func(context.Context, *agents.ToolCall) (*agents.ToolCallResponse, error) {
+			return agents.ToolCallResult(call, "tool ran"), nil
+		})
+	require.NoError(t, err, "a nil tool must not fail the call")
+
+	require.NotNil(t, seen)
+	assert.Equal(t, "worker", seen.Name)
+
+	encoded, err := json.Marshal(seen)
+	require.NoError(t, err, "the stand-in must survive a durable runtime's boundary")
+	assert.Contains(t, string(encoded), "worker")
+}
+
+// recordingToolHook keeps the tool it was shown.
+type recordingToolHook struct {
+	agents.NoopModelCallHook
+	seen **agents.BaseTool
+}
+
+func (h *recordingToolHook) GetName() string { return "recorder" }
+
+func (h *recordingToolHook) BeforeToolCall(ctx context.Context, tool *agents.BaseTool, call *agents.ToolCall) (agents.ToolCallHookResult, error) {
+	*h.seen = tool
+	return agents.ContinueToolCall(), nil
+}
+
+func (h *recordingToolHook) AfterToolCall(ctx context.Context, tool *agents.BaseTool, call *agents.ToolCall, result *agents.ToolCallResponse) (agents.ToolCallHookResult, error) {
+	return agents.ContinueToolCall(), nil
+}
+
+// A function tool has no name of its own to set — the model-facing name is its
+// name — so the hook gets that one filled in rather than an empty field. The
+// tool's own BaseTool is left alone while that happens.
+func TestToolCallHooks_NameIsAlwaysFilledIn(t *testing.T) {
+	var seen *agents.BaseTool
+
+	tool := newFakeTool("worker", false, "tool ran")
+	require.Empty(t, tool.Name, "a tool with no separate name of its own")
+
+	call := &agents.ToolCall{FunctionCallMessage: &responses.FunctionCallMessage{
+		ID: "fc_1", CallID: "call_1", Name: "worker",
+	}}
+
+	_, err := agents.RunWithToolCallHooks(t.Context(),
+		[]agents.ToolCallHook{&recordingToolHook{seen: &seen}},
+		agents.ExecutableToolCall{ToolName: "worker", Tool: tool, ToolCall: call},
+		func(context.Context, *agents.ToolCall) (*agents.ToolCallResponse, error) {
+			return agents.ToolCallResult(call, "tool ran"), nil
+		})
+	require.NoError(t, err)
+
+	require.NotNil(t, seen)
+	assert.Equal(t, "worker", seen.Name, "a hook never has to fall back for itself")
+	assert.Empty(t, tool.Name, "and the tool it was taken from is not written to")
 }

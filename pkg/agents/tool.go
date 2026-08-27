@@ -52,9 +52,20 @@ type Tool interface {
 	Tool(ctx context.Context) *responses.ToolUnion
 	NeedApproval() bool
 	IsDeferred() bool
+
+	// GetBaseTool projects the tool onto the plain data every tool has in
+	// common, which is the only form of it that can cross a durable runtime's
+	// boundary or reach a hook. Embedding *BaseTool satisfies this.
+	GetBaseTool() (*BaseTool, error)
 }
 
 type BaseTool struct {
+	// Name is the tool's own name, without any prefix the model-facing name
+	// carries. Only sources that have a name of their own set it — an MCP
+	// server's tools do, a locally defined function tool does not, since for it
+	// the two are the same name. A hook is always shown it filled in either way
+	// (see serializeTool).
+	Name             string
 	ToolUnion        responses.ToolUnion
 	RequiresApproval bool
 	Deferred         bool
@@ -64,14 +75,11 @@ type BaseTool struct {
 	// the rest of BaseTool across a durable runtime's serialization boundary,
 	// so a policy on the far side sees the same hints the server sent.
 	Annotations *ToolAnnotations
+	Meta        map[string]any
 }
 
 func (t *BaseTool) NeedApproval() bool {
 	return t.RequiresApproval
-}
-
-func (t *BaseTool) GetAnnotations() *ToolAnnotations {
-	return t.Annotations
 }
 
 func (t *BaseTool) IsDeferred() bool {
@@ -80,6 +88,12 @@ func (t *BaseTool) IsDeferred() bool {
 
 func (t *BaseTool) Tool(ctx context.Context) *responses.ToolUnion {
 	return &t.ToolUnion
+}
+
+// GetBaseTool implements Tool. A tool that embeds *BaseTool is already the
+// plain data, so this hands back the embedded value itself.
+func (t *BaseTool) GetBaseTool() (*BaseTool, error) {
+	return t, nil
 }
 
 // partitionByApproval splits tool calls into those needing approval and those that can execute immediately
