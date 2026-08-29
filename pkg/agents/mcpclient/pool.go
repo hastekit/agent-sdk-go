@@ -22,8 +22,13 @@ var (
 type SchemaCache interface {
 	// Get retrieves cached tool schemas by key. Returns nil, false on cache miss.
 	Get(ctx context.Context, key string) (*CachedToolEntry, bool)
-	// Set stores tool schemas with the given key.
-	Set(ctx context.Context, key string, entry *CachedToolEntry)
+	// Set stores tool schemas with the given key, for at most ttl.
+	//
+	// A store that can expire keys itself should use ttl; one that cannot may
+	// ignore it, since the entry carries its own ExpiresAt and is checked on
+	// the way out. A ttl of zero means no expiry — nobody, server or caller,
+	// put a life on this entry.
+	Set(ctx context.Context, key string, entry *CachedToolEntry, ttl time.Duration)
 	// Delete removes a cached entry by key.
 	Delete(ctx context.Context, key string)
 	// Clear removes all cached entries.
@@ -34,6 +39,25 @@ type SchemaCache interface {
 type CachedToolEntry struct {
 	Tools []*mcp.Tool `json:"tools"`
 	Meta  mcp.Meta    `json:"meta,omitempty"`
+
+	// CacheScope is what the server said about sharing this listing —
+	// "public", "private", or empty from a server too old to have been asked.
+	// Recorded so a stored entry can be read back and understood on its own.
+	CacheScope string `json:"cache_scope,omitempty"`
+
+	// ExpiresAt is when this entry stops being usable. Checked on read as well
+	// as handed to Set, because a SchemaCache may be a store with no expiry of
+	// its own, or one shared with a writer that gave the key a longer life.
+	ExpiresAt time.Time `json:"expires_at,omitempty"`
+}
+
+// expired reports whether this entry may no longer be served. An entry with no
+// ExpiresAt was written before the field existed and is taken at face value.
+func (e *CachedToolEntry) expired() bool {
+	if e == nil {
+		return true
+	}
+	return !e.ExpiresAt.IsZero() && time.Now().After(e.ExpiresAt)
 }
 
 // poolEntry holds a live MCP connection.

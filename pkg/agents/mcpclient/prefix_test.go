@@ -2,10 +2,13 @@ package mcpclient
 
 import (
 	"context"
+	"maps"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
@@ -104,9 +107,12 @@ func TestToolPrefixKeepsDeferredWildcard(t *testing.T) {
 type memCache struct {
 	mu      sync.Mutex
 	entries map[string]*CachedToolEntry
+	ttls    map[string]time.Duration
 }
 
-func newMemCache() *memCache { return &memCache{entries: map[string]*CachedToolEntry{}} }
+func newMemCache() *memCache {
+	return &memCache{entries: map[string]*CachedToolEntry{}, ttls: map[string]time.Duration{}}
+}
 
 func (m *memCache) Get(_ context.Context, key string) (*CachedToolEntry, bool) {
 	m.mu.Lock()
@@ -115,22 +121,39 @@ func (m *memCache) Get(_ context.Context, key string) (*CachedToolEntry, bool) {
 	return e, ok
 }
 
-func (m *memCache) Set(_ context.Context, key string, entry *CachedToolEntry) {
+func (m *memCache) Set(_ context.Context, key string, entry *CachedToolEntry, ttl time.Duration) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.entries[key] = entry
+	m.ttls[key] = ttl
 }
 
 func (m *memCache) Delete(_ context.Context, key string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.entries, key)
+	delete(m.ttls, key)
+}
+
+// keys returns what is stored, so a test can see which key a listing landed
+// under and not just how many there are.
+func (m *memCache) keys() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return slices.Sorted(maps.Keys(m.entries))
+}
+
+func (m *memCache) ttl(key string) time.Duration {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.ttls[key]
 }
 
 func (m *memCache) Clear(_ context.Context) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.entries = map[string]*CachedToolEntry{}
+	m.ttls = map[string]time.Duration{}
 }
 
 func (m *memCache) size() int {

@@ -46,7 +46,11 @@ func stdioClient(t *testing.T, opts ...McpServerOption) *MCPClient {
 	client, err := NewClient(context.Background(), "stdio", "", append(base, opts...)...)
 	require.NoError(t, err)
 
-	t.Cleanup(func() { globalPool.Remove(client.connFor(nil)) })
+	t.Cleanup(func() {
+		conn, err := client.connFor(context.Background(), nil)
+		require.NoError(t, err)
+		globalPool.Remove(conn)
+	})
 	return client
 }
 
@@ -102,7 +106,11 @@ func TestStdioTransport_EnvIsResolvedFromRunContext(t *testing.T) {
 	require.NoError(t, err)
 
 	runContext := map[string]any{"caller": "tenant-42"}
-	t.Cleanup(func() { globalPool.Remove(client.connFor(runContext)) })
+	t.Cleanup(func() {
+		conn, err := client.connFor(context.Background(), runContext)
+		require.NoError(t, err)
+		globalPool.Remove(conn)
+	})
 
 	tools, err := client.ListTools(ctx, runContext)
 	require.NoError(t, err)

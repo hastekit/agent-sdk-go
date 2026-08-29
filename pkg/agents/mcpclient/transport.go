@@ -2,6 +2,7 @@ package mcpclient
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"os"
 	"os/exec"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"golang.org/x/oauth2"
 )
 
 // sdkClient is the package-level MCP client factory. The official SDK
@@ -52,6 +54,11 @@ var sdkClient = mcp.NewClient(&mcp.Implementation{
 type authStatus struct {
 	mu   sync.Mutex
 	code int
+	// tokenErr is a credential we could not produce at all — a refresh that
+	// failed, a store that could not be read. There is no status for it
+	// because the request was never made, but it is an authorization failure
+	// all the same, and the user can act on it the same way.
+	tokenErr error
 }
 
 func (a *authStatus) record(code int) {
@@ -63,15 +70,21 @@ func (a *authStatus) record(code int) {
 	a.code = code
 }
 
-// refused reports whether the server turned our credentials away. Nil-safe:
-// stdio has no status to record and no credentials to be refused.
+func (a *authStatus) recordTokenError(err error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.tokenErr = err
+}
+
+// refused reports whether our credentials were turned away, or never produced.
+// Nil-safe: stdio has no status to record and no credentials to be refused.
 func (a *authStatus) refused() bool {
 	if a == nil {
 		return false
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return a.code != 0
+	return a.code != 0 || a.tokenErr != nil
 }
 
 // mcpRoundTripper does the two things the SDK's http transports leave to the
@@ -79,17 +92,35 @@ func (a *authStatus) refused() bool {
 // authorization status of what came back.
 type mcpRoundTripper struct {
 	headers map[string]string
+	tokens  oauth2.TokenSource
 	auth    *authStatus
 	base    http.RoundTripper
 }
 
 func (h *mcpRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-	if len(h.headers) > 0 {
+	if len(h.headers) > 0 || h.tokens != nil {
 		req = req.Clone(req.Context())
 		for k, v := range h.headers {
 			req.Header.Set(k, v)
 		}
 	}
+
+	// Asked per request, not per connection: this is the point where a token
+	// that expired while the run was paused gets refreshed, and it is the only
+	// point late enough to notice. A configured Authorization header is
+	// overwritten — the run's own credential is the more specific of the two.
+	if h.tokens != nil {
+		token, err := h.tokens.Token()
+		if err != nil {
+			// Fail here rather than sending the request bare: an unauthorized
+			// request either succeeds against a lenient server, which is
+			// worse, or costs a round trip to learn what we already know.
+			h.auth.recordTokenError(err)
+			return nil, fmt.Errorf("mcp: no access token for %s: %w", req.URL.Host, err)
+		}
+		token.SetAuthHeader(req)
+	}
+
 	base := h.base
 	if base == nil {
 		base = http.DefaultTransport
@@ -103,9 +134,10 @@ func (h *mcpRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 
 // newHTTPClient returns the client an http transport speaks through, and the
 // authorization status it will record into.
-func newHTTPClient(headers map[string]string) (*http.Client, *authStatus) {
+func newHTTPClient(conn serverConn) (*http.Client, *authStatus) {
 	auth := &authStatus{}
-	return &http.Client{Transport: &mcpRoundTripper{headers: headers, auth: auth}}, auth
+	rt := &mcpRoundTripper{headers: conn.Headers, tokens: conn.TokenSource, auth: auth}
+	return &http.Client{Transport: rt}, auth
 }
 
 // Transport names accepted by WithTransport.
@@ -143,7 +175,7 @@ func newClientTransport(ctx context.Context, conn serverConn) (mcp.Transport, *a
 		return &mcp.CommandTransport{Command: cmd}, nil
 	}
 
-	hc, auth := newHTTPClient(conn.Headers)
+	hc, auth := newHTTPClient(conn)
 	switch conn.Transport {
 	case TransportStreamableHTTP:
 		return &mcp.StreamableClientTransport{Endpoint: conn.Endpoint, HTTPClient: hc, DisableStandaloneSSE: conn.DisableStandaloneSSE}, auth

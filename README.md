@@ -1,4 +1,4 @@
-# HasteKit SDK - Go
+# Golang Agent Harness SDK
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/hastekit/agent-sdk-go.svg)](https://pkg.go.dev/github.com/hastekit/agent-sdk-go)
 [![Go Report Card](https://goreportcard.com/badge/github.com/hastekit/agent-sdk-go)](https://goreportcard.com/report/github.com/hastekit/agent-sdk-go)

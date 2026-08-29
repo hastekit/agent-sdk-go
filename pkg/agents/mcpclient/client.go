@@ -34,6 +34,9 @@ type MCPClient struct {
 	CacheTTL             time.Duration `json:"-"`
 	DisableStandaloneSSE bool          `json:"-"`
 	schemaCache          SchemaCache   // injected cache (required for caching)
+
+	// credentials resolves this server's access token per call
+	credentials CredentialProvider
 }
 
 func NewClient(ctx context.Context, name string, endpoint string, options ...McpServerOption) (*MCPClient, error) {
@@ -182,34 +185,93 @@ func (srv *MCPClient) GetName() string {
 	return srv.Name
 }
 
+// Tool schemas are cached under what the server says about them. A 2026-07-28
+// server returns ttlMs and cacheScope on every tools/list (SEP-2549): how long
+// the listing stays fresh, and whether it is the same listing for everyone.
+// That answers, from the server, the question this client used to have to
+// guess at — whether one user's tool list may be served to another.
+const (
+	cacheScopePublic  = "public"
+	cacheScopePrivate = "private"
+)
+
+// toolListing is one tools/list response: the schemas, and the terms the server
+// offered them on.
+type toolListing struct {
+	Tools []*mcp.Tool
+	Meta  mcp.Meta
+
+	// TTL and CacheScope are the server's cache directives. CacheScope is empty
+	// from a server older than 2026-07-28, which is not the same as it saying
+	// "public" — see schemaCacheKeys.
+	TTL        time.Duration
+	CacheScope string
+}
+
+// shareable reports whether this listing may be stored where another run will
+// read it.
+func (l toolListing) shareable() bool { return l.CacheScope == cacheScopePublic }
+
 func (srv *MCPClient) ListTools(ctx context.Context, runContext map[string]any) ([]agents.Tool, error) {
-	conn := srv.connFor(runContext)
-
-	// If a schema cache is configured, check it first
-	if srv.schemaCache != nil {
-		key := srv.schemaCacheKey(conn)
-
-		if cached, ok := srv.schemaCache.Get(ctx, key); ok {
-			return srv.buildLazyTools(cached.Tools, cached.Meta, conn), nil
-		}
-
-		// Cache miss: connect, fetch schemas, cache, then disconnect
-		tools, meta, err := srv.fetchToolSchemas(ctx, conn)
-		if err != nil {
-			return nil, err
-		}
-
-		srv.schemaCache.Set(ctx, key, &CachedToolEntry{Tools: tools, Meta: meta})
-		return srv.buildLazyTools(tools, meta, conn), nil
-	}
-
-	// No cache configured: connect, fetch schemas, return lazy tools (no caching)
-	tools, meta, err := srv.fetchToolSchemas(ctx, conn)
+	conn, err := srv.connFor(ctx, runContext)
 	if err != nil {
 		return nil, err
 	}
 
-	return srv.buildLazyTools(tools, meta, conn), nil
+	if srv.schemaCache == nil {
+		listing, err := srv.fetchToolSchemas(ctx, conn)
+		if err != nil {
+			return nil, err
+		}
+		return srv.buildLazyTools(listing.Tools, listing.Meta, conn), nil
+	}
+
+	sharedKey, privateKey := srv.schemaCacheKeys(conn)
+
+	// The shared key first: an entry only ever lands there when the server
+	// called its listing public, so whatever is found is safe for this run.
+	for _, key := range []string{sharedKey, privateKey} {
+		if cached, ok := srv.schemaCache.Get(ctx, key); ok && !cached.expired() {
+			return srv.buildLazyTools(cached.Tools, cached.Meta, conn), nil
+		}
+	}
+
+	listing, err := srv.fetchToolSchemas(ctx, conn)
+	if err != nil {
+		return nil, err
+	}
+
+	key := privateKey
+	if listing.shareable() {
+		key = sharedKey
+	}
+	entry := &CachedToolEntry{
+		Tools:      listing.Tools,
+		Meta:       listing.Meta,
+		CacheScope: listing.CacheScope,
+	}
+	ttl := srv.cacheTTL(listing)
+	if ttl > 0 {
+		entry.ExpiresAt = time.Now().Add(ttl)
+	}
+	srv.schemaCache.Set(ctx, key, entry, ttl)
+
+	return srv.buildLazyTools(listing.Tools, listing.Meta, conn), nil
+}
+
+// cacheTTL is how long a listing may be held: what the server asked for,
+// bounded by what the caller allowed, the way a caching proxy's own max-age
+// bounds an upstream's. Zero means no expiry, which is what injecting a
+// SchemaCache has always meant and stays the behaviour when nobody says
+// otherwise.
+func (srv *MCPClient) cacheTTL(listing toolListing) time.Duration {
+	if listing.TTL > 0 && srv.CacheTTL > 0 {
+		return min(listing.TTL, srv.CacheTTL)
+	}
+	if listing.TTL > 0 {
+		return listing.TTL
+	}
+	return srv.CacheTTL
 }
 
 // CallToolDirect runs one tool against this server without listing tools first,
@@ -236,9 +298,14 @@ func (srv *MCPClient) CallToolDirect(ctx context.Context, runContext map[string]
 		params.RunContext = runContext
 	}
 
+	conn, err := srv.connFor(ctx, runContext)
+	if err != nil {
+		return nil, err
+	}
+
 	lazy := &LazyMcpTool{
 		BaseTool: tool,
-		conn:     srv.connFor(runContext),
+		conn:     conn,
 		meta:     srv.Meta,
 	}
 	return lazy.Execute(ctx, params)
@@ -249,7 +316,15 @@ func (srv *MCPClient) InvalidateToolCache(ctx context.Context, runContext map[st
 	if srv.schemaCache == nil {
 		return
 	}
-	srv.schemaCache.Delete(ctx, srv.schemaCacheKey(srv.connFor(runContext)))
+	conn, err := srv.connFor(ctx, runContext)
+	if err != nil {
+		return
+	}
+	// Both, because which one this server's listing landed under is its call,
+	// not ours, and a stale entry under the other would outlive the drop.
+	sharedKey, privateKey := srv.schemaCacheKeys(conn)
+	srv.schemaCache.Delete(ctx, sharedKey)
+	srv.schemaCache.Delete(ctx, privateKey)
 }
 
 // InvalidateAllToolCache removes all cached tool schemas from the injected cache.
@@ -262,16 +337,26 @@ func (srv *MCPClient) InvalidateAllToolCache(ctx context.Context) {
 
 // connFor builds the description of this server that the transport and the pool
 // both work from. Headers and env are resolved against the run context here, so
-// a per-run credential reaches the server whichever transport carries it.
-func (srv *MCPClient) connFor(runContext map[string]any) serverConn {
+// a per-run credential reaches the server whichever transport carries it, and
+// so does the token source — see credentialsFor for why that matters under a
+// durable runtime.
+func (srv *MCPClient) connFor(ctx context.Context, runContext map[string]any) (serverConn, error) {
+	tokens, principal, err := srv.credentialsFor(ctx, runContext)
+	if err != nil {
+		return serverConn{}, err
+	}
+
 	return serverConn{
+		Name:                 srv.Name,
 		Transport:            srv.Transport,
 		Endpoint:             srv.Endpoint,
 		Headers:              srv.resolveHeaders(runContext),
 		Command:              srv.Command,
 		Env:                  resolveTemplates(srv.Env, runContext),
+		TokenSource:          tokens,
+		Principal:            principal,
 		DisableStandaloneSSE: srv.DisableStandaloneSSE,
-	}
+	}, nil
 }
 
 // resolveHeaders resolves template variables in headers using the runContext.
@@ -291,48 +376,56 @@ func resolveTemplates(values map[string]string, runContext map[string]any) map[s
 	return out
 }
 
-// schemaCacheKey generates a cache key for tool schemas. It is the connection's
-// own identity plus the filter, so two servers reached differently — including
-// two stdio servers, which have no endpoint to tell them apart — never read each
-// other's schemas.
-func (srv *MCPClient) schemaCacheKey(conn serverConn) string {
-	filterStr := ""
-	if len(srv.ToolFilter) > 0 {
-		sorted := make([]string, len(srv.ToolFilter))
-		copy(sorted, srv.ToolFilter)
-		for i := 0; i < len(sorted); i++ {
-			for j := i + 1; j < len(sorted); j++ {
-				if sorted[i] > sorted[j] {
-					sorted[i], sorted[j] = sorted[j], sorted[i]
-				}
-			}
-		}
-		for _, f := range sorted {
-			filterStr += f + ","
-		}
-	}
-
-	return fmt.Sprintf("mcp:schema:%s|%s", conn.key(), filterStr)
+// schemaCacheKeys are the two keys a listing may live under.
+//
+// A listing the server called public is the same for everyone, so it goes under
+// a key that names no requester and every run reads it. Anything else goes
+// under a key that does name one: the tool list a server shows an admin is not
+// the one it shows everybody, and one user's must never be served to another.
+//
+// A server that said nothing is treated as private, though the spec's default
+// for an absent cacheScope is public. The default is written for servers that
+// could have said "private" and chose not to; one older than 2026-07-28 never
+// had the words, and reading silence from it as a promise is how a privileged
+// tool list ends up in front of the wrong user.
+//
+// The connector's name is the whole of the server's identity here. It is
+// required, it is what the durable runtimes already build activity names from,
+// and it survives a server moving to a new URL — where a key built from the
+// endpoint would silently split on a trailing slash or an http/https change.
+// Two clients sharing a name are ambiguous well before they reach this cache.
+//
+// What is cached is the server's listing as it gave it, so no client's own
+// view of it belongs in the key: ToolFilter and ToolPrefix are both applied by
+// buildLazyTools, on the way out, to a hit and a miss alike. Putting either
+// here only stored the same schemas twice.
+func (srv *MCPClient) schemaCacheKeys(conn serverConn) (shared, private string) {
+	shared = "mcp:schema:" + srv.Name
+	return shared, shared + "|" + conn.requesterKey()
 }
 
-// fetchToolSchemas connects to the MCP server, fetches tool schemas, and closes the connection.
-func (srv *MCPClient) fetchToolSchemas(ctx context.Context, conn serverConn) ([]*mcp.Tool, mcp.Meta, error) {
+// fetchToolSchemas connects to the MCP server, fetches tool schemas, and closes
+// the connection.
+func (srv *MCPClient) fetchToolSchemas(ctx context.Context, conn serverConn) (toolListing, error) {
 	session, err := connect(ctx, conn)
 	if err != nil {
-		return nil, nil, err
+		return toolListing{}, err
 	}
+	// Close the connection — we only needed the schemas. Actual tool execution
+	// will use the connection pool.
+	defer session.Close()
 
-	tools, err := session.ListTools(ctx, &mcp.ListToolsParams{})
+	res, err := session.ListTools(ctx, &mcp.ListToolsParams{})
 	if err != nil {
-		session.Close()
-		return nil, nil, err
+		return toolListing{}, err
 	}
 
-	// Close the connection — we only needed the schemas.
-	// Actual tool execution will use the connection pool.
-	session.Close()
-
-	return tools.Tools, srv.Meta, nil
+	return toolListing{
+		Tools:      res.Tools,
+		Meta:       srv.Meta,
+		TTL:        time.Duration(res.GetTTLMs()) * time.Millisecond,
+		CacheScope: res.GetCacheScope(),
+	}, nil
 }
 
 // buildLazyTools converts mcp.Tool schemas into LazyMcpTool instances, applying

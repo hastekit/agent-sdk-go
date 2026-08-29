@@ -215,19 +215,11 @@ func (c *LazyMcpTool) Execute(ctx context.Context, params *agents.ToolCall) (*ag
 		}
 	}
 
-	// Get a connection from the pool (or create a new one)
-	cli, err := globalPool.Checkout(ctx, c.conn)
+	cli, release, err := checkoutSession(ctx, c.conn)
 	if err != nil {
-		return &agents.ToolCallResponse{
-			FunctionCallOutputMessage: &responses.FunctionCallOutputMessage{
-				ID:     params.ID,
-				CallID: params.CallID,
-				Output: responses.FunctionCallOutputContentUnion{
-					OfString: utils.Ptr(err.Error()),
-				},
-			},
-		}, nil
+		return toolOutput(params, err.Error()), nil
 	}
+	defer release()
 
 	// Call the MCP tool directly by name — no ListTools needed. When the run
 	// wired a progress sink, attach a progress token so the server streams
@@ -249,31 +241,21 @@ func (c *LazyMcpTool) Execute(ctx context.Context, params *agents.ToolCall) (*ag
 			return nil, ctxErr
 		}
 
+		// A connection this call opened for itself cannot be a stale one the
+		// pool held on to, so there is nothing a second attempt would fix.
+		if !c.conn.poolable() {
+			return toolOutput(params, err.Error()), nil
+		}
+
 		// Connection might be dead — remove from pool and retry once
 		globalPool.Remove(c.conn)
 		cli, retryErr := globalPool.Checkout(ctx, c.conn)
 		if retryErr != nil {
-			return &agents.ToolCallResponse{
-				FunctionCallOutputMessage: &responses.FunctionCallOutputMessage{
-					ID:     params.ID,
-					CallID: params.CallID,
-					Output: responses.FunctionCallOutputContentUnion{
-						OfString: utils.Ptr(err.Error()),
-					},
-				},
-			}, nil
+			return toolOutput(params, err.Error()), nil
 		}
 		res, err = cli.CallTool(ctx, callParams)
 		if err != nil {
-			return &agents.ToolCallResponse{
-				FunctionCallOutputMessage: &responses.FunctionCallOutputMessage{
-					ID:     params.ID,
-					CallID: params.CallID,
-					Output: responses.FunctionCallOutputContentUnion{
-						OfString: utils.Ptr(err.Error()),
-					},
-				},
-			}, nil
+			return toolOutput(params, err.Error()), nil
 		}
 	}
 
@@ -316,4 +298,27 @@ func toolOutput(params *agents.ToolCall, text string) *agents.ToolCallResponse {
 			Output: responses.FunctionCallOutputContentUnion{OfString: utils.Ptr(text)},
 		},
 	}
+}
+
+// checkoutSession returns the session this call runs on, and what to do with it
+// when the call is done.
+//
+// A pooled session is shared and outlives the call, so releasing it is nothing.
+// An unpooled one belongs to this call alone and is closed with it — see
+// serverConn.poolable for which is which, and why a connection carrying
+// credentials nobody identified is never shared.
+func checkoutSession(ctx context.Context, conn serverConn) (*mcp.ClientSession, func(), error) {
+	if !conn.poolable() {
+		session, err := connect(ctx, conn)
+		if err != nil {
+			return nil, nil, err
+		}
+		return session, func() { session.Close() }, nil
+	}
+
+	session, err := globalPool.Checkout(ctx, conn)
+	if err != nil {
+		return nil, nil, err
+	}
+	return session, func() {}, nil
 }
