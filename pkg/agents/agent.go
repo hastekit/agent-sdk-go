@@ -190,20 +190,38 @@ func (e *Agent) WithLLM(wrappedLLM LLM) *Agent {
 	return &clone
 }
 
-func (e *Agent) PrepareMCPTools(ctx context.Context, runContext map[string]any) ([]Tool, error) {
+// PrepareMCPTools lists every configured MCP server's tools, and reports how
+// each one fared.
+//
+// A server that cannot be listed does not fail the run: its tools are left out
+// and its ConnectorStatus says why, for the prompt to pass on. One unreachable
+// server would otherwise take down a run that had every other tool it needed —
+// and, once an MCP server can ask the user to authorize it, a run that has not
+// been authorized yet is the ordinary first case, not an error.
+//
+// The statuses come back in configuration order, and there is one per server
+// whether it connected or not.
+func (e *Agent) PrepareMCPTools(ctx context.Context, runContext map[string]any) ([]Tool, []ConnectorStatus) {
 	coreTools := []Tool{}
-	if e.mcpServers != nil {
-		for _, mcpServer := range e.mcpServers {
-			mcpTools, err := mcpServer.ListTools(ctx, runContext)
-			if err != nil {
-				return nil, fmt.Errorf("failed to list MCP tools: %w", err)
-			}
+	var connectors []ConnectorStatus
 
-			coreTools = append(coreTools, mcpTools...)
+	for _, mcpServer := range e.mcpServers {
+		mcpTools, err := mcpServer.ListTools(ctx, runContext)
+		if err != nil {
+			status := failedStatus(mcpServer.GetName(), err)
+			slog.WarnContext(ctx, "MCP connector did not list its tools; continuing without them",
+				slog.String("connector", status.Name),
+				slog.String("kind", string(status.Kind)),
+				slog.String("error", err.Error()))
+			connectors = append(connectors, status)
+			continue
 		}
+
+		connectors = append(connectors, connectedStatus(mcpServer.GetName(), len(mcpTools)))
+		coreTools = append(coreTools, mcpTools...)
 	}
 
-	return coreTools, nil
+	return coreTools, connectors
 }
 
 // AddHandoffs appends handoff edges to the agent after construction.
@@ -437,11 +455,10 @@ func (e *Agent) ExecuteWithRun(ctx context.Context, in *AgentInput, run *history
 	handoffTools := e.PrepareHandoffTools(ctx)
 	tools := append(e.tools, handoffTools...)
 
-	// Connect to MCP servers, and list the tools
-	mcpTools, err := e.PrepareMCPTools(ctx, in.RunContext)
-	if err != nil {
-		return nil, err
-	}
+	// Connect to MCP servers, and list the tools. A server that could not be
+	// listed is reported to the model through the prompt's Dependencies below
+	// rather than ending the run.
+	mcpTools, connectors := e.PrepareMCPTools(ctx, in.RunContext)
 
 	// Merge MCP tools with other tools
 	tools = append(tools, mcpTools...)
@@ -502,16 +519,18 @@ func (e *Agent) ExecuteWithRun(ctx context.Context, in *AgentInput, run *history
 
 		skills, skillHint := skillDependencies(e.skills)
 
-		instruction, err = e.instruction.GetPrompt(ctx, &Dependencies{
+		prompt, err := e.instruction.GetPrompt(ctx, &Dependencies{
 			RunContext:    in.RunContext,
 			Handoffs:      e.handoffs,
 			DeferredTools: deferredToolInfos,
 			Skills:        skills,
 			SkillHint:     skillHint,
+			Connectors:    connectors,
 		})
 		if err != nil {
 			return &AgentOutput{Status: agentstate.RunStatusError, RunID: runId}, err
 		}
+		instruction = prompt
 	}
 
 	// Apply structured output format if configured
@@ -960,7 +979,7 @@ func (e *Agent) ExecuteWithRun(ctx context.Context, in *AgentInput, run *history
 			}
 
 		case agentstate.StepAwaitApproval:
-			err = run.SaveMessages(ctx)
+			err := run.SaveMessages(ctx)
 			if err != nil {
 				return &AgentOutput{Status: agentstate.RunStatusError, RunID: runId}, err
 			}
@@ -977,7 +996,7 @@ func (e *Agent) ExecuteWithRun(ctx context.Context, in *AgentInput, run *history
 			}, nil
 
 		case agentstate.StepComplete:
-			err = run.SaveMessages(ctx)
+			err := run.SaveMessages(ctx)
 			if err != nil {
 				return &AgentOutput{Status: agentstate.RunStatusError, RunID: runId}, err
 			}

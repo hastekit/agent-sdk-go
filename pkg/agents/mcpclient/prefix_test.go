@@ -194,7 +194,7 @@ func TestToolPrefixCallsServerUnderItsOwnName(t *testing.T) {
 	url, namesSeen := echoServer(t)
 
 	ctx := context.Background()
-	client, err := NewClient(ctx, url,
+	client, err := NewClient(ctx, "prefix", url,
 		WithTransport("streamable-http"),
 		WithToolPrefix("xyz__"),
 	)
@@ -238,7 +238,7 @@ func TestSchemaCacheIsSharedAcrossPrefixes(t *testing.T) {
 		if prefix != "" {
 			opts = append(opts, WithToolPrefix(prefix))
 		}
-		client, err := NewClient(ctx, url, opts...)
+		client, err := NewClient(ctx, "prefix", url, opts...)
 		require.NoError(t, err)
 		return client
 	}
@@ -272,7 +272,7 @@ func TestCallToolDirectNeedsTheTool(t *testing.T) {
 	url, namesSeen := echoServer(t)
 
 	ctx := context.Background()
-	client, err := NewClient(ctx, url, WithTransport("streamable-http"), WithToolPrefix("xyz__"))
+	client, err := NewClient(ctx, "prefix", url, WithTransport("streamable-http"), WithToolPrefix("xyz__"))
 	require.NoError(t, err)
 
 	_, err = client.CallToolDirect(ctx, nil, nil, echoCall("xyz__echo"))

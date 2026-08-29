@@ -31,6 +31,15 @@ type Dependencies struct {
 	// Temporal activity boundary.
 	Skills    []Skill `json:"skills,omitempty"`
 	SkillHint string  `json:"skill_hint,omitempty"`
+
+	// Connectors is how each configured MCP server fared when its tools were
+	// listed for this run — see ConnectorStatus. Every one of them is here,
+	// connected or not, because a prompt that only ever hears about failures
+	// cannot tell the model what it does have.
+	//
+	// A run with no MCP servers has none, and the resolver that renders these
+	// leaves such a prompt untouched.
+	Connectors []ConnectorStatus `json:"connectors,omitempty"`
 }
 
 type SystemPromptProvider interface {

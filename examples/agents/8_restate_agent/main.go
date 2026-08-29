@@ -38,7 +38,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	mcpClient, err := mcpclient.NewClient(context.Background(), "http://127.0.0.1:8000/mcp",
+	mcpClient, err := mcpclient.NewClient(context.Background(), "sample", "http://127.0.0.1:8000/mcp",
 		mcpclient.WithTransport("streamable-http"),
 	)
 	if err != nil {

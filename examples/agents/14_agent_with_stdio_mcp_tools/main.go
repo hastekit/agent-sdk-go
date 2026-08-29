@@ -43,11 +43,8 @@ func main() {
 
 	// WithCommand selects the stdio transport, so WithTransport is not needed
 	// as well. There is no URL to connect to, so the endpoint is empty.
-	mcpClient, err := mcpclient.NewClient(context.Background(), "",
+	mcpClient, err := mcpclient.NewClient(context.Background(), "filesystem", "",
 		mcpclient.WithCommand("npx", "-y", "@modelcontextprotocol/server-filesystem", "/tmp"),
-
-		// Named, because the name is what the tools are attributed to.
-		mcpclient.WithName("filesystem"),
 
 		// The prefix is used verbatim, separator included — "fs__read_file" and
 		// not "fsread_file". Worth setting as soon as a second server is in

@@ -154,3 +154,79 @@ func TestAResolverErrorStopsTheChain(t *testing.T) {
 		t.Error("GetPrompt succeeded despite a failing resolver")
 	}
 }
+
+func connectorDeps() *agents.Dependencies {
+	return &agents.Dependencies{
+		Connectors: []agents.ConnectorStatus{
+			{Name: "calendar", Connected: true, ToolCount: 12},
+			{Name: "jira", Kind: agents.ToolsetErrorAuth},
+			{Name: "grafana", Kind: agents.ToolsetErrorUnavailable, Detail: "Service Unavailable"},
+		},
+	}
+}
+
+func TestConnectorsAreListedWithTheirToolCounts(t *testing.T) {
+	p := prompts.New("You keep the on-call rota.", prompts.WithResolver(prompts.ResolveConnectors))
+
+	got, err := p.GetPrompt(context.Background(), connectorDeps())
+	if err != nil {
+		t.Fatalf("GetPrompt: %v", err)
+	}
+
+	for _, want := range []string{
+		"<name>calendar</name><status>connected</status><tools>12</tools>",
+		"the user has to reconnect it",
+		"could not be reached (Service Unavailable)",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("prompt is missing %q:\n%s", want, got)
+		}
+	}
+
+	if strings.Contains(got, "<name>jira</name><status>connected</status>") {
+		t.Errorf("a connector that failed must not be listed as connected:\n%s", got)
+	}
+}
+
+// An auth failure is the one the user can act on, so it has to read differently
+// from a server that is merely down — otherwise the model tells them to wait.
+func TestConnectorReasonSeparatesAuthFromOutage(t *testing.T) {
+	p := prompts.New("base", prompts.WithResolver(prompts.ResolveConnectors))
+
+	got, err := p.GetPrompt(context.Background(), connectorDeps())
+	if err != nil {
+		t.Fatalf("GetPrompt: %v", err)
+	}
+
+	auth := strings.Index(got, "not authorized")
+	outage := strings.Index(got, "could not be reached")
+	if auth < 0 || outage < 0 || auth == outage {
+		t.Fatalf("the two failures must read differently:\n%s", got)
+	}
+}
+
+func TestNoConnectorsLeavesThePromptAlone(t *testing.T) {
+	p := prompts.New("You keep the on-call rota.", prompts.WithResolver(prompts.ResolveConnectors))
+
+	got, err := p.GetPrompt(context.Background(), &agents.Dependencies{})
+	if err != nil {
+		t.Fatalf("GetPrompt: %v", err)
+	}
+
+	if got != "You keep the on-call rota." {
+		t.Errorf("an agent with no MCP servers gets no section:\n%s", got)
+	}
+}
+
+func TestConnectorsAreInTheDefaultChain(t *testing.T) {
+	p := prompts.New("base", prompts.WithResolver(prompts.DefaultResolvers()...))
+
+	got, err := p.GetPrompt(context.Background(), connectorDeps())
+	if err != nil {
+		t.Fatalf("GetPrompt: %v", err)
+	}
+
+	if !strings.Contains(got, "## MCP Connectors") {
+		t.Errorf("DefaultResolvers must render connectors:\n%s", got)
+	}
+}

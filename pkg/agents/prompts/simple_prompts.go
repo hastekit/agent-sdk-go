@@ -93,6 +93,7 @@ func DefaultResolvers() []PromptResolverFn {
 		ResolveSkills,
 		ResolveHandoffs,
 		ResolveDeferredTools,
+		ResolveConnectors,
 		ResolveTemplate,
 	}
 }
@@ -249,4 +250,48 @@ func ResolveDeferredTools(prompt string, deps *agents.Dependencies) (string, err
 	p.WriteString("\n---\n")
 
 	return prompt + p.String(), nil
+}
+
+// ResolveConnectors appends what each of the agent's MCP connectors is good
+// for this run: the ones that connected and how many tools they brought, and
+// the ones that did not and why.
+func ResolveConnectors(prompt string, deps *agents.Dependencies) (string, error) {
+	if len(deps.Connectors) == 0 {
+		return prompt, nil
+	}
+
+	var p strings.Builder
+
+	p.WriteString("\n\n" + "## MCP Connectors Catalog\n")
+	p.WriteString("Each connector below is an MCP server you are given. A connector that is not connected has contributed none of its tools to this run: do not call them, do not guess at what they would have returned, and say which connector is unavailable if the user asks for something that needs it.\n")
+	p.WriteString("<mcp-connectors>")
+	for _, c := range deps.Connectors {
+		p.WriteString("<connector>")
+		p.WriteString(fmt.Sprintf("<name>%s</name>", c.Name))
+		if c.Connected {
+			p.WriteString("<status>connected</status>")
+			p.WriteString(fmt.Sprintf("<tools>%d</tools>", c.ToolCount))
+		} else {
+			p.WriteString("<status>not connected</status>")
+			p.WriteString(fmt.Sprintf("<reason>%s</reason>", connectorReason(c)))
+		}
+		p.WriteString("</connector>")
+	}
+	p.WriteString("</mcp-connectors>")
+	p.WriteString("\n---\n")
+
+	return prompt + p.String(), nil
+}
+
+// connectorReason turns a status's kind into the sentence a model reads. An
+// auth failure is the one the user can act on, so it says what acting looks
+// like; anything else is reported as what it was.
+func connectorReason(c agents.ConnectorStatus) string {
+	if c.Kind == agents.ToolsetErrorAuth {
+		return "not authorized; the user has to reconnect it before its tools can be used"
+	}
+	if c.Detail != "" {
+		return fmt.Sprintf("could not be reached (%s)", c.Detail)
+	}
+	return "could not be reached"
 }

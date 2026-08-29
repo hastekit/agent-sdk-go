@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"maps"
 	"slices"
-	"strings"
 	"time"
 
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
@@ -37,22 +36,18 @@ type MCPClient struct {
 	schemaCache          SchemaCache   // injected cache (required for caching)
 }
 
-func NewClient(ctx context.Context, endpoint string, options ...McpServerOption) (*MCPClient, error) {
+func NewClient(ctx context.Context, name string, endpoint string, options ...McpServerOption) (*MCPClient, error) {
+	if name == "" {
+		return nil, fmt.Errorf("name is required for mcp connector")
+	}
+
 	srv := &MCPClient{
+		Name:     name,
 		Endpoint: endpoint,
 	}
 
 	for _, option := range options {
 		option(srv)
-	}
-
-	if srv.Name == "" {
-		// A stdio server has no endpoint to be known by, so it is known by the
-		// command that runs it.
-		srv.Name = srv.Endpoint
-		if srv.Name == "" {
-			srv.Name = strings.Join(srv.Command, " ")
-		}
 	}
 
 	// Copied, not written into: WithMeta stores the caller's own map, and two
@@ -67,12 +62,6 @@ func NewClient(ctx context.Context, endpoint string, options ...McpServerOption)
 }
 
 type McpServerOption func(*MCPClient)
-
-func WithName(name string) McpServerOption {
-	return func(server *MCPClient) {
-		server.Name = name
-	}
-}
 
 func WithHeaders(headers map[string]string) McpServerOption {
 	return func(server *MCPClient) {
@@ -190,7 +179,7 @@ func WithMeta(m map[string]any) McpServerOption {
 }
 
 func (srv *MCPClient) GetName() string {
-	return "MCPClient"
+	return srv.Name
 }
 
 func (srv *MCPClient) ListTools(ctx context.Context, runContext map[string]any) ([]agents.Tool, error) {

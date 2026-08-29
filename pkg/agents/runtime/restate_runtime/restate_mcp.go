@@ -2,6 +2,7 @@ package restate_runtime
 
 import (
 	"context"
+	"errors"
 
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
 	restate "github.com/restatedev/sdk-go"
@@ -22,7 +23,7 @@ func NewRestateMCPServer(restateCtx restate.WorkflowContext, wrappedMcpServer ag
 }
 
 func (t *RestateMCPServer) GetName() string {
-	return ""
+	return t.wrappedMcpServer.GetName()
 }
 
 func (t *RestateMCPServer) ListTools(ctx context.Context, runContext map[string]any) ([]agents.Tool, error) {
@@ -30,7 +31,7 @@ func (t *RestateMCPServer) ListTools(ctx context.Context, runContext map[string]
 	toolDefs, err := restate.Run(t.restateCtx, func(ctx restate.RunContext) ([]agents.BaseTool, error) {
 		mcpTools, err := t.wrappedMcpServer.ListTools(ctx, runContext)
 		if err != nil {
-			return nil, err
+			return nil, toolsetListError(err)
 		}
 
 		// GetBaseTool rather than a field-by-field copy: this is the only
@@ -49,7 +50,7 @@ func (t *RestateMCPServer) ListTools(ctx context.Context, runContext map[string]
 		return tools, nil
 	}, restate.WithName("MCPListTools"))
 	if err != nil {
-		return nil, err
+		return nil, toolsetListErrorFrom(err)
 	}
 
 	var tools []agents.Tool
@@ -115,4 +116,35 @@ func (t *RestateMCPTool) callTool(ctx context.Context, params *agents.ToolCall) 
 		}
 	}
 	return nil, err
+}
+
+// ToolsetAuthErrorCode marks a listing that failed because the server turned
+// our credentials away. It is 401 on purpose — the status the MCP authorization
+// spec has a server answer with, and the one the transport actually read.
+// Untyped for the same reason ToolCancelledErrorCode is: restate's Code type is
+// in an internal package.
+const ToolsetAuthErrorCode = 401
+
+// toolsetListError re-states a listing failure in restate's terms, inside the
+// step. An *agents.ToolsetError does not survive the step boundary, but an
+// error code does, which is what carries the kind out.
+//
+// Terminal, so restate does not retry the step: the credential is wrong, and
+// asking again with the same one gets the same answer.
+func toolsetListError(err error) error {
+	var te *agents.ToolsetError
+	if errors.As(err, &te) && te.Kind == agents.ToolsetErrorAuth {
+		return restate.TerminalError(err, ToolsetAuthErrorCode)
+	}
+	return err
+}
+
+// toolsetListErrorFrom is the other half, outside the step: it restores the
+// kind that toolsetListError put on the wire, so the agent classifies a listing
+// failure here the same way it would running locally.
+func toolsetListErrorFrom(err error) error {
+	if restate.ErrorCode(err) == ToolsetAuthErrorCode {
+		return agents.NewToolsetError(agents.ToolsetErrorAuth, err)
+	}
+	return err
 }

@@ -51,7 +51,7 @@ func TestCallToolDirect_CancellationReachesServer(t *testing.T) {
 		httpSrv.Close()
 	}()
 
-	client, err := mcpclient.NewClient(context.Background(), httpSrv.URL,
+	client, err := mcpclient.NewClient(context.Background(), "cancel", httpSrv.URL,
 		mcpclient.WithTransport("streamable-http"))
 	require.NoError(t, err)
 

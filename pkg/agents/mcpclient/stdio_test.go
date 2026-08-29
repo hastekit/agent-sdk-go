@@ -43,7 +43,7 @@ func stdioClient(t *testing.T, opts ...McpServerOption) *MCPClient {
 		WithCommand(os.Args[0], "-test.run=TestStdioServerHelper"),
 		WithEnv(map[string]string{"MCP_STDIO_HELPER": "1", "WHOAMI": "child"}),
 	}
-	client, err := NewClient(context.Background(), "", append(base, opts...)...)
+	client, err := NewClient(context.Background(), "stdio", "", append(base, opts...)...)
 	require.NoError(t, err)
 
 	t.Cleanup(func() { globalPool.Remove(client.connFor(nil)) })
@@ -95,7 +95,7 @@ func TestStdioTransport_HonoursPrefixAndFilter(t *testing.T) {
 func TestStdioTransport_EnvIsResolvedFromRunContext(t *testing.T) {
 	ctx := context.Background()
 
-	client, err := NewClient(ctx, "",
+	client, err := NewClient(ctx, "stdio", "",
 		WithCommand(os.Args[0], "-test.run=TestStdioServerHelper"),
 		WithEnv(map[string]string{"MCP_STDIO_HELPER": "1", "WHOAMI": "{{caller}}"}),
 	)

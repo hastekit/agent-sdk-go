@@ -29,7 +29,7 @@ func main() {
 
 	model := client.Model("OpenAI/gpt-4.1-mini")
 
-	mcpClient, err := mcpclient.NewClient(context.Background(), "http://localhost:9001/sse",
+	mcpClient, err := mcpclient.NewClient(context.Background(), "users", "http://localhost:9001/sse",
 		mcpclient.WithHeaders(map[string]string{
 			"token": "your-token",
 		}),

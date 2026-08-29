@@ -2,9 +2,11 @@ package temporal_runtime
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
+	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 )
 
@@ -23,7 +25,7 @@ func NewTemporalMCPServer(wrappedMcpServer agents.MCPToolset, broker agents.Stre
 func (t *TemporalMCPServer) ListTools(ctx context.Context, runContext map[string]any) ([]agents.BaseTool, error) {
 	mcpTools, err := t.wrappedMcpServer.ListTools(ctx, runContext)
 	if err != nil {
-		return nil, err
+		return nil, toolsetListError(err)
 	}
 
 	// GetBaseTool rather than a field-by-field copy: this is the only crossing a
@@ -106,7 +108,7 @@ func (t *TemporalMCPProxy) ListTools(ctx context.Context, runContext map[string]
 	var toolDefs []agents.BaseTool
 	err := workflow.ExecuteActivity(t.workflowCtx, t.prefix+"_ListMCPToolsActivity", runContext).Get(t.workflowCtx, &toolDefs)
 	if err != nil {
-		return nil, err
+		return nil, toolsetListErrorFrom(err)
 	}
 
 	var toolList []agents.Tool
@@ -143,4 +145,33 @@ func (t *TemporalMCPToolProxy) Execute(ctx context.Context, params *agents.ToolC
 	}
 
 	return output, nil
+}
+
+// ToolsetAuthErrorType marks a listing that failed because the server turned
+// our credentials away. Non-retryable: the credential is wrong, and asking a
+// second time with the same one gets the same answer — the agent is told the
+// server is unavailable instead, and the run goes on without its tools.
+const ToolsetAuthErrorType = "ToolsetAuthError"
+
+// toolsetListError re-states a listing failure in Temporal's terms, on the
+// activity side. An *agents.ToolsetError does not survive the crossing back
+// into the workflow — the error is flattened to its message — but an
+// ApplicationError's type does, which is what carries the kind over.
+func toolsetListError(err error) error {
+	var te *agents.ToolsetError
+	if errors.As(err, &te) && te.Kind == agents.ToolsetErrorAuth {
+		return temporal.NewNonRetryableApplicationError(err.Error(), ToolsetAuthErrorType, nil)
+	}
+	return err
+}
+
+// toolsetListErrorFrom is the other half, on the workflow side: it restores the
+// kind that toolsetListError put on the wire, so the agent classifies a
+// listing failure here the same way it would running locally.
+func toolsetListErrorFrom(err error) error {
+	var appErr *temporal.ApplicationError
+	if errors.As(err, &appErr) && appErr.Type() == ToolsetAuthErrorType {
+		return agents.NewToolsetError(agents.ToolsetErrorAuth, err)
+	}
+	return err
 }

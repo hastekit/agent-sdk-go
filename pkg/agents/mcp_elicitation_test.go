@@ -61,7 +61,7 @@ func bookSeatServer(t *testing.T) string {
 func TestAgentLoop_MCPElicitationPausesRun(t *testing.T) {
 	endpoint := bookSeatServer(t)
 
-	toolset, err := mcpclient.NewClient(context.Background(), endpoint,
+	toolset, err := mcpclient.NewClient(context.Background(), "elicit", endpoint,
 		mcpclient.WithTransport("streamable-http"))
 	require.NoError(t, err)
 

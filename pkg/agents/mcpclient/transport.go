@@ -5,7 +5,9 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"sync"
 
+	"github.com/hastekit/agent-sdk-go/pkg/agents"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -38,15 +40,50 @@ var sdkClient = mcp.NewClient(&mcp.Implementation{
 	},
 })
 
-// headerRoundTripper injects a fixed set of headers onto every outgoing
-// request. The official SDK transports don't expose a headers option, so
-// we layer them on via a custom http.Client transport.
-type headerRoundTripper struct {
+// authStatus is the authorization status an http server answered with, kept
+// from the one place it still exists.
+//
+// The MCP authorization spec is specific about these: a server that wants
+// credentials answers 401, and one that has them but finds them insufficient
+// answers 403. Neither code survives the SDK's transports, which report a
+// non-2xx as its status text alone — by the time an error reaches connect,
+// a 401 is the word "Unauthorized" inside a message. So the response is read
+// here, while it is still a response.
+type authStatus struct {
+	mu   sync.Mutex
+	code int
+}
+
+func (a *authStatus) record(code int) {
+	if code != http.StatusUnauthorized && code != http.StatusForbidden {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.code = code
+}
+
+// refused reports whether the server turned our credentials away. Nil-safe:
+// stdio has no status to record and no credentials to be refused.
+func (a *authStatus) refused() bool {
+	if a == nil {
+		return false
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.code != 0
+}
+
+// mcpRoundTripper does the two things the SDK's http transports leave to the
+// http client: it sets our headers on every request, and it keeps the
+// authorization status of what came back.
+type mcpRoundTripper struct {
 	headers map[string]string
+	auth    *authStatus
 	base    http.RoundTripper
 }
 
-func (h *headerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+func (h *mcpRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	if len(h.headers) > 0 {
 		req = req.Clone(req.Context())
 		for k, v := range h.headers {
@@ -57,17 +94,18 @@ func (h *headerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 	if base == nil {
 		base = http.DefaultTransport
 	}
-	return base.RoundTrip(req)
+	resp, err := base.RoundTrip(req)
+	if resp != nil {
+		h.auth.record(resp.StatusCode)
+	}
+	return resp, err
 }
 
-// httpClientWithHeaders returns an *http.Client that adds the given
-// headers to every request, or nil when there are no headers (so the
-// transport falls back to http.DefaultClient).
-func httpClientWithHeaders(headers map[string]string) *http.Client {
-	if len(headers) == 0 {
-		return nil
-	}
-	return &http.Client{Transport: &headerRoundTripper{headers: headers}}
+// newHTTPClient returns the client an http transport speaks through, and the
+// authorization status it will record into.
+func newHTTPClient(headers map[string]string) (*http.Client, *authStatus) {
+	auth := &authStatus{}
+	return &http.Client{Transport: &mcpRoundTripper{headers: headers, auth: auth}}, auth
 }
 
 // Transport names accepted by WithTransport.
@@ -93,22 +131,24 @@ const (
 //
 // ctx bounds a stdio server's process: it is killed when ctx is done. The pool
 // connects on context.Background() for exactly that reason — see Checkout.
-func newClientTransport(ctx context.Context, conn serverConn) mcp.Transport {
+// It returns the authStatus the transport records into alongside it, which is
+// nil for stdio — a child process has no HTTP status to answer with.
+func newClientTransport(ctx context.Context, conn serverConn) (mcp.Transport, *authStatus) {
 	if conn.isStdio() {
 		cmd := exec.CommandContext(ctx, conn.Command[0], conn.Command[1:]...)
 		cmd.Env = conn.childEnv()
 		// A server writing diagnostics to stderr should not be silently
 		// swallowed; its stdout is the protocol and stays untouched.
 		cmd.Stderr = os.Stderr
-		return &mcp.CommandTransport{Command: cmd}
+		return &mcp.CommandTransport{Command: cmd}, nil
 	}
 
-	hc := httpClientWithHeaders(conn.Headers)
+	hc, auth := newHTTPClient(conn.Headers)
 	switch conn.Transport {
 	case TransportStreamableHTTP:
-		return &mcp.StreamableClientTransport{Endpoint: conn.Endpoint, HTTPClient: hc, DisableStandaloneSSE: conn.DisableStandaloneSSE}
+		return &mcp.StreamableClientTransport{Endpoint: conn.Endpoint, HTTPClient: hc, DisableStandaloneSSE: conn.DisableStandaloneSSE}, auth
 	default:
-		return &mcp.SSEClientTransport{Endpoint: conn.Endpoint, HTTPClient: hc}
+		return &mcp.SSEClientTransport{Endpoint: conn.Endpoint, HTTPClient: hc}, auth
 	}
 }
 
@@ -118,5 +158,19 @@ func connect(ctx context.Context, conn serverConn) (*mcp.ClientSession, error) {
 	if err := conn.validate(); err != nil {
 		return nil, err
 	}
-	return sdkClient.Connect(ctx, newClientTransport(ctx, conn), nil)
+
+	transport, auth := newClientTransport(ctx, conn)
+
+	session, err := sdkClient.Connect(ctx, transport, nil)
+	if err != nil {
+		// A server that refused our credentials is something the user can put
+		// right, and the layer above says so in the agent's prompt. Everything
+		// else is just a server that is not there.
+		if auth.refused() {
+			return nil, agents.NewToolsetError(agents.ToolsetErrorAuth, err)
+		}
+		return nil, err
+	}
+
+	return session, nil
 }
