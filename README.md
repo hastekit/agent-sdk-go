@@ -409,6 +409,7 @@ import "github.com/hastekit/agent-sdk-go/pkg/agents/mcpclient"
 // Connect to MCP server
 mcpClient, err := mcpclient.NewClient(
     context.Background(),
+    "sample"
     "http://localhost:9001/sse",
     mcpclient.WithTransport("sse"), // or "streamable-http"
     mcpclient.WithHeaders(map[string]string{
@@ -436,7 +437,7 @@ child process and speaks to it over stdin/stdout — there is nothing to deploy,
 the process is started on demand and reused across tool calls:
 
 ```go
-mcpClient, err := mcpclient.NewClient(context.Background(), "", // no endpoint
+mcpClient, err := mcpclient.NewClient(context.Background(), "filesystem", "", // no endpoint
     mcpclient.WithCommand("npx", "-y", "@modelcontextprotocol/server-filesystem", "/tmp"),
     mcpclient.WithEnv(map[string]string{
         "GITHUB_TOKEN": "{{github_token}}", // templated from the run context
