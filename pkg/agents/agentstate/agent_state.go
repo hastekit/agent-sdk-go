@@ -3,6 +3,7 @@ package agentstate
 import (
 	"encoding/json"
 	"sort"
+	"time"
 
 	"github.com/bytedance/sonic"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/messages"
@@ -47,6 +48,13 @@ type RunState struct {
 	//
 	// The summarizer triggers on the sum. See ConversationRunManager.
 	PendingContextTokens int `json:"pending_context_tokens"`
+
+	// StartedAt is when the turn began — when the message that opened the run
+	// was sent. It belongs to the run rather than to the manager holding it,
+	// which is what carries it across a pause: a run that stops for an approval
+	// and continues reloads its state, and reloads this with it, so the span
+	// covers the wait instead of restarting after it.
+	StartedAt time.Time `json:"started_at"`
 
 	QueuedApprovals  []string           `json:"queued_approvals,omitempty"`
 	QueuedRejections []string           `json:"queued_rejections,omitempty"`
@@ -186,17 +194,64 @@ func (s *RunState) IsComplete() bool {
 	return s.CurrentStep == StepComplete
 }
 
-// NewRunState creates initial state for a fresh run
-func NewRunState() *RunState {
-	return &RunState{
+// RunStateOption configures a fresh RunState.
+type RunStateOption func(*RunState)
+
+// WithStartedAt records when the turn began — when the message that opened the
+// run was sent.
+func WithStartedAt(at time.Time) RunStateOption {
+	return func(s *RunState) { s.StartedAt = at.UTC() }
+}
+
+// NewRunState creates initial state for a fresh run.
+func NewRunState(opts ...RunStateOption) *RunState {
+	s := &RunState{
 		CurrentStep:   StepCallLLM,
 		LoopIteration: 0,
 		Usage:         responses.Usage{},
 	}
+	for _, o := range opts {
+		o(s)
+	}
+	return s
 }
 
-// ToMeta converts RunState to a map for storage in messages.meta
-func (s *RunState) ToMeta() map[string]any {
+// StartedAtMetaKey and CompletedAtMetaKey are the saved row meta entries under
+// which a turn's span is recorded: when the message that opened it was sent,
+// and when the agent answered.
+//
+// They sit beside run_state rather than inside it because they are what anyone
+// asks of a stored turn — how long the user waited — and reading that should
+// not mean knowing where the loop keeps its bookkeeping.
+//
+// Both are RFC 3339 strings: meta is a map[string]any that round-trips through
+// JSON, so a time.Time put in comes back out as a string anyway.
+const (
+	StartedAtMetaKey   = "started_at"
+	CompletedAtMetaKey = "completed_at"
+)
+
+// MetaOption configures what ToMeta records alongside the run's state.
+type MetaOption func(*metaOptions)
+
+type metaOptions struct {
+	completedAt time.Time
+}
+
+// WithCompletedAt closes the turn's span: when the agent answered. It is not
+// state — it is the moment of the write — so it is given to ToMeta rather than
+// carried on the run.
+func WithCompletedAt(at time.Time) MetaOption {
+	return func(o *metaOptions) { o.completedAt = at.UTC() }
+}
+
+// ToMeta converts RunState to a map for storage in messages.meta.
+func (s *RunState) ToMeta(opts ...MetaOption) map[string]any {
+	var cfg metaOptions
+	for _, o := range opts {
+		o(&cfg)
+	}
+
 	runStateMap := map[string]any{
 		"status":                 s.getStatus(),
 		"current_step":           string(s.CurrentStep),
@@ -247,9 +302,14 @@ func (s *RunState) ToMeta() map[string]any {
 		runStateMap["last_agent_name"] = s.LastAgentName
 	}
 
-	return map[string]any{
-		"run_state": runStateMap,
+	meta := map[string]any{"run_state": runStateMap}
+	if !s.StartedAt.IsZero() {
+		meta[StartedAtMetaKey] = s.StartedAt.UTC().Format(time.RFC3339Nano)
 	}
+	if !cfg.completedAt.IsZero() {
+		meta[CompletedAtMetaKey] = cfg.completedAt.Format(time.RFC3339Nano)
+	}
+	return meta
 }
 
 func (s *RunState) getStatus() RunStatus {
@@ -303,6 +363,13 @@ func LoadRunStateFromMeta(meta map[string]any) *RunState {
 
 	state := &RunState{
 		Usage: responses.Usage{},
+	}
+
+	// Read from the top level, where ToMeta put it — see StartedAtMetaKey.
+	if raw, ok := meta[StartedAtMetaKey].(string); ok {
+		if at, err := time.Parse(time.RFC3339Nano, raw); err == nil {
+			state.StartedAt = at.UTC()
+		}
 	}
 
 	if currentStep, ok := runStateData["current_step"].(string); ok {

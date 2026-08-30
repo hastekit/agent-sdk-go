@@ -2,6 +2,7 @@ package restate_runtime
 
 import (
 	"context"
+	"time"
 
 	"github.com/hastekit/agent-sdk-go/pkg/agents/history"
 	restate "github.com/restatedev/sdk-go"
@@ -26,6 +27,20 @@ func (t *RestateHistory) NewConversationID(ctx context.Context) string {
 
 func (t *RestateHistory) NewRunID(ctx context.Context) string {
 	return restate.UUID(t.restateCtx).String()
+}
+
+// Now reads the clock inside a journaled step, so a replay is handed the
+// recorded reading rather than taking a fresh one. Unix nanoseconds cross the
+// journal rather than a time.Time, which carries a monotonic reading and a
+// location that do not survive the round trip.
+func (t *RestateHistory) Now(ctx context.Context) time.Time {
+	nanos, err := restate.Run(t.restateCtx, func(restate.RunContext) (int64, error) {
+		return time.Now().UnixNano(), nil
+	}, restate.WithName("Now"))
+	if err != nil {
+		return time.Now().UTC()
+	}
+	return time.Unix(0, nanos).UTC()
 }
 
 func (t *RestateHistory) LoadMessages(ctx context.Context, namespace string, threadID string, previousRunID string) ([]history.ConversationMessage, error) {

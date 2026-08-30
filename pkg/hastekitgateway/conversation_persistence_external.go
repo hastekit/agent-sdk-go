@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"time"
 
 	"github.com/bytedance/sonic"
 	"github.com/google/uuid"
@@ -59,6 +60,11 @@ func (p *ExternalConversationPersistence) NewConversationID(ctx context.Context)
 // NewRunID generates a unique ID for a run
 func (p *ExternalConversationPersistence) NewRunID(ctx context.Context) string {
 	return uuid.NewString()
+}
+
+// Now reads the wall clock; this adapter is never used from inside a workflow.
+func (p *ExternalConversationPersistence) Now(ctx context.Context) time.Time {
+	return time.Now().UTC()
 }
 
 // LoadMessages implements core.ChatHistory

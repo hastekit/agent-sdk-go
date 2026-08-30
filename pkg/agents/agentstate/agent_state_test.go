@@ -2,6 +2,7 @@ package agentstate
 
 import (
 	"testing"
+	"time"
 
 	"github.com/bytedance/sonic"
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
@@ -161,5 +162,90 @@ func TestRunStateRoundTripWithoutJSONHop(t *testing.T) {
 	}
 	if out.Usage.TotalTokens != 1000 || out.Usage.InputTokens != 900 {
 		t.Errorf("Usage = %+v, want input=900 total=1000", out.Usage)
+	}
+}
+
+// StartedAt is what carries a turn's opening time across a pause: the run
+// stops for an approval, its state is saved, and the resuming request reloads
+// it rather than starting the span again.
+func TestStartedAtSurvivesTheMetaRoundTrip(t *testing.T) {
+	opened := time.Date(2026, 3, 1, 9, 0, 0, 0, time.UTC)
+
+	meta := NewRunState(WithStartedAt(opened)).ToMeta(WithCompletedAt(opened.Add(time.Minute)))
+	if got := meta[StartedAtMetaKey]; got != opened.Format(time.RFC3339Nano) {
+		t.Fatalf("meta[%s] = %v, want %v", StartedAtMetaKey, got, opened.Format(time.RFC3339Nano))
+	}
+
+	reloaded := LoadRunStateFromMeta(meta)
+	if reloaded == nil {
+		t.Fatal("state did not reload")
+	}
+	if !reloaded.StartedAt.Equal(opened) {
+		t.Errorf("StartedAt = %v, want %v", reloaded.StartedAt, opened)
+	}
+}
+
+// Both ends of the span are written when both are given.
+func TestBothEndsOfTheSpanAreWritten(t *testing.T) {
+	opened := time.Date(2026, 3, 1, 9, 0, 0, 0, time.UTC)
+	closed := opened.Add(90 * time.Second)
+
+	meta := NewRunState(WithStartedAt(opened)).ToMeta(WithCompletedAt(closed))
+
+	if got := meta[StartedAtMetaKey]; got != opened.Format(time.RFC3339Nano) {
+		t.Errorf("meta[%s] = %v, want %v", StartedAtMetaKey, got, opened.Format(time.RFC3339Nano))
+	}
+	if got := meta[CompletedAtMetaKey]; got != closed.Format(time.RFC3339Nano) {
+		t.Errorf("meta[%s] = %v, want %v", CompletedAtMetaKey, got, closed.Format(time.RFC3339Nano))
+	}
+}
+
+// The round trip has to survive JSON too: a persistence adapter that stores
+// meta as a document hands back a string, not a time.
+func TestStartedAtSurvivesJSON(t *testing.T) {
+	opened := time.Date(2026, 3, 1, 9, 0, 0, 0, time.UTC)
+
+	encoded, err := sonic.Marshal(NewRunState(WithStartedAt(opened)).ToMeta(WithCompletedAt(opened.Add(time.Minute))))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var meta map[string]any
+	if err := sonic.Unmarshal(encoded, &meta); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	reloaded := LoadRunStateFromMeta(meta)
+	if reloaded == nil {
+		t.Fatal("state did not reload")
+	}
+	if !reloaded.StartedAt.Equal(opened) {
+		t.Errorf("StartedAt = %v, want %v", reloaded.StartedAt, opened)
+	}
+}
+
+// An option nobody passed records nothing, rather than a zero time a reader
+// would have to tell apart from the epoch.
+func TestAnUngivenSpanEndIsOmitted(t *testing.T) {
+	opened := time.Date(2026, 3, 1, 9, 0, 0, 0, time.UTC)
+
+	noEnd := NewRunState(WithStartedAt(opened)).ToMeta()
+	if _, ok := noEnd[CompletedAtMetaKey]; ok {
+		t.Errorf("meta carries %s without WithCompletedAt", CompletedAtMetaKey)
+	}
+	if noEnd[StartedAtMetaKey] != opened.Format(time.RFC3339Nano) {
+		t.Errorf("meta is missing %s", StartedAtMetaKey)
+	}
+
+	noStart := NewRunState().ToMeta(WithCompletedAt(opened))
+	if _, ok := noStart[StartedAtMetaKey]; ok {
+		t.Errorf("meta carries %s for a run that never opened one", StartedAtMetaKey)
+	}
+
+	reloaded := LoadRunStateFromMeta(noStart)
+	if reloaded == nil {
+		t.Fatal("state did not reload")
+	}
+	if !reloaded.StartedAt.IsZero() {
+		t.Errorf("StartedAt = %v, want zero", reloaded.StartedAt)
 	}
 }

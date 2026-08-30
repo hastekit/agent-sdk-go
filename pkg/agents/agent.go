@@ -347,6 +347,10 @@ func (e *Agent) Execute(ctx context.Context, in *AgentInput) (*AgentHandle, erro
 		in.ThreadID = uuid.NewString()
 	}
 
+	if in.Message.ID == "" {
+		in.Message.ID = uuid.NewString()
+	}
+
 	go func() {
 		defer close(handle.done)
 
@@ -496,6 +500,8 @@ func (e *Agent) ExecuteWithRun(ctx context.Context, in *AgentInput, run *history
 	// Load run state from meta (in-memory, no DB call)
 	runId := run.GetRunID()
 
+	messageIDs := newMessageIDs(runId, in.Message.ID)
+
 	// Get the prompt
 	instruction := "You are a helpful assistant."
 	if e.instruction != nil {
@@ -589,7 +595,8 @@ func (e *Agent) ExecuteWithRun(ctx context.Context, in *AgentInput, run *history
 					toolResultMsg := []responses.InputMessageUnion{
 						{OfFunctionCallOutput: result.FunctionCallOutputMessage},
 					}
-					run.AddMessages(ctx, messages.New(in.Message.SenderID, toolResultMsg))
+					run.AddMessages(ctx, messages.NewWithID(
+						messageIDs.Next(), in.Message.SenderID, toolResultMsg))
 					finalOutput = append(finalOutput, toolResultMsg...)
 				}
 
@@ -631,7 +638,8 @@ func (e *Agent) ExecuteWithRun(ctx context.Context, in *AgentInput, run *history
 					})
 				})
 
-				run.AddMessages(ctx, messages.New(in.Message.SenderID, []responses.InputMessageUnion{cancelMsg}))
+				run.AddMessages(ctx, messages.NewWithID(
+					messageIDs.Next(), in.Message.SenderID, []responses.InputMessageUnion{cancelMsg}))
 				finalOutput = append(finalOutput, cancelMsg)
 				run.RunState.ToolsAwaitingApproval = nil
 				run.RunState.TransitionToComplete()
@@ -728,7 +736,8 @@ func (e *Agent) ExecuteWithRun(ctx context.Context, in *AgentInput, run *history
 			// AlreadyMeasured: TrackUsage above counted this reply against the
 			// context window as part of the call's reported total, so
 			// estimating it here would count it twice.
-			run.AddMessages(ctx, messages.New(e.Name, inputMsgs), history.AlreadyMeasured())
+			run.AddMessages(ctx, messages.NewWithID(messageIDs.Next(), e.Name, inputMsgs),
+				history.AlreadyMeasured())
 			finalOutput = append(finalOutput, inputMsgs...)
 
 			// Extract tool calls
@@ -960,8 +969,8 @@ func (e *Agent) ExecuteWithRun(ctx context.Context, in *AgentInput, run *history
 					{OfFunctionCallOutput: toolResult.FunctionCallOutputMessage},
 				}
 
-				// Add tool result to history
-				run.AddMessages(ctx, messages.New(in.Message.SenderID, toolResultMsg))
+				run.AddMessages(ctx, messages.NewWithID(
+					messageIDs.Next(), in.Message.SenderID, toolResultMsg))
 				finalOutput = append(finalOutput, toolResultMsg...)
 			}
 

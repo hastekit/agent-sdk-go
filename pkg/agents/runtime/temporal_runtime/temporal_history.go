@@ -2,6 +2,7 @@ package temporal_runtime
 
 import (
 	"context"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/history"
@@ -67,6 +68,10 @@ func (t *TemporalConversationPersistenceProxy) NewRunID(ctx context.Context) str
 	}
 
 	return id
+}
+
+func (t *TemporalConversationPersistenceProxy) Now(ctx context.Context) time.Time {
+	return workflow.Now(t.workflowCtx).UTC()
 }
 
 func (t *TemporalConversationPersistenceProxy) LoadMessages(ctx context.Context, namespace string, threadID string, previousRunID string) ([]history.ConversationMessage, error) {

@@ -99,6 +99,10 @@ func (p *FileConversationPersistence) NewConversationID(ctx context.Context) str
 }
 
 // NewRunID generates a unique ID for a run
+func (p *FileConversationPersistence) Now(ctx context.Context) time.Time {
+	return p.mem.Now(ctx)
+}
+
 func (p *FileConversationPersistence) NewRunID(ctx context.Context) string {
 	return p.mem.NewRunID(ctx)
 }

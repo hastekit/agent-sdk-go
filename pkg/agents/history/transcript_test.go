@@ -84,6 +84,10 @@ func (a summaryOnlyAdapter) NewRunID(ctx context.Context) string {
 	return a.inner.NewRunID(ctx)
 }
 
+func (a summaryOnlyAdapter) Now(ctx context.Context) time.Time {
+	return a.inner.Now(ctx)
+}
+
 func (a summaryOnlyAdapter) LoadMessages(ctx context.Context, namespace, threadID, previousRunID string) ([]ConversationMessage, error) {
 	return a.inner.LoadMessages(ctx, namespace, threadID, previousRunID)
 }

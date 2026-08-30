@@ -77,6 +77,12 @@ func (p *InMemoryConversationPersistence) NewRunID(ctx context.Context) string {
 	return uuid.NewString()
 }
 
+// Now reads the wall clock. There is no replay in process, so there is nothing
+// to repeat.
+func (p *InMemoryConversationPersistence) Now(ctx context.Context) time.Time {
+	return time.Now().UTC()
+}
+
 // LoadMessages retrieves all messages up to and including the previousRunID
 func (p *InMemoryConversationPersistence) LoadMessages(ctx context.Context, namespace string, threadID string, previousRunId string) ([]ConversationMessage, error) {
 	ctx, span := tracer.Start(ctx, "InMemoryConversationPersistence.LoadMessages")

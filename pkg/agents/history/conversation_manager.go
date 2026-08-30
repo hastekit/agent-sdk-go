@@ -42,6 +42,7 @@ type Summary struct {
 type ConversationPersistenceAdapter interface {
 	NewConversationID(ctx context.Context) string
 	NewRunID(ctx context.Context) string
+	Now(ctx context.Context) time.Time
 	LoadMessages(ctx context.Context, namespace string, threadID string, previousRunID string) ([]ConversationMessage, error)
 	SaveMessages(ctx context.Context, namespace, runId, previousRunId, threadID string, conversationId string, messages []Message, meta map[string]any) error
 	SaveSummary(ctx context.Context, namespace string, summary Summary) error
@@ -204,7 +205,7 @@ func NewRun(ctx context.Context, cm *CommonConversationManager, namespace string
 			// turn.
 			pendingContextTokens = cr.RunState.PendingContextTokens
 		}
-		cr.RunState = agentstate.NewRunState()
+		cr.RunState = agentstate.NewRunState(agentstate.WithStartedAt(cr.now(ctx)))
 		cr.RunState.LastAgentName = lastAgent
 		cr.RunState.ContextTokens = contextTokens
 		cr.RunState.PendingContextTokens = pendingContextTokens
@@ -269,6 +270,7 @@ func AlreadyMeasured() AddMessageOption {
 	return func(c *addMessageConfig) { c.estimate = false }
 }
 
+// AddMessages appends a bundle to the run
 func (cm *ConversationRunManager) AddMessages(ctx context.Context, message Message, opts ...AddMessageOption) {
 	cfg := addMessageConfig{estimate: true}
 	for _, o := range opts {
@@ -500,7 +502,9 @@ func (cm *ConversationRunManager) GetConversationID() string {
 }
 
 func (cm *ConversationRunManager) SaveMessages(ctx context.Context) error {
-	meta := cm.RunState.ToMeta()
+	completedAt := cm.now(ctx)
+
+	meta := cm.RunState.ToMeta(agentstate.WithCompletedAt(completedAt))
 	if meta == nil {
 		meta = map[string]any{}
 	}
@@ -518,7 +522,7 @@ func (cm *ConversationRunManager) SaveMessages(ctx context.Context) error {
 			ID:                  cm.summaries.SummaryID,
 			ThreadID:            cm.threadId,
 			LastSummarizedRunID: cm.summaries.LastSummarizedRunID,
-			CreatedAt:           time.Now(),
+			CreatedAt:           completedAt,
 			Meta: map[string]any{
 				"is_summary": true,
 			},
@@ -548,7 +552,7 @@ func (cm *ConversationRunManager) SaveMessages(ctx context.Context) error {
 	runState := agentstate.LoadRunStateFromMeta(meta)
 	if runState.IsComplete() {
 		cm.previousRunId = cm.runId
-		cm.runId = uuid.NewString()
+		cm.runId = cm.nextRunID(ctx)
 	}
 
 	cm.lastMessageMeta = meta
@@ -752,4 +756,24 @@ func (cm *ConversationRunManager) ProcessInterrupts(parentToolCall responses.Fun
 	// Add the parent tool call to the paused tool calls so the loop
 	// re-executes it (with ShouldResume) once the user resolves.
 	cm.RunState.PausedToolCalls[parentToolCall.CallID] = parentToolCall
+}
+
+// now reads the run's clock from the persistence adapter, which a durable
+// runtime wraps with a reading its replay repeats. A manager built without an
+// adapter has nothing to ask.
+func (cm *ConversationRunManager) now(ctx context.Context) time.Time {
+	if cm.ConversationPersistenceAdapter == nil {
+		return time.Now().UTC()
+	}
+	return cm.ConversationPersistenceAdapter.Now(ctx).UTC()
+}
+
+// nextRunID mints the id the thread's next run will be saved under, from the
+// persistence adapter — the same source the run's first id came from, and one
+// a durable runtime records rather than redrawing on each replay.
+func (cm *ConversationRunManager) nextRunID(ctx context.Context) string {
+	if cm.ConversationPersistenceAdapter == nil {
+		return uuid.NewString()
+	}
+	return cm.ConversationPersistenceAdapter.NewRunID(ctx)
 }
