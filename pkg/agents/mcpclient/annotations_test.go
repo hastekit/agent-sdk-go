@@ -93,7 +93,5 @@ func TestBuildLazyToolsKeepsAnnotations(t *testing.T) {
 // BaseTool it reports. Nil is a usable answer — every Is* helper is nil-safe.
 func annotationsOf(t *testing.T, tool agents.Tool) *agents.ToolAnnotations {
 	t.Helper()
-	base, err := tool.GetBaseTool()
-	require.NoError(t, err)
-	return base.Annotations
+	return tool.GetToolDescriptor().Annotations
 }

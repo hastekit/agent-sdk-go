@@ -50,7 +50,7 @@ func TestPrepareMCPToolsKeepsGoingWhenAServerFails(t *testing.T) {
 	tools, connectors := agent.PrepareMCPTools(context.Background(), nil)
 
 	require.Len(t, tools, 1, "the healthy server's tools must survive its neighbour failing")
-	assert.Equal(t, "list_events", tools[0].Tool(context.Background()).OfFunction.Name)
+	assert.Equal(t, "list_events", tools[0].GetToolDescriptor().ToolUnion.OfFunction.Name)
 
 	// One status per configured connector, in configuration order — the run
 	// needs to know what it has as much as what it is missing.

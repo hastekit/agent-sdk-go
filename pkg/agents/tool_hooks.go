@@ -215,7 +215,7 @@ func RunWithToolCallHooks(
 // more use to a hook than nothing.
 func serializeTool(exec ExecutableToolCall) *BaseTool {
 	if exec.Tool != nil {
-		if encoded, err := exec.Tool.GetBaseTool(); err == nil && encoded != nil && encoded.ToolUnion.OfFunction != nil {
+		if encoded := exec.Tool.GetToolDescriptor(); encoded != nil && encoded.ToolUnion.OfFunction != nil {
 			if encoded.Name != "" {
 				return encoded
 			}
@@ -223,7 +223,7 @@ func serializeTool(exec ExecutableToolCall) *BaseTool {
 			// Only a tool with a name of its own sets Name — an MCP server's
 			// does, a function tool does not, because for it the model-facing
 			// name is its name. Fill it in rather than making every hook know
-			// that, on a copy: GetBaseTool may well have handed back the tool's
+			// that, on a copy: GetToolDescriptor may well have handed back the tool's
 			// own embedded BaseTool, which is not ours to write to.
 			named := *encoded
 			named.Name = named.ToolUnion.OfFunction.Name

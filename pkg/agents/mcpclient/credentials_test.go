@@ -251,10 +251,7 @@ func TestListedToolsCarryNoCredentialAcrossTheBoundary(t *testing.T) {
 	require.NotNil(t, conn.TokenSource, "the connection itself does hold one")
 
 	for _, tool := range client.buildLazyTools([]*mcp.Tool{{Name: "search"}}, nil, conn) {
-		base, err := tool.GetBaseTool()
-		require.NoError(t, err)
-
-		encoded, err := sonic.MarshalString(base)
+		encoded, err := sonic.MarshalString(tool.GetToolDescriptor())
 		require.NoError(t, err)
 		assert.NotContains(t, encoded, "tok-ada")
 		assert.NotContains(t, encoded, "ada", "not even the principal's name rides along")

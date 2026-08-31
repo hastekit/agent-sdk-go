@@ -20,7 +20,7 @@ import (
 func exposedNames(tools []agents.Tool) []string {
 	names := make([]string, 0, len(tools))
 	for _, tool := range tools {
-		names = append(names, tool.Tool(context.Background()).OfFunction.Name)
+		names = append(names, tool.GetToolDescriptor().ToolUnion.OfFunction.Name)
 	}
 	return names
 }
@@ -41,9 +41,7 @@ func TestToolPrefixKeepsBothNames(t *testing.T) {
 	require.Len(t, tools, 2)
 	assert.Equal(t, []string{"xyz__search", "xyz__book"}, exposedNames(tools))
 
-	encoded, err := tools[0].GetBaseTool()
-	require.NoError(t, err)
-	assert.Equal(t, "search", encoded.Name, "the server's own name is kept alongside")
+	assert.Equal(t, "search", tools[0].GetToolDescriptor().Name, "the server's own name is kept alongside")
 }
 
 // The filter, approval and deferred lists are written against the server's own
@@ -63,11 +61,11 @@ func TestToolPrefixKeepsUnprefixedOptionsWorking(t *testing.T) {
 	require.Len(t, tools, 2, "the filter selects by the server's own names")
 	assert.Equal(t, []string{"xyz__search", "xyz__book"}, exposedNames(tools))
 
-	assert.True(t, tools[0].IsDeferred(), "search was deferred by its unprefixed name")
-	assert.False(t, tools[0].NeedApproval())
+	assert.True(t, tools[0].GetToolDescriptor().Deferred, "search was deferred by its unprefixed name")
+	assert.False(t, tools[0].GetToolDescriptor().RequiresApproval)
 
-	assert.True(t, tools[1].NeedApproval(), "book needs approval by its unprefixed name")
-	assert.False(t, tools[1].IsDeferred())
+	assert.True(t, tools[1].GetToolDescriptor().RequiresApproval, "book needs approval by its unprefixed name")
+	assert.False(t, tools[1].GetToolDescriptor().Deferred)
 }
 
 // The same lists against a client with no prefix — the path every existing
@@ -85,8 +83,8 @@ func TestOptionsWithoutToolPrefix(t *testing.T) {
 
 	require.Len(t, tools, 2)
 	assert.Equal(t, []string{"search", "book"}, exposedNames(tools))
-	assert.True(t, tools[0].IsDeferred())
-	assert.True(t, tools[1].NeedApproval())
+	assert.True(t, tools[0].GetToolDescriptor().Deferred)
+	assert.True(t, tools[1].GetToolDescriptor().RequiresApproval)
 }
 
 // The "defer everything" wildcard is not a tool name, so a prefix leaves it
@@ -98,7 +96,7 @@ func TestToolPrefixKeepsDeferredWildcard(t *testing.T) {
 
 	require.Len(t, tools, 2)
 	for i, tool := range tools {
-		assert.True(t, tool.IsDeferred(), "tool %d should be deferred by the wildcard", i)
+		assert.True(t, tool.GetToolDescriptor().Deferred, "tool %d should be deferred by the wildcard", i)
 	}
 }
 
@@ -228,7 +226,7 @@ func TestToolPrefixCallsServerUnderItsOwnName(t *testing.T) {
 	tools, err := client.ListTools(ctx, nil)
 	require.NoError(t, err)
 	require.Len(t, tools, 1)
-	require.Equal(t, "xyz__echo", tools[0].Tool(ctx).OfFunction.Name)
+	require.Equal(t, "xyz__echo", tools[0].GetToolDescriptor().ToolUnion.OfFunction.Name)
 
 	res, err := tools[0].Execute(ctx, echoCall("xyz__echo"))
 	require.NoError(t, err)
@@ -237,10 +235,7 @@ func TestToolPrefixCallsServerUnderItsOwnName(t *testing.T) {
 
 	// The durable-runtime path: the tool crosses the boundary as data alongside
 	// the call, so its own name is already in hand and nothing is resolved here.
-	encoded, err := tools[0].GetBaseTool()
-	require.NoError(t, err)
-
-	res, err = client.CallToolDirect(ctx, nil, encoded, echoCall("xyz__echo"))
+	res, err = client.CallToolDirect(ctx, nil, tools[0].GetToolDescriptor(), echoCall("xyz__echo"))
 	require.NoError(t, err)
 	require.NotNil(t, res.FunctionCallOutputMessage)
 	assert.Equal(t, "called as echo", *res.FunctionCallOutputMessage.Output.OfString)
@@ -274,7 +269,7 @@ func TestSchemaCacheIsSharedAcrossPrefixes(t *testing.T) {
 			require.NoError(t, err)
 			require.Len(t, tools, 1)
 
-			assert.Equal(t, prefix+"echo", tools[0].Tool(ctx).OfFunction.Name,
+			assert.Equal(t, prefix+"echo", tools[0].GetToolDescriptor().ToolUnion.OfFunction.Name,
 				"prefix %q, pass %d", prefix, pass)
 
 			res, err := tools[0].Execute(ctx, echoCall(prefix+"echo"))

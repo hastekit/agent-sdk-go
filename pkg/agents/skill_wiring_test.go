@@ -5,8 +5,6 @@ import (
 	"strings"
 	"testing"
 	"testing/fstest"
-
-	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
 )
 
 func testRegistry(t *testing.T) *SkillRegistry {
@@ -37,7 +35,7 @@ func TestAgentAddsTheSkillReaderTool(t *testing.T) {
 	if len(agent.tools) != 1 {
 		t.Fatalf("got %d tools, want 1", len(agent.tools))
 	}
-	if name := agent.tools[0].Tool(context.Background()).OfFunction.Name; name != ReadSkillToolName {
+	if name := functionName(agent.tools[0]); name != ReadSkillToolName {
 		t.Errorf("tool name = %q", name)
 	}
 	if len(callerTools) != 0 {
@@ -135,10 +133,7 @@ type wrappedTool struct{ inner Tool }
 func (w *wrappedTool) Execute(ctx context.Context, params *ToolCall) (*ToolCallResponse, error) {
 	return w.inner.Execute(ctx, params)
 }
-func (w *wrappedTool) Tool(ctx context.Context) *responses.ToolUnion { return w.inner.Tool(ctx) }
-func (w *wrappedTool) NeedApproval() bool                            { return w.inner.NeedApproval() }
-func (w *wrappedTool) IsDeferred() bool                              { return w.inner.IsDeferred() }
-func (w *wrappedTool) GetBaseTool() (*BaseTool, error)               { return w.inner.GetBaseTool() }
+func (w *wrappedTool) GetToolDescriptor() *BaseTool { return w.inner.GetToolDescriptor() }
 
 func TestAgentWithoutSkillsIsUnchanged(t *testing.T) {
 	agent := NewAgent(&AgentOptions{Name: "Plain_Agent"})

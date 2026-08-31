@@ -64,15 +64,15 @@ func (t *ToolSearchTool) Execute(ctx context.Context, params *ToolCall) (*ToolCa
 		// Absolute selection: activate exactly the named tools.
 		requested := strings.Split(strings.TrimPrefix(in.Query, "select:"), ",")
 		for _, tool := range t.deferredTools {
-			if schema := tool.Tool(ctx); schema.OfFunction != nil && slices.Contains(requested, schema.OfFunction.Name) {
-				toolNames = append(toolNames, schema.OfFunction.Name)
+			if name := functionName(tool); name != "" && slices.Contains(requested, name) {
+				toolNames = append(toolNames, name)
 			}
 		}
 	} else {
 		// Keyword search: rank deferred tools by relevance to the query.
 		// Without this a plain-keyword query (which the tool's own schema
 		// invites) would match nothing and silently activate no tools.
-		toolNames = t.keywordSearch(ctx, in.Query, in.MaxResults)
+		toolNames = t.keywordSearch(in.Query, in.MaxResults)
 	}
 
 	var output string
@@ -100,7 +100,7 @@ func (t *ToolSearchTool) Execute(ctx context.Context, params *ToolCall) (*ToolCa
 // their name or description, best first, and returns up to maxResults
 // names (default 5). Case-insensitive substring match — enough for a
 // model that queries by a tool's name or a word from its description.
-func (t *ToolSearchTool) keywordSearch(ctx context.Context, query string, maxResults int) []string {
+func (t *ToolSearchTool) keywordSearch(query string, maxResults int) []string {
 	if maxResults <= 0 {
 		maxResults = 5
 	}
@@ -116,13 +116,14 @@ func (t *ToolSearchTool) keywordSearch(ctx context.Context, query string, maxRes
 	}
 	var matches []scored
 	for _, tool := range t.deferredTools {
-		schema := tool.Tool(ctx)
-		if schema.OfFunction == nil {
+		descriptor := tool.GetToolDescriptor()
+		if descriptor == nil || descriptor.ToolUnion.OfFunction == nil {
 			continue
 		}
-		haystack := strings.ToLower(schema.OfFunction.Name)
-		if schema.OfFunction.Description != nil {
-			haystack += " " + strings.ToLower(*schema.OfFunction.Description)
+		schema := descriptor.ToolUnion.OfFunction
+		haystack := strings.ToLower(schema.Name)
+		if schema.Description != nil {
+			haystack += " " + strings.ToLower(*schema.Description)
 		}
 		score := 0
 		for _, term := range terms {
@@ -131,7 +132,7 @@ func (t *ToolSearchTool) keywordSearch(ctx context.Context, query string, maxRes
 			}
 		}
 		if score > 0 {
-			matches = append(matches, scored{name: schema.OfFunction.Name, score: score})
+			matches = append(matches, scored{name: schema.Name, score: score})
 		}
 	}
 

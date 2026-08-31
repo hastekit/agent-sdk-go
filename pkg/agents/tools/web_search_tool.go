@@ -13,14 +13,12 @@ type WebSearchTool struct {
 
 func NewWebSearchTool() *WebSearchTool {
 	return &WebSearchTool{
-		BaseTool: &agents.BaseTool{},
+		BaseTool: &agents.BaseTool{
+			ToolUnion: responses.ToolUnion{OfWebSearch: &responses.WebSearchTool{}},
+		},
 	}
 }
 
 func (t *WebSearchTool) Execute(ctx context.Context, params *agents.ToolCall) (*agents.ToolCallResponse, error) {
 	return nil, nil
-}
-
-func (t *WebSearchTool) Tool(ctx context.Context) *responses.ToolUnion {
-	return &responses.ToolUnion{OfWebSearch: &responses.WebSearchTool{}}
 }

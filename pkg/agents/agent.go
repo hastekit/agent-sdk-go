@@ -473,7 +473,7 @@ func (e *Agent) ExecuteWithRun(ctx context.Context, in *AgentInput, run *history
 	if len(tools) > 0 {
 		// Collect deferred tools
 		for _, coreTool := range tools {
-			if coreTool.IsDeferred() {
+			if descriptor := coreTool.GetToolDescriptor(); descriptor != nil && descriptor.Deferred {
 				deferredTools = append(deferredTools, coreTool)
 			}
 		}
@@ -484,16 +484,15 @@ func (e *Agent) ExecuteWithRun(ctx context.Context, in *AgentInput, run *history
 		}
 
 		// Convert core tools to tool definitions
-		toolDefs = make([]responses.ToolUnion, len(tools)-len(deferredTools))
-		idx := 0
+		toolDefs = make([]responses.ToolUnion, 0, len(tools)-len(deferredTools))
 		for _, coreTool := range tools {
-			// Skip deferred tools
-			if coreTool.IsDeferred() {
+			// Skip deferred tools, and any that cannot describe themselves.
+			descriptor := coreTool.GetToolDescriptor()
+			if descriptor == nil || descriptor.Deferred {
 				continue
 			}
 
-			toolDefs[idx] = *coreTool.Tool(ctx)
-			idx += 1
+			toolDefs = append(toolDefs, descriptor.ToolUnion)
 		}
 	}
 
@@ -511,13 +510,14 @@ func (e *Agent) ExecuteWithRun(ctx context.Context, in *AgentInput, run *history
 		if len(deferredTools) > 0 {
 			deferredToolInfos = make([]DeferredToolInfo, 0, len(deferredTools))
 			for _, dt := range deferredTools {
-				schema := dt.Tool(ctx)
-				if schema == nil || schema.OfFunction == nil {
+				descriptor := dt.GetToolDescriptor()
+				if descriptor == nil || descriptor.ToolUnion.OfFunction == nil {
 					continue
 				}
-				info := DeferredToolInfo{Name: schema.OfFunction.Name}
-				if schema.OfFunction.Description != nil {
-					info.Description = strings.SplitN(strings.TrimPrefix(*schema.OfFunction.Description, "\n"), "\n", 2)[0]
+				schema := descriptor.ToolUnion.OfFunction
+				info := DeferredToolInfo{Name: schema.Name}
+				if schema.Description != nil {
+					info.Description = strings.SplitN(strings.TrimPrefix(*schema.Description, "\n"), "\n", 2)[0]
 				}
 				deferredToolInfos = append(deferredToolInfos, info)
 			}
@@ -662,8 +662,12 @@ func (e *Agent) ExecuteWithRun(ctx context.Context, in *AgentInput, run *history
 			if str, ok := run.State["activated_deferred_tools"]; ok {
 				activatedToolNames := strings.Split(str, ",")
 				for _, tool := range deferredTools {
-					if t := tool.Tool(ctx); t.OfFunction != nil && slices.Contains(activatedToolNames, t.OfFunction.Name) {
-						activatedDeferredToolsDef = append(activatedDeferredToolsDef, *t)
+					descriptor := tool.GetToolDescriptor()
+					if descriptor == nil || descriptor.ToolUnion.OfFunction == nil {
+						continue
+					}
+					if slices.Contains(activatedToolNames, descriptor.ToolUnion.OfFunction.Name) {
+						activatedDeferredToolsDef = append(activatedDeferredToolsDef, descriptor.ToolUnion)
 					}
 				}
 			}
@@ -758,7 +762,7 @@ func (e *Agent) ExecuteWithRun(ctx context.Context, in *AgentInput, run *history
 				run.RunState.TransitionToComplete()
 			} else {
 				// Partition tools by approval requirement
-				needsApproval, immediate := partitionByApproval(ctx, tools, toolCalls)
+				needsApproval, immediate := partitionByApproval(tools, toolCalls)
 
 				// Execute immediate tools first (if any), then handle approval
 				if len(immediate) > 0 {
@@ -830,7 +834,7 @@ func (e *Agent) ExecuteWithRun(ctx context.Context, in *AgentInput, run *history
 					}
 				} else {
 					// Regular tool — queue for parallel execution
-					tool := findTool(ctx, tools, toolCall.Name)
+					tool := findTool(tools, toolCall.Name)
 					if tool == nil {
 						slog.ErrorContext(ctx, "tool not found", slog.String("tool_name", toolCall.Name))
 						toolResults[i] = toolResponse(toolCall, "Tool not found: "+toolCall.Name)

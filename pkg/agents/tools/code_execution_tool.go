@@ -12,20 +12,20 @@ type CodeExecutionTool struct {
 }
 
 func NewCodeExecutionTool() *CodeExecutionTool {
-	return &CodeExecutionTool{}
+	return &CodeExecutionTool{
+		BaseTool: &agents.BaseTool{
+			ToolUnion: responses.ToolUnion{OfCodeExecution: &responses.CodeExecutionTool{
+				Container: &responses.CodeExecutionToolContainerUnion{
+					ContainerConfig: &responses.CodeExecutionToolContainerConfig{
+						Type:        "auto",
+						MemoryLimit: "4g",
+					},
+				},
+			}},
+		},
+	}
 }
 
 func (t *CodeExecutionTool) Execute(ctx context.Context, params *agents.ToolCall) (*agents.ToolCallResponse, error) {
 	return nil, nil
-}
-
-func (t *CodeExecutionTool) Tool(ctx context.Context) *responses.ToolUnion {
-	return &responses.ToolUnion{OfCodeExecution: &responses.CodeExecutionTool{
-		Container: &responses.CodeExecutionToolContainerUnion{
-			ContainerConfig: &responses.CodeExecutionToolContainerConfig{
-				Type:        "auto",
-				MemoryLimit: "4g",
-			},
-		},
-	}}
 }

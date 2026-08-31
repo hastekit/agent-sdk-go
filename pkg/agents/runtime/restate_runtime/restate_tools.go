@@ -4,7 +4,6 @@ import (
 	"context"
 
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
-	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
 	restate "github.com/restatedev/sdk-go"
 )
 
@@ -36,21 +35,9 @@ func (t *RestateTool) Execute(ctx context.Context, params *agents.ToolCall) (*ag
 	}, restate.WithName(params.Name+"_ToolCall"))
 }
 
-func (t *RestateTool) Tool(ctx context.Context) *responses.ToolUnion {
-	return t.wrappedTool.Tool(ctx)
-}
-
-func (t *RestateTool) NeedApproval() bool {
-	return t.wrappedTool.NeedApproval()
-}
-
-func (t *RestateTool) IsDeferred() bool {
-	return t.wrappedTool.IsDeferred()
-}
-
-// GetBaseTool reports the wrapped tool's own identity, not this wrapper's: the
-// wrapper is a way of running the tool, not a different tool, and it is what a
-// hook is shown.
-func (t *RestateTool) GetBaseTool() (*agents.BaseTool, error) {
-	return t.wrappedTool.GetBaseTool()
+// GetToolDescriptor reports the wrapped tool's own identity, not this
+// wrapper's: the wrapper is a way of running the tool, not a different tool,
+// and it is what the loop reads and what a hook is shown.
+func (t *RestateTool) GetToolDescriptor() *agents.BaseTool {
+	return t.wrappedTool.GetToolDescriptor()
 }

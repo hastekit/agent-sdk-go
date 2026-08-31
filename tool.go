@@ -227,36 +227,25 @@ func (t *FunctionTool[T, S]) Execute(ctx context.Context, params *agents.ToolCal
 	}, nil
 }
 
-func (t *FunctionTool[T, S]) Tool(ctx context.Context) *responses.ToolUnion {
+// GetToolDescriptor implements agents.Tool. A function tool keeps its state in
+// its own fields rather than an embedded BaseTool, so the projection is built
+// here — schema included, from the input type's own shape. Name is left empty:
+// the tool has one name, and it is the one in ToolUnion.
+func (t *FunctionTool[T, S]) GetToolDescriptor() *agents.BaseTool {
 	var in T
 
-	return &responses.ToolUnion{
-		OfFunction: &responses.FunctionTool{
-			Name:        t.name,
-			Description: utils.Ptr(t.description),
-			Parameters:  NewOutputSchema(in),
-			Strict:      utils.Ptr(false),
-		},
-	}
-}
-
-func (t *FunctionTool[T, S]) NeedApproval() bool {
-	return t.needsApproval
-}
-
-func (t *FunctionTool[T, S]) IsDeferred() bool {
-	return t.deferred
-}
-
-// GetBaseTool implements agents.Tool. A function tool keeps its state in its own
-// fields rather than an embedded BaseTool, so the projection is built here.
-// Name is left empty: the tool has one name, and it is the one in ToolUnion.
-func (t *FunctionTool[T, S]) GetBaseTool() (*agents.BaseTool, error) {
 	return &agents.BaseTool{
-		ToolUnion:        *t.Tool(context.Background()),
+		ToolUnion: responses.ToolUnion{
+			OfFunction: &responses.FunctionTool{
+				Name:        t.name,
+				Description: utils.Ptr(t.description),
+				Parameters:  NewOutputSchema(in),
+				Strict:      utils.Ptr(false),
+			},
+		},
 		RequiresApproval: t.needsApproval,
 		Deferred:         t.deferred,
 		Annotations:      t.annotations,
 		Meta:             t.meta,
-	}, nil
+	}
 }

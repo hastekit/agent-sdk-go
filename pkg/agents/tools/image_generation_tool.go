@@ -13,17 +13,15 @@ type ImageGenerationTool struct {
 
 func NewImageGenerationTool() *ImageGenerationTool {
 	return &ImageGenerationTool{
-		BaseTool: &agents.BaseTool{},
+		BaseTool: &agents.BaseTool{
+			ToolUnion: responses.ToolUnion{OfImageGeneration: &responses.ImageGenerationTool{
+				Size:    "1024x1024",
+				Quality: "low",
+			}},
+		},
 	}
 }
 
 func (t *ImageGenerationTool) Execute(ctx context.Context, params *agents.ToolCall) (*agents.ToolCallResponse, error) {
 	return nil, nil
-}
-
-func (t *ImageGenerationTool) Tool(ctx context.Context) *responses.ToolUnion {
-	return &responses.ToolUnion{OfImageGeneration: &responses.ImageGenerationTool{
-		Size:    "1024x1024",
-		Quality: "low",
-	}}
 }

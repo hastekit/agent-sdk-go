@@ -72,24 +72,20 @@ func TestReadSkillErrorsOnUnknownSkill(t *testing.T) {
 func TestReadSkillIsAnnotatedReadOnly(t *testing.T) {
 	tool := readSkillTool(t)
 
-	if !skillAnnotations(t, tool).IsReadOnly() {
+	descriptor := skillDescriptor(tool)
+	if !descriptor.Annotations.IsReadOnly() {
 		t.Error("read_skill is not annotated read-only")
 	}
-	if tool.NeedApproval() {
+	if descriptor.RequiresApproval {
 		t.Error("read_skill asks for approval")
 	}
-	if name := tool.Tool(context.Background()).OfFunction.Name; name != "read_skill" {
+	if name := descriptor.ToolUnion.OfFunction.Name; name != "read_skill" {
 		t.Errorf("tool name = %q", name)
 	}
 }
 
-// skillAnnotations reads the tool's annotations the one way there is: through
-// the BaseTool it reports.
-func skillAnnotations(t *testing.T, tool agents.Tool) *agents.ToolAnnotations {
-	t.Helper()
-	base, err := tool.GetBaseTool()
-	if err != nil {
-		t.Fatalf("GetBaseTool: %v", err)
-	}
-	return base.Annotations
+// skillDescriptor reads the tool's schema and flags the one way there is:
+// through the BaseTool it reports.
+func skillDescriptor(tool agents.Tool) *agents.BaseTool {
+	return tool.GetToolDescriptor()
 }

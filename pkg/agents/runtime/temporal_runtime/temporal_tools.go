@@ -4,7 +4,6 @@ import (
 	"context"
 
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
-	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
 	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/workflow"
 )
@@ -72,26 +71,14 @@ func (t *TemporalToolProxy) Execute(ctx context.Context, params *agents.ToolCall
 	return output, nil
 }
 
-func (t *TemporalToolProxy) Tool(ctx context.Context) *responses.ToolUnion {
-	return t.wrappedTool.Tool(ctx)
-}
-
-func (t *TemporalToolProxy) NeedApproval() bool {
-	return t.wrappedTool.NeedApproval()
-}
-
-func (t *TemporalToolProxy) IsDeferred() bool {
-	return t.wrappedTool.IsDeferred()
-}
-
-// GetBaseTool reports the wrapped tool's own identity, not this wrapper's: the
-// wrapper is a way of running the tool, not a different tool, and it is what a
-// hook is shown.
-func (t *TemporalToolProxy) GetBaseTool() (*agents.BaseTool, error) {
+// GetToolDescriptor reports the wrapped tool's own identity, not this
+// wrapper's: the wrapper is a way of running the tool, not a different tool,
+// and it is what the loop reads and what a hook is shown.
+func (t *TemporalToolProxy) GetToolDescriptor() *agents.BaseTool {
 	// Nil-safe because this one is asked on every tool call, by the hook runner,
 	// where losing the tool's identity is a far better outcome than a panic.
 	if t.wrappedTool == nil {
-		return &agents.BaseTool{}, nil
+		return &agents.BaseTool{}
 	}
-	return t.wrappedTool.GetBaseTool()
+	return t.wrappedTool.GetToolDescriptor()
 }

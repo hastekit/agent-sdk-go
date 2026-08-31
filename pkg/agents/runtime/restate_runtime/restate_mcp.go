@@ -34,17 +34,15 @@ func (t *RestateMCPServer) ListTools(ctx context.Context, runContext map[string]
 			return nil, toolsetListError(err)
 		}
 
-		// GetBaseTool rather than a field-by-field copy: this is the only
+		// GetToolDescriptor rather than a field-by-field copy: this is the only
 		// crossing a tool makes into the workflow, and anything left out here
 		// is gone for good on the far side — the tool's own name and its meta
 		// included, which is exactly what a hook over there is looking at.
 		var tools []agents.BaseTool
 		for _, tool := range mcpTools {
-			encoded, err := tool.GetBaseTool()
-			if err != nil {
-				return nil, err
+			if encoded := tool.GetToolDescriptor(); encoded != nil {
+				tools = append(tools, *encoded)
 			}
-			tools = append(tools, *encoded)
 		}
 
 		return tools, nil
@@ -111,7 +109,8 @@ func (t *RestateMCPTool) callTool(ctx context.Context, params *agents.ToolCall) 
 		return nil, err
 	}
 	for _, tool := range mcpTools {
-		if td := tool.Tool(ctx); td != nil && td.OfFunction != nil && params.Name == td.OfFunction.Name {
+		td := tool.GetToolDescriptor()
+		if td != nil && td.ToolUnion.OfFunction != nil && params.Name == td.ToolUnion.OfFunction.Name {
 			return tool.Execute(ctx, params)
 		}
 	}

@@ -139,9 +139,9 @@ func WithSkillTool(tools []Tool, provider SkillProvider) []Tool {
 	// reader tool already wrapped as a workflow step, and then rebuilds the
 	// agent from the same options. Keep the one that is there: replacing a
 	// proxy with a raw tool would run the read outside the workflow's journal.
-	name := functionToolName(tool)
+	name := functionName(tool)
 	for _, existing := range tools {
-		if functionToolName(existing) == name {
+		if functionName(existing) == name {
 			return tools
 		}
 	}
@@ -150,14 +150,6 @@ func WithSkillTool(tools []Tool, provider SkillProvider) []Tool {
 	withTool = append(withTool, tools...)
 
 	return append(withTool, tool)
-}
-
-func functionToolName(tool Tool) string {
-	schema := tool.Tool(context.Background())
-	if schema == nil || schema.OfFunction == nil {
-		return ""
-	}
-	return schema.OfFunction.Name
 }
 
 // skillDependencies flattens a skill source into what the prompt needs: the

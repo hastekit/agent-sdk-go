@@ -74,7 +74,7 @@ func TestListMCPToolsActivity_CarriesAnnotations(t *testing.T) {
 
 	// No annotations stays no annotations rather than becoming a claim.
 	assert.Nil(t, got[2].Annotations)
-	assert.True(t, got[2].NeedApproval(), "the approval flag rides along as before")
+	assert.True(t, got[2].RequiresApproval, "the approval flag rides along as before")
 }
 
 // The workflow-side proxy wraps a tool rather than embedding its BaseTool, so
@@ -92,7 +92,5 @@ func TestTemporalToolProxy_ForwardsAnnotations(t *testing.T) {
 // BaseTool it reports. Nil is a usable answer — every Is* helper is nil-safe.
 func annotationsOf(t *testing.T, tool agents.Tool) *agents.ToolAnnotations {
 	t.Helper()
-	base, err := tool.GetBaseTool()
-	require.NoError(t, err)
-	return base.Annotations
+	return tool.GetToolDescriptor().Annotations
 }

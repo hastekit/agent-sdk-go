@@ -199,7 +199,8 @@ func getWeather(ctx context.Context, args WeatherArgs) (Weather, error) {
 
 weatherTool := hastekit.NewTool(getWeather,
     hastekit.WithName("get_weather"), // optional; defaults to the function name
-    hastekit.WithDescription[WeatherArgs, Weather]("Get current weather for a location"),
+    hastekit.WithDescription("Get current weather for a location"),
+    hastekit.WithReadOnly(true), // optional behavioural hint
 )
 
 // Use the tool
@@ -211,12 +212,40 @@ agent := hastekit.NewAgent(&hastekit.AgentConfig{
 })
 ```
 
-> `WithDescription`, `WithNeedsApproval`, and `WithDeferred` take explicit
-> `[ArgsType, ReturnType]` type parameters; `WithName` does not.
+Tools that implement the `agents.Tool` interface directly also work and can be
+mixed into the same `Tools` slice. The interface is two methods — `Execute`, and
+`GetToolDescriptor() *agents.BaseTool` for the tool's schema, name and flags —
+and embedding `agents.BaseTool` supplies the second one, so a hand-written tool
+only defines `Execute`:
 
-Tools that implement the `agents.Tool` interface directly (embedding
-`agents.BaseTool` and defining `Execute`) also work and can be mixed into the
-same `Tools` slice.
+```go
+type DeleteUserTool struct {
+    *agents.BaseTool
+}
+
+func NewDeleteUserTool() *DeleteUserTool {
+    return &DeleteUserTool{
+        BaseTool: &agents.BaseTool{
+            RequiresApproval: true,
+            ToolUnion: responses.ToolUnion{
+                OfFunction: &responses.FunctionTool{
+                    Name:        "delete_user",
+                    Description: utils.Ptr("Permanently deletes a user account"),
+                    Parameters: map[string]any{
+                        "type":       "object",
+                        "properties": map[string]any{"user_id": map[string]any{"type": "string"}},
+                        "required":   []string{"user_id"},
+                    },
+                },
+            },
+        },
+    }
+}
+
+func (t *DeleteUserTool) Execute(ctx context.Context, params *agents.ToolCall) (*agents.ToolCallResponse, error) {
+    // Your logic here
+}
+```
 
 #### Sub-Agents
 
@@ -485,14 +514,15 @@ writeTool := hastekit.NewTool(deleteUser,
 )
 ```
 
-MCP tools carry whatever their server declared; nothing extra is needed to pick them up. Read the hints back from any tool with `agents.AnnotationsOf(tool)`:
+MCP tools carry whatever their server declared; nothing extra is needed to pick them up. Read the hints back off the tool's descriptor:
 
 ```go
-a := agents.AnnotationsOf(tool)
-if a.IsDestructive() {
+if tool.GetToolDescriptor().Annotations.IsDestructive() {
     // gate it — see Hooks below
 }
 ```
+
+A tool call hook is handed the same descriptor, which is where a policy usually reads them.
 
 Every hint is a pointer, so "nothing was said" stays distinguishable from "false was said". Prefer the `Is*` helpers over reading fields directly: they are nil-safe and apply MCP's defaults, which are deliberately conservative — an unset `DestructiveHint` reads as destructive, an unset `ReadOnlyHint` as not read-only.
 
@@ -665,7 +695,7 @@ agent := hastekit.NewAgent(&hastekit.AgentConfig{
 })
 ```
 
-The tool-call side has the same shape. Combined with annotations, a policy hook is a few lines:
+The tool-call side is the same, with the tool the call is against handed over alongside it. Combined with annotations, a policy hook is a few lines:
 
 ```go
 type policy struct {
@@ -674,8 +704,8 @@ type policy struct {
 
 func (p *policy) GetName() string { return "policy" }
 
-func (p *policy) BeforeToolCall(ctx context.Context, call *agents.ToolCall) (agents.ToolCallHookResult, error) {
-    if !allowed(call.RunContext, call.Name) {
+func (p *policy) BeforeToolCall(ctx context.Context, tool *agents.BaseTool, call *agents.ToolCall) (agents.ToolCallHookResult, error) {
+    if tool.Annotations.IsDestructive() && !allowed(call.RunContext, call.Name) {
         // Short-circuit: the tool never runs, and this stands in as its output.
         return agents.HandleToolCall(
             agents.ToolCallResult(call, "Denied by policy."),
@@ -684,7 +714,7 @@ func (p *policy) BeforeToolCall(ctx context.Context, call *agents.ToolCall) (age
     return agents.ContinueToolCall(), nil
 }
 
-func (p *policy) AfterToolCall(ctx context.Context, call *agents.ToolCall, resp *agents.ToolCallResponse) (agents.ToolCallHookResult, error) {
+func (p *policy) AfterToolCall(ctx context.Context, tool *agents.BaseTool, call *agents.ToolCall, resp *agents.ToolCallResponse) (agents.ToolCallHookResult, error) {
     audit(call.Name, call.RunContext)
     return agents.ContinueToolCall(), nil
 }
@@ -694,6 +724,7 @@ Notes:
 
 - **`Handled` is explicit.** `ContinueToolCall()` passes the call along; `HandleToolCall(resp)` says the hook answered and the real call never happens. It's a flag rather than a nil check, because "I answered, and the answer is nothing to say" differs from "carry on without me".
 - **Run context comes along.** `call.RunContext` is the per-run map you set on `AgentInput`, so per-tenant data (a JWT, an org id) is available without threading it through every tool.
+- **The tool arrives as plain data.** `tool` is the same `*agents.BaseTool` its `GetToolDescriptor` returns — name, schema, annotations, meta — because the real tool may be a proxy for one running in another process. It is always non-nil.
 - **`GetName()` must be unique per agent and stable across deploys.** Durable runtimes name each hook's journaled step after it, so a renamed hook is a new step on replay.
 - **Hooks run as their own durable steps.** Under Restate or Temporal each hook call is journaled, so a check that talks to a billing service is not re-run on every replay.
 - **A `BeforeModelCall` hook sees the shape of the call, not the prompt** — model, tenant, loop iteration, `ContextTokens`, and usage so far. That's what a budget check needs, and it keeps the conversation from crossing a durable boundary twice.

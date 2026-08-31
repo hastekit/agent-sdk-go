@@ -44,9 +44,9 @@ func ExecuteWithTrace(
 		attribute.String(genai.AttrToolArguments, params.Arguments),
 		attribute.String(genai.AttrSessionID, params.ThreadID),
 	)
-	if tool != nil {
-		if def := tool.Tool(ctx); def != nil && def.OfFunction != nil && def.OfFunction.Description != nil {
-			span.SetAttributes(attribute.String(genai.AttrToolDescription, *def.OfFunction.Description))
+	if descriptor := toolDescriptor(tool); descriptor != nil {
+		if fn := descriptor.ToolUnion.OfFunction; fn != nil && fn.Description != nil {
+			span.SetAttributes(attribute.String(genai.AttrToolDescription, *fn.Description))
 		}
 	}
 	defer span.End()

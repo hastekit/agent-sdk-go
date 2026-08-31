@@ -64,7 +64,7 @@ func TestStdioTransport_ListsAndCallsTools(t *testing.T) {
 	tools, err := client.ListTools(ctx, nil)
 	require.NoError(t, err)
 	require.Len(t, tools, 1)
-	assert.Equal(t, "whoami", tools[0].Tool(ctx).OfFunction.Name)
+	assert.Equal(t, "whoami", tools[0].GetToolDescriptor().ToolUnion.OfFunction.Name)
 
 	res, err := tools[0].Execute(ctx, whoamiCall())
 	require.NoError(t, err)
@@ -82,7 +82,7 @@ func TestStdioTransport_HonoursPrefixAndFilter(t *testing.T) {
 	tools, err := client.ListTools(ctx, nil)
 	require.NoError(t, err)
 	require.Len(t, tools, 1)
-	assert.Equal(t, "local__whoami", tools[0].Tool(ctx).OfFunction.Name)
+	assert.Equal(t, "local__whoami", tools[0].GetToolDescriptor().ToolUnion.OfFunction.Name)
 
 	res, err := tools[0].Execute(ctx, echoCall("local__whoami"))
 	require.NoError(t, err)

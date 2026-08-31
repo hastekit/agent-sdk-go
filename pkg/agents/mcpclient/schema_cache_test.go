@@ -209,7 +209,7 @@ func TestFilterAndPrefixShareOneCacheEntry(t *testing.T) {
 	all, err := unfiltered.ListTools(ctx, nil)
 	require.NoError(t, err)
 	require.Len(t, all, 1)
-	assert.Equal(t, "echo", all[0].Tool(ctx).OfFunction.Name)
+	assert.Equal(t, "echo", all[0].GetToolDescriptor().ToolUnion.OfFunction.Name)
 
 	none, err := filtered.ListTools(ctx, nil)
 	require.NoError(t, err)
@@ -218,7 +218,7 @@ func TestFilterAndPrefixShareOneCacheEntry(t *testing.T) {
 	renamed, err := prefixed.ListTools(ctx, nil)
 	require.NoError(t, err)
 	require.Len(t, renamed, 1)
-	assert.Equal(t, "xyz__echo", renamed[0].Tool(ctx).OfFunction.Name)
+	assert.Equal(t, "xyz__echo", renamed[0].GetToolDescriptor().ToolUnion.OfFunction.Name)
 
 	assert.Equal(t, 1, lists(), "one listing served all three")
 	assert.Equal(t, []string{"mcp:schema:cached"}, cache.keys())

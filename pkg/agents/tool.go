@@ -49,14 +49,18 @@ type ToolCallResponse struct {
 
 type Tool interface {
 	Execute(ctx context.Context, params *ToolCall) (*ToolCallResponse, error)
-	Tool(ctx context.Context) *responses.ToolUnion
-	NeedApproval() bool
-	IsDeferred() bool
 
-	// GetBaseTool projects the tool onto the plain data every tool has in
-	// common, which is the only form of it that can cross a durable runtime's
-	// boundary or reach a hook. Embedding *BaseTool satisfies this.
-	GetBaseTool() (*BaseTool, error)
+	// GetToolDescriptor projects the tool onto the plain data every tool has in
+	// common — its schema, its name, and the flags the loop reads off it. That
+	// projection is the only form of the tool that can cross a durable
+	// runtime's boundary or reach a hook, and it is also what the loop itself
+	// reads, so a tool describes itself in exactly one place. Embedding
+	// *BaseTool satisfies this.
+	//
+	// Describing itself is not something a tool is allowed to fail at: nil is
+	// the only way to say nothing, and every caller treats a tool that says
+	// nothing as one that is not there.
+	GetToolDescriptor() *BaseTool
 }
 
 type BaseTool struct {
@@ -78,29 +82,37 @@ type BaseTool struct {
 	Meta        map[string]any
 }
 
-func (t *BaseTool) NeedApproval() bool {
-	return t.RequiresApproval
+// GetToolDescriptor implements Tool. A tool that embeds *BaseTool is already
+// the plain data, so this hands back the embedded value itself.
+func (t *BaseTool) GetToolDescriptor() *BaseTool {
+	return t
 }
 
-func (t *BaseTool) IsDeferred() bool {
-	return t.Deferred
+// toolDescriptor is GetToolDescriptor for the call sites that hold a tool they
+// may not have found — a nil tool describes itself as nothing, same as a tool
+// that has nothing to say.
+func toolDescriptor(tool Tool) *BaseTool {
+	if tool == nil {
+		return nil
+	}
+	return tool.GetToolDescriptor()
 }
 
-func (t *BaseTool) Tool(ctx context.Context) *responses.ToolUnion {
-	return &t.ToolUnion
-}
-
-// GetBaseTool implements Tool. A tool that embeds *BaseTool is already the
-// plain data, so this hands back the embedded value itself.
-func (t *BaseTool) GetBaseTool() (*BaseTool, error) {
-	return t, nil
+// functionName is the model-facing name of a tool, or "" for one that is not a
+// function tool (a provider-side web search, say) or does not describe itself.
+func functionName(tool Tool) string {
+	descriptor := toolDescriptor(tool)
+	if descriptor == nil || descriptor.ToolUnion.OfFunction == nil {
+		return ""
+	}
+	return descriptor.ToolUnion.OfFunction.Name
 }
 
 // partitionByApproval splits tool calls into those needing approval and those that can execute immediately
-func partitionByApproval(ctx context.Context, tools []Tool, toolCalls []responses.FunctionCallMessage) (needsApproval []responses.FunctionCallMessage, immediate []responses.FunctionCallMessage) {
+func partitionByApproval(tools []Tool, toolCalls []responses.FunctionCallMessage) (needsApproval []responses.FunctionCallMessage, immediate []responses.FunctionCallMessage) {
 	for _, toolCall := range toolCalls {
-		tool := findTool(ctx, tools, toolCall.Name)
-		if tool != nil && tool.NeedApproval() {
+		tool := findTool(tools, toolCall.Name)
+		if descriptor := toolDescriptor(tool); descriptor != nil && descriptor.RequiresApproval {
 			needsApproval = append(needsApproval, toolCall)
 		} else {
 			immediate = append(immediate, toolCall)
@@ -110,9 +122,9 @@ func partitionByApproval(ctx context.Context, tools []Tool, toolCalls []response
 }
 
 // findTool finds a tool by name
-func findTool(ctx context.Context, tools []Tool, toolName string) Tool {
+func findTool(tools []Tool, toolName string) Tool {
 	for _, tool := range tools {
-		if t := tool.Tool(ctx); t != nil && t.OfFunction != nil && t.OfFunction.Name == toolName {
+		if name := functionName(tool); name != "" && name == toolName {
 			return tool
 		}
 	}

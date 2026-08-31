@@ -12,7 +12,7 @@ import (
 
 func deferredTool(name, description string) agents.Tool {
 	// fakeTool (from agent_test.go) supplies the Execute method BaseTool
-	// lacks; ToolSearch only ever reads Tool()/IsDeferred(), never calls
+	// lacks; ToolSearch only ever reads the tool's descriptor, never calls
 	// Execute, so the tool body is irrelevant here.
 	return &fakeTool{
 		BaseTool: &agents.BaseTool{

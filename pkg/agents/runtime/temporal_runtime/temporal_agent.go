@@ -167,7 +167,8 @@ func (a *TemporalAgentV2) newTemporalProxyAgent(ctx workflow.Context) *agents.Ag
 
 func getToolName(prefix string, tool agents.Tool) string {
 	toolName := ""
-	if t := tool.Tool(context.Background()); t != nil {
+	if descriptor := tool.GetToolDescriptor(); descriptor != nil {
+		t := descriptor.ToolUnion
 		if t.OfFunction != nil {
 			toolName = t.OfFunction.Name
 		}

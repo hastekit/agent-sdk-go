@@ -11,47 +11,24 @@ import (
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/history"
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
-	"github.com/hastekit/agent-sdk-go/pkg/utils"
 )
 
-type CustomTool struct {
-	*agents.BaseTool
+// GetUserNameInput is the tool's argument. The field tags are what the model
+// is shown: NewTool derives the tool's JSON schema from this struct, so there
+// is no hand-written parameter schema to keep in step with the function.
+type GetUserNameInput struct {
+	UserID string `json:"user_id" jsonschema_description:"The user ID to look up"`
 }
 
-func NewCustomTool() *CustomTool {
-	return &CustomTool{
-		BaseTool: &agents.BaseTool{
-			ToolUnion: responses.ToolUnion{
-				OfFunction: &responses.FunctionTool{
-					Name:        "get_user_name",
-					Description: utils.Ptr("Returns the user's name"),
-					Parameters: map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"user_id": map[string]any{
-								"type":        "string",
-								"description": "The user ID to look up",
-							},
-						},
-						"required": []string{"user_id"},
-					},
-				},
-			},
-		},
-	}
+type GetUserNameOutput struct {
+	Name string `json:"name"`
 }
 
-func (t *CustomTool) Execute(ctx context.Context, params *agents.ToolCall) (*agents.ToolCallResponse, error) {
-	return &agents.ToolCallResponse{
-		FunctionCallOutputMessage: &responses.FunctionCallOutputMessage{
-			ID:     params.ID,
-			CallID: params.CallID,
-			Output: responses.FunctionCallOutputContentUnion{
-				OfString: utils.Ptr("Bob"),
-			},
-		},
-		StateUpdates: map[string]string{},
-	}, nil
+// GetUserName is an ordinary Go function. NewTool turns it into a tool: it
+// unmarshals the model's arguments into the input struct, calls this, and
+// marshals what comes back as the tool's result.
+func GetUserName(ctx context.Context, in GetUserNameInput) (GetUserNameOutput, error) {
+	return GetUserNameOutput{Name: "Bob"}, nil
 }
 
 func main() {
@@ -76,7 +53,11 @@ func main() {
 		LLM:         model,
 		History:     hist,
 		Tools: []agents.Tool{
-			NewCustomTool(),
+			hastekit.NewTool(GetUserName,
+				hastekit.WithName("get_user_name"),
+				hastekit.WithDescription("Returns the user's name"),
+				hastekit.WithReadOnly(true),
+			),
 		},
 	})
 
