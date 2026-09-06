@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -23,6 +24,9 @@ type ClientOptions struct {
 	ApiKey  string
 	Headers map[string]string
 
+	// HTTPClient allows callers to configure timeouts and transports.
+	HTTPClient *http.Client
+
 	transport *http.Client
 }
 
@@ -32,6 +36,9 @@ type Client struct {
 }
 
 func NewClient(opts *ClientOptions) *Client {
+	if opts.transport == nil {
+		opts.transport = opts.HTTPClient
+	}
 	if opts.transport == nil {
 		opts.transport = http.DefaultClient
 	}
@@ -66,7 +73,7 @@ func (c *Client) NewResponses(ctx context.Context, inp *responses2.Request) (*re
 	}
 
 	reqURL := buildConverseURL(c.opts.BaseURL, inp.Model)
-	req, err := http.NewRequest(http.MethodPost, reqURL, bytes.NewBuffer(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewBuffer(payload))
 	if err != nil {
 		return nil, err
 	}
@@ -110,7 +117,7 @@ func (c *Client) NewStreamingResponses(ctx context.Context, inp *responses2.Requ
 	}
 
 	reqURL := buildConverseStreamURL(c.opts.BaseURL, inp.Model)
-	req, err := http.NewRequest(http.MethodPost, reqURL, bytes.NewBuffer(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewBuffer(payload))
 	if err != nil {
 		return nil, err
 	}
@@ -153,34 +160,39 @@ func (c *Client) NewStreamingResponses(ctx context.Context, inp *responses2.Requ
 
 	out := make(chan *responses2.ResponseChunk)
 
+	// The event stream is binary rather than SSE, so it cannot share
+	// base.StreamResponsesSSE, but it follows the same contract: a terminal
+	// failure reaches the caller as a chunk, undecodable events are skipped,
+	// and only the metadata event marks the response complete.
 	go func() {
-		defer res.Body.Close()
 		defer close(out)
+		defer res.Body.Close()
+		stop := context.AfterFunc(ctx, func() { _ = res.Body.Close() })
+		defer stop()
+		fail := func(err error) { base.SendResponseChunk(ctx, out, responses2.NewStreamError(err)) }
 
 		converter := bedrock_responses.NewConverseStreamToNativeConverter(inp.Model)
 
 		for {
 			msg, err := decodeEventStreamMessage(res.Body)
 			if err != nil {
-				if err == io.EOF || err == io.ErrUnexpectedEOF {
-					return
+				// The converter completes the response on the terminal
+				// metadata event, and that path has already returned by now.
+				// Reaching the end of the body here means the stream stopped
+				// early, which EOF alone cannot distinguish from success.
+				if err == io.EOF {
+					err = io.ErrUnexpectedEOF
 				}
-				slog.WarnContext(ctx, "error decoding bedrock event stream message", slog.Any("error", err))
+				fail(err)
 				return
 			}
 
-			// Check message type header
-			messageType := msg.Headers[":message-type"]
-			if messageType == "exception" {
-				slog.WarnContext(ctx, "bedrock streaming exception",
-					slog.String("exception-type", msg.Headers[":exception-type"]),
-					slog.String("payload", string(msg.Payload)),
-				)
+			switch msg.Headers[":message-type"] {
+			case "exception":
+				fail(bedrockStreamException(msg))
 				return
-			}
-
-			// Only process "event" messages
-			if messageType != "event" {
+			case "event":
+			default:
 				continue
 			}
 
@@ -188,7 +200,10 @@ func (c *Client) NewStreamingResponses(ctx context.Context, inp *responses2.Requ
 			eventType := msg.Headers[":event-type"]
 			event, err := bedrock_responses.UnmarshalEventPayload(eventType, msg.Payload)
 			if err != nil {
-				slog.WarnContext(ctx, "error decoding converse stream event",
+				// Bedrock adds event types independently of SDK releases. An
+				// event this build cannot decode is not evidence that the
+				// stream failed; keep reading for its terminal event.
+				slog.WarnContext(ctx, "skipping unrecognized converse stream event",
 					slog.String("event-type", eventType),
 					slog.Any("error", err),
 				)
@@ -196,10 +211,35 @@ func (c *Client) NewStreamingResponses(ctx context.Context, inp *responses2.Requ
 			}
 
 			for _, nativeChunk := range converter.ConvertEvent(event) {
-				out <- nativeChunk
+				if nativeChunk == nil {
+					continue
+				}
+				if !base.SendResponseChunk(ctx, out, nativeChunk) {
+					return
+				}
+				if nativeChunk.OfResponseCompleted != nil || nativeChunk.OfError != nil {
+					return
+				}
 			}
 		}
 	}()
 
 	return out, nil
+}
+
+// bedrockStreamException renders an event-stream exception message. Its payload
+// is JSON carrying a "message" field; fall back to the raw bytes when a new
+// exception shape does not match.
+func bedrockStreamException(msg *eventStreamMessage) error {
+	kind := msg.Headers[":exception-type"]
+	if kind == "" {
+		kind = "exception"
+	}
+	var payload struct {
+		Message string `json:"message"`
+	}
+	if err := sonic.Unmarshal(msg.Payload, &payload); err == nil && payload.Message != "" {
+		return fmt.Errorf("bedrock %s: %s", kind, payload.Message)
+	}
+	return fmt.Errorf("bedrock %s: %s", kind, string(msg.Payload))
 }

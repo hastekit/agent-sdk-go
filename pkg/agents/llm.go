@@ -2,6 +2,7 @@ package agents
 
 import (
 	"context"
+	"io"
 
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm"
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/constants"
@@ -21,6 +22,9 @@ func (l *WrappedLLM) NewStreamingResponses(ctx context.Context, in *responses.Re
 
 	stream, err := l.llm.NewStreamingResponses(ctx, in)
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ErrModelCallStopped
+		}
 		return nil, err
 	}
 
@@ -43,6 +47,7 @@ func (a *Accumulator) ReadStream(ctx context.Context, stream chan *responses.Res
 	// Process stream
 	finalOutput := []responses.OutputMessageUnion{}
 	var usage *responses.Usage
+	completed := false
 	for {
 		var chunk *responses.ResponseChunk
 		var open bool
@@ -59,6 +64,9 @@ func (a *Accumulator) ReadStream(ctx context.Context, stream chan *responses.Res
 				if ctx.Err() != nil {
 					return nil, ErrModelCallStopped
 				}
+				if !completed {
+					return nil, io.ErrUnexpectedEOF
+				}
 				return &responses.Response{Output: finalOutput, Usage: usage}, nil
 			}
 		case <-ctx.Done():
@@ -66,6 +74,13 @@ func (a *Accumulator) ReadStream(ctx context.Context, stream chan *responses.Res
 			return nil, ErrModelCallStopped
 		}
 
+		if chunk == nil {
+			continue
+		}
+		if chunk.OfError != nil {
+			go drain(stream)
+			return nil, chunk.OfError
+		}
 		cb(chunk)
 		switch chunk.ChunkType() {
 		case "response.output_item.done":
@@ -151,6 +166,7 @@ func (a *Accumulator) ReadStream(ctx context.Context, stream chan *responses.Res
 			}
 
 		case "response.completed":
+			completed = true
 			usage = &chunk.OfResponseCompleted.Response.Usage
 		}
 	}

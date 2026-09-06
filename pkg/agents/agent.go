@@ -1145,8 +1145,8 @@ type AgentHandle struct {
 // A tool call already running has its context cancelled, and is abandoned
 // after a grace period if it ignores that — it keeps running in the
 // background, unobserved. Each cancelled call gets a synthetic result so
-// history keeps its call/result pairing. An in-flight LLM call always
-// finishes streaming, so a stop during one lands at the next boundary.
+// history keeps its call/result pairing. An in-flight model request
+// has its context cancelled too, including while waiting for HTTP headers.
 //
 // Reaching a running tool needs a broker implementing StopWatcher (the
 // memory and Redis brokers do); the tool wrapper watches that flag

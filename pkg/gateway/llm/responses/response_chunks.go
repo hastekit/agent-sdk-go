@@ -13,6 +13,10 @@ import (
 // -----------------//
 
 type ResponseChunk struct {
+	// OfError is a terminal provider or transport failure. It survives broker
+	// serialization so remote consumers see the same failure as local callers.
+	OfError *StreamError `json:",omitempty"`
+
 	OfResponseCreated    *ChunkResponse[constants.ChunkTypeResponseCreated]    `json:",omitempty"`
 	OfResponseInProgress *ChunkResponse[constants.ChunkTypeResponseInProgress] `json:",omitempty"`
 	OfResponseCompleted  *ChunkResponse[constants.ChunkTypeResponseCompleted]  `json:",omitempty"`
@@ -73,6 +77,13 @@ type ResponseChunk struct {
 }
 
 func (u *ResponseChunk) UnmarshalJSON(data []byte) error {
+	if streamErr, err := ParseStreamError(data); err != nil {
+		return err
+	} else if streamErr != nil {
+		*u = ResponseChunk{OfError: streamErr}
+		return nil
+	}
+
 	var toolProgress *ChunkToolProgress[constants.ChunkTypeToolProgress]
 	if err := sonic.Unmarshal(data, &toolProgress); err == nil {
 		u.OfToolProgress = toolProgress
@@ -287,6 +298,10 @@ func (u *ResponseChunk) UnmarshalJSON(data []byte) error {
 }
 
 func (u *ResponseChunk) MarshalJSON() ([]byte, error) {
+	if u.OfError != nil {
+		return sonic.Marshal(u.OfError)
+	}
+
 	if u.OfResponseCreated != nil {
 		return sonic.Marshal(u.OfResponseCreated)
 	}
@@ -432,6 +447,10 @@ func (u *ResponseChunk) MarshalJSON() ([]byte, error) {
 }
 
 func (u *ResponseChunk) ChunkType() string {
+	if u.OfError != nil {
+		return "error"
+	}
+
 	if u.OfResponseCreated != nil {
 		return u.OfResponseCreated.Type.Value()
 	}

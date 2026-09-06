@@ -42,6 +42,9 @@ type ClientOptions struct {
 	ApiKey  string
 	Headers map[string]string
 
+	// HTTPClient allows callers to configure timeouts and transports.
+	HTTPClient *http.Client
+
 	transport *http.Client
 }
 
@@ -51,6 +54,9 @@ type Client struct {
 }
 
 func NewClient(opts *ClientOptions) *Client {
+	if opts.transport == nil {
+		opts.transport = opts.HTTPClient
+	}
 	if opts.transport == nil {
 		opts.transport = http.DefaultClient
 	}
@@ -72,7 +78,7 @@ func (c *Client) NewResponses(ctx context.Context, inp *responses2.Request) (*re
 		return nil, err
 	}
 
-	req, err := http.NewRequest(http.MethodPost, c.opts.BaseURL+"/responses", bytes.NewBuffer(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.opts.BaseURL+"/responses", bytes.NewBuffer(payload))
 	if err != nil {
 		return nil, err
 	}
@@ -107,7 +113,7 @@ func (c *Client) NewStreamingResponses(ctx context.Context, inp *responses2.Requ
 		return nil, err
 	}
 
-	req, err := http.NewRequest(http.MethodPost, c.opts.BaseURL+"/responses", bytes.NewBuffer(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.opts.BaseURL+"/responses", bytes.NewBuffer(payload))
 	if err != nil {
 		return nil, err
 	}
@@ -126,34 +132,13 @@ func (c *Client) NewStreamingResponses(ctx context.Context, inp *responses2.Requ
 		return nil, base.ParseErrorResponse(res)
 	}
 
-	out := make(chan *responses2.ResponseChunk)
-
-	go func() {
-		defer res.Body.Close()
-		defer close(out)
-		reader := bufio.NewReader(res.Body)
-
-		for {
-			line, err := reader.ReadString('\n')
-			if err != nil {
-				return
-			}
-
-			line = strings.TrimRight(line, "\r\n")
-			//fmt.Println(line)
-			if strings.HasPrefix(line, "data:") {
-				openAiResponseChunk := &openai_responses2.ResponseChunk{}
-				err = sonic.Unmarshal([]byte(strings.TrimPrefix(line, "data:")), openAiResponseChunk)
-				if err != nil {
-					slog.WarnContext(ctx, "unable to unmarshal openai response chunk", slog.String("data", line), slog.Any("error", err))
-					continue
-				}
-				out <- openAiResponseChunk.ToNativeResponseChunk()
-			}
+	return base.StreamResponsesSSE(ctx, res.Body, func(data []byte) ([]*responses2.ResponseChunk, error) {
+		chunk := &openai_responses2.ResponseChunk{}
+		if err := sonic.Unmarshal(data, chunk); err != nil {
+			return nil, err
 		}
-	}()
-
-	return out, nil
+		return []*responses2.ResponseChunk{chunk.ToNativeResponseChunk()}, nil
+	}), nil
 }
 
 func (c *Client) NewEmbedding(ctx context.Context, inp *embeddings2.Request) (*embeddings2.Response, error) {
@@ -164,7 +149,7 @@ func (c *Client) NewEmbedding(ctx context.Context, inp *embeddings2.Request) (*e
 		return nil, err
 	}
 
-	req, err := http.NewRequest(http.MethodPost, c.opts.BaseURL+"/embeddings", bytes.NewBuffer(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.opts.BaseURL+"/embeddings", bytes.NewBuffer(payload))
 	if err != nil {
 		return nil, err
 	}
@@ -199,7 +184,7 @@ func (c *Client) NewChatCompletion(ctx context.Context, inp *chat_completion2.Re
 		return nil, err
 	}
 
-	req, err := http.NewRequest(http.MethodPost, c.opts.BaseURL+"/chat/completions", bytes.NewBuffer(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.opts.BaseURL+"/chat/completions", bytes.NewBuffer(payload))
 	if err != nil {
 		return nil, err
 	}
@@ -244,7 +229,7 @@ func (c *Client) NewStreamingChatCompletion(ctx context.Context, inp *chat_compl
 		return nil, err
 	}
 
-	req, err := http.NewRequest(http.MethodPost, c.opts.BaseURL+"/chat/completions", bytes.NewBuffer(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.opts.BaseURL+"/chat/completions", bytes.NewBuffer(payload))
 	if err != nil {
 		return nil, err
 	}
@@ -297,7 +282,11 @@ func (c *Client) NewStreamingChatCompletion(ctx context.Context, inp *chat_compl
 					slog.WarnContext(ctx, "unable to unmarshal chat completion response chunk", slog.String("data", line), slog.Any("error", err))
 					continue
 				}
-				out <- openAiChatCompletionChunk.ToNativeResponseChunk()
+				select {
+				case out <- openAiChatCompletionChunk.ToNativeResponseChunk():
+				case <-ctx.Done():
+					return
+				}
 			}
 		}
 	}()
@@ -313,7 +302,7 @@ func (c *Client) NewSpeech(ctx context.Context, in *speech2.Request) (*speech2.R
 		return nil, err
 	}
 
-	req, err := http.NewRequest(http.MethodPost, c.opts.BaseURL+"/audio/speech", bytes.NewBuffer(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.opts.BaseURL+"/audio/speech", bytes.NewBuffer(payload))
 	if err != nil {
 		return nil, err
 	}
@@ -377,7 +366,7 @@ func (c *Client) NewStreamingSpeech(ctx context.Context, in *speech2.Request) (c
 		return nil, err
 	}
 
-	req, err := http.NewRequest(http.MethodPost, c.opts.BaseURL+"/audio/speech", bytes.NewBuffer(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.opts.BaseURL+"/audio/speech", bytes.NewBuffer(payload))
 	if err != nil {
 		return nil, err
 	}
@@ -430,7 +419,11 @@ func (c *Client) NewStreamingSpeech(ctx context.Context, in *speech2.Request) (c
 					slog.WarnContext(ctx, "unable to unmarshal speech response chunk", slog.String("data", line), slog.Any("error", err))
 					continue
 				}
-				out <- openAiSpeechChunk.ToNativeResponse()
+				select {
+				case out <- openAiSpeechChunk.ToNativeResponse():
+				case <-ctx.Done():
+					return
+				}
 			}
 		}
 	}()
@@ -498,7 +491,7 @@ func (c *Client) NewTranscription(ctx context.Context, in *transcription2.Reques
 		return nil, err
 	}
 
-	req, err := http.NewRequest(http.MethodPost, c.opts.BaseURL+"/audio/transcriptions", &buf)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.opts.BaseURL+"/audio/transcriptions", &buf)
 	if err != nil {
 		return nil, err
 	}
@@ -543,7 +536,7 @@ func (c *Client) NewImageGeneration(ctx context.Context, in *image_generation2.R
 		return nil, err
 	}
 
-	req, err := http.NewRequest(http.MethodPost, c.opts.BaseURL+"/images/generations", bytes.NewBuffer(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.opts.BaseURL+"/images/generations", bytes.NewBuffer(payload))
 	if err != nil {
 		return nil, err
 	}
@@ -665,7 +658,7 @@ func (c *Client) NewImageEdit(ctx context.Context, in *image_edit2.Request) (*im
 		return nil, err
 	}
 
-	req, err := http.NewRequest(http.MethodPost, c.opts.BaseURL+"/images/edits", &buf)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.opts.BaseURL+"/images/edits", &buf)
 	if err != nil {
 		return nil, err
 	}

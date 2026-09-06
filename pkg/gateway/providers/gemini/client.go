@@ -4,8 +4,10 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 
@@ -32,6 +34,9 @@ type ClientOptions struct {
 	ApiKey  string
 	Headers map[string]string
 
+	// HTTPClient allows callers to configure timeouts and transports.
+	HTTPClient *http.Client
+
 	transport *http.Client
 }
 
@@ -41,6 +46,9 @@ type Client struct {
 }
 
 func NewClient(opts *ClientOptions) *Client {
+	if opts.transport == nil {
+		opts.transport = opts.HTTPClient
+	}
 	if opts.transport == nil {
 		opts.transport = http.DefaultClient
 	}
@@ -70,7 +78,7 @@ func (c *Client) NewResponses(ctx context.Context, inp *responses2.Request) (*re
 		return nil, err
 	}
 
-	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewBuffer(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewBuffer(payload))
 	if err != nil {
 		return nil, err
 	}
@@ -121,7 +129,7 @@ func (c *Client) NewStreamingResponses(ctx context.Context, inp *responses2.Requ
 		return nil, err
 	}
 
-	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewBuffer(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewBuffer(payload))
 	if err != nil {
 		return nil, err
 	}
@@ -145,75 +153,59 @@ func (c *Client) NewStreamingResponses(ctx context.Context, inp *responses2.Requ
 	}
 
 	out := make(chan *responses2.ResponseChunk)
-
 	go func() {
 		defer res.Body.Close()
 		defer close(out)
-
-		reader := bufio.NewReader(res.Body)
+		stop := context.AfterFunc(ctx, func() { _ = res.Body.Close() })
+		defer stop()
+		fail := func(err error) { base.SendResponseChunk(ctx, out, responses2.NewStreamError(err)) }
+		decoder := json.NewDecoder(res.Body)
+		token, err := decoder.Token()
+		if err != nil {
+			fail(err)
+			return
+		}
+		if token != json.Delim('[') {
+			fail(fmt.Errorf("gemini: expected response array"))
+			return
+		}
 		converter := gemini_responses2.ResponseChunkToNativeResponseChunkConverter{}
-
-		var data strings.Builder
-		inQuotes := false
-		escaping := false
-		openBracesCount := 0
-		for {
-
-			line, err := reader.ReadString('\n')
-			for _, ch := range line {
-				if ch == '{' && !inQuotes {
-					openBracesCount++
-				}
-
-				// If object has not started, discard the character
-				// This is skip the initial `[` and last `]` and `,` between the objects
-				if openBracesCount == 0 {
-					continue
-				}
-
-				// Accumulate all the other characters
-				data.WriteByte(byte(ch))
-
-				// Double quotes
-				if ch == '"' && !escaping {
-					inQuotes = !inQuotes
-					continue
-				}
-
-				// Backslash
-				escaping = ch == 92
-
-				// If closing bracket, then check for end of the chunk
-				if ch == '}' && !inQuotes {
-					openBracesCount--
-					if openBracesCount == 0 {
-						geminiChunk := &gemini_responses2.Response{}
-						err = sonic.Unmarshal([]byte(data.String()), &geminiChunk)
-						if err == nil {
-							//fmt.Println("---\nGemini chunk -> " + strings.TrimPrefix(data.String(), "data:"))
-							for _, nativeChunk := range converter.ResponseChunkToNativeResponseChunk(geminiChunk) {
-								//d, _ := sonic.Marshal(nativeChunk)
-								//fmt.Println("\t\t <- Native Chunk" + string(d))
-								out <- nativeChunk
-							}
-						}
-
-						data.Reset()
-					}
+		finished := false
+		for decoder.More() {
+			var chunk gemini_responses2.Response
+			if err := decoder.Decode(&chunk); err != nil {
+				fail(err)
+				return
+			}
+			if chunk.Error != nil {
+				fail(fmt.Errorf("gemini: %s", chunk.Error.Message))
+				return
+			}
+			for _, candidate := range chunk.Candidates {
+				if candidate.FinishReason != "" {
+					finished = true
 				}
 			}
-
-			if err != nil {
-				for _, nativeChunk := range converter.ResponseChunkToNativeResponseChunk(nil) {
-					//d, _ := sonic.Marshal(nativeChunk)
-					//fmt.Println("\t\t <- Native Chunk" + string(d))
-					out <- nativeChunk
+			for _, native := range converter.ResponseChunkToNativeResponseChunk(&chunk) {
+				if !base.SendResponseChunk(ctx, out, native) {
+					return
 				}
+			}
+		}
+		if _, err := decoder.Token(); err != nil {
+			fail(err)
+			return
+		}
+		if !finished {
+			fail(io.ErrUnexpectedEOF)
+			return
+		}
+		for _, native := range converter.ResponseChunkToNativeResponseChunk(nil) {
+			if !base.SendResponseChunk(ctx, out, native) {
 				return
 			}
 		}
 	}()
-
 	return out, nil
 }
 
@@ -237,7 +229,7 @@ func (c *Client) NewEmbedding(ctx context.Context, inp *embeddings2.Request) (*e
 		return nil, err
 	}
 
-	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewBuffer(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewBuffer(payload))
 	if err != nil {
 		return nil, err
 	}
@@ -284,7 +276,7 @@ func (c *Client) NewSpeech(ctx context.Context, inp *speech2.Request) (*speech2.
 		return nil, err
 	}
 
-	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewBuffer(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewBuffer(payload))
 	if err != nil {
 		return nil, err
 	}
@@ -331,7 +323,7 @@ func (c *Client) NewStreamingSpeech(ctx context.Context, inp *speech2.Request) (
 		return nil, err
 	}
 
-	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewBuffer(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewBuffer(payload))
 	if err != nil {
 		return nil, err
 	}
@@ -403,7 +395,11 @@ func (c *Client) NewStreamingSpeech(ctx context.Context, inp *speech2.Request) (
 							for _, nativeChunk := range converter.ResponseChunkToNativeResponseChunk(geminiChunk) {
 								//d, _ := sonic.Marshal(nativeChunk)
 								//fmt.Println("\t\t <- Native Chunk" + string(d))
-								out <- nativeChunk
+								select {
+								case out <- nativeChunk:
+								case <-ctx.Done():
+									return
+								}
 							}
 						}
 
@@ -414,7 +410,11 @@ func (c *Client) NewStreamingSpeech(ctx context.Context, inp *speech2.Request) (
 
 			if err != nil {
 				for _, nativeChunk := range converter.ResponseChunkToNativeResponseChunk(nil) {
-					out <- nativeChunk
+					select {
+					case out <- nativeChunk:
+					case <-ctx.Done():
+						return
+					}
 				}
 				return
 			}
@@ -439,7 +439,7 @@ func (c *Client) NewTranscription(ctx context.Context, inp *transcription2.Reque
 		return nil, err
 	}
 
-	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewBuffer(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewBuffer(payload))
 	if err != nil {
 		return nil, err
 	}
@@ -485,7 +485,7 @@ func (c *Client) NewImageGeneration(ctx context.Context, inp *image_generation2.
 		return nil, err
 	}
 
-	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewBuffer(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewBuffer(payload))
 	if err != nil {
 		return nil, err
 	}
@@ -545,7 +545,7 @@ func (c *Client) NewImageEdit(ctx context.Context, inp *image_edit2.Request) (*i
 		return nil, err
 	}
 
-	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewBuffer(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewBuffer(payload))
 	if err != nil {
 		return nil, err
 	}

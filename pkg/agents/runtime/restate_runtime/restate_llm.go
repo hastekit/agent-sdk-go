@@ -48,6 +48,9 @@ func (l *RestateLLM) NewStreamingResponses(ctx context.Context, in *responses.Re
 
 		stream, err := l.wrappedLLM.NewStreamingResponses(runCtx, in)
 		if err != nil {
+			if runCtx.Err() != nil {
+				return nil, cancellationError(agents.ErrModelCallStopped)
+			}
 			return nil, cancellationError(err)
 		}
 

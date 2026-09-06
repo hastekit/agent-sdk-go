@@ -347,6 +347,10 @@ for chunk := range handle.Chunks {
 out, err := handle.Wait()
 ```
 
+Provider streams now report terminal failures through `ResponseChunk.OfError`. Agent handles return those failures as errors; a stream that ends without `response.completed` also fails instead of returning a partial answer. Custom providers must emit a completion event on success.
+
+The OpenAI, Anthropic, and Gemini clients attach the caller's context to HTTP requests and accept an optional `ClientOptions.HTTPClient` for custom timeouts and transports. Cancelling the request context stops both the HTTP request and blocked stream sends.
+
 The `StreamID` on the handle (also returned in the `X-Stream-Id` HTTP header when serving over HTTP) lets you re-subscribe to the same broker channel — useful for resuming a stream after a page refresh, or for stopping the run from a different process.
 
 #### Steering a Running Agent
@@ -770,6 +774,8 @@ handle, err = agent.Execute(context.Background(), &agents.AgentInput{
 })
 out, err = handle.Result()
 ```
+
+The built-in memory and file history adapters scope thread IDs, run IDs, and summaries by namespace. The same IDs can coexist in different namespaces. Reads use the exact namespace, including the empty namespace; only `ListThreads` treats an empty namespace as a request to list all namespaces.
 
 Passing `ThreadID` alone continues from the thread's tip. To branch from a specific earlier turn instead — a retry, or an edit of an earlier message — set `PreviousRunID` to the `RunID` of the run you want to continue from:
 
