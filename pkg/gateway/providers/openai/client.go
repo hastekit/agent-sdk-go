@@ -92,6 +92,10 @@ func (c *Client) NewResponses(ctx context.Context, inp *responses2.Request) (*re
 	}
 	defer res.Body.Close()
 
+	if res.StatusCode != http.StatusOK {
+		return nil, base.ParseErrorResponse(res)
+	}
+
 	var openAiResponse *openai_responses2.Response
 	err = utils.DecodeJSON(res.Body, &openAiResponse)
 	if err != nil {
@@ -199,17 +203,7 @@ func (c *Client) NewChatCompletion(ctx context.Context, inp *chat_completion2.Re
 	defer res.Body.Close()
 
 	if res.StatusCode != http.StatusOK {
-		var errResp map[string]any
-		err = utils.DecodeJSON(res.Body, &errResp)
-		if err != nil {
-			return nil, err
-		}
-		if errorObj, ok := errResp["error"].(map[string]any); ok {
-			if message, ok := errorObj["message"].(string); ok {
-				return nil, errors.New(message)
-			}
-		}
-		return nil, errors.New("unknown error occurred")
+		return nil, base.ParseErrorResponse(res)
 	}
 
 	var openAiResponse *openai_chat_completion2.Response
@@ -243,17 +237,8 @@ func (c *Client) NewStreamingChatCompletion(ctx context.Context, inp *chat_compl
 	}
 
 	if res.StatusCode != http.StatusOK {
-		var errResp map[string]any
-		err = utils.DecodeJSON(res.Body, &errResp)
-		if err != nil {
-			return nil, err
-		}
-		if errorObj, ok := errResp["error"].(map[string]any); ok {
-			if message, ok := errorObj["message"].(string); ok {
-				return nil, errors.New(message)
-			}
-		}
-		return nil, errors.New("unknown error occurred")
+		defer res.Body.Close()
+		return nil, base.ParseErrorResponse(res)
 	}
 
 	out := make(chan *chat_completion2.ResponseChunk)
@@ -317,17 +302,7 @@ func (c *Client) NewSpeech(ctx context.Context, in *speech2.Request) (*speech2.R
 	defer res.Body.Close()
 
 	if res.StatusCode != http.StatusOK {
-		var errResp map[string]any
-		err = utils.DecodeJSON(res.Body, &errResp)
-		if err != nil {
-			return nil, err
-		}
-		if errorObj, ok := errResp["error"].(map[string]any); ok {
-			if message, ok := errorObj["message"].(string); ok {
-				return nil, errors.New(message)
-			}
-		}
-		return nil, errors.New("unknown error occurred")
+		return nil, base.ParseErrorResponse(res)
 	}
 
 	// Handle gzip compressed response
@@ -380,17 +355,8 @@ func (c *Client) NewStreamingSpeech(ctx context.Context, in *speech2.Request) (c
 	}
 
 	if res.StatusCode != http.StatusOK {
-		var errResp map[string]any
-		err = utils.DecodeJSON(res.Body, &errResp)
-		if err != nil {
-			return nil, err
-		}
-		if errorObj, ok := errResp["error"].(map[string]any); ok {
-			if message, ok := errorObj["message"].(string); ok {
-				return nil, errors.New(message)
-			}
-		}
-		return nil, errors.New("unknown error occurred")
+		defer res.Body.Close()
+		return nil, base.ParseErrorResponse(res)
 	}
 
 	out := make(chan *speech2.ResponseChunk)
@@ -506,17 +472,7 @@ func (c *Client) NewTranscription(ctx context.Context, in *transcription2.Reques
 	defer res.Body.Close()
 
 	if res.StatusCode != http.StatusOK {
-		var errResp map[string]any
-		err = utils.DecodeJSON(res.Body, &errResp)
-		if err != nil {
-			return nil, err
-		}
-		if errorObj, ok := errResp["error"].(map[string]any); ok {
-			if message, ok := errorObj["message"].(string); ok {
-				return nil, errors.New(message)
-			}
-		}
-		return nil, errors.New("unknown error occurred")
+		return nil, base.ParseErrorResponse(res)
 	}
 
 	var openAiResponse *openai_transcription.Response
@@ -551,17 +507,7 @@ func (c *Client) NewImageGeneration(ctx context.Context, in *image_generation2.R
 	defer res.Body.Close()
 
 	if res.StatusCode != http.StatusOK {
-		var errResp map[string]any
-		err = utils.DecodeJSON(res.Body, &errResp)
-		if err != nil {
-			return nil, err
-		}
-		if errorObj, ok := errResp["error"].(map[string]any); ok {
-			if message, ok := errorObj["message"].(string); ok {
-				return nil, errors.New(message)
-			}
-		}
-		return nil, errors.New("unknown error occurred")
+		return nil, base.ParseErrorResponse(res)
 	}
 
 	var openAiResponse *openai_image_generation.Response
@@ -673,17 +619,7 @@ func (c *Client) NewImageEdit(ctx context.Context, in *image_edit2.Request) (*im
 	defer res.Body.Close()
 
 	if res.StatusCode != http.StatusOK {
-		var errResp map[string]any
-		err = utils.DecodeJSON(res.Body, &errResp)
-		if err != nil {
-			return nil, err
-		}
-		if errorObj, ok := errResp["error"].(map[string]any); ok {
-			if message, ok := errorObj["message"].(string); ok {
-				return nil, errors.New(message)
-			}
-		}
-		return nil, errors.New("unknown error occurred")
+		return nil, base.ParseErrorResponse(res)
 	}
 
 	var openAiEditResponse *openai_image_edit.Response

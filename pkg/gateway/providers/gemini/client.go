@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -504,17 +503,7 @@ func (c *Client) NewImageGeneration(ctx context.Context, inp *image_generation2.
 	defer res.Body.Close()
 
 	if res.StatusCode != http.StatusOK {
-		var errResp map[string]any
-		err = utils.DecodeJSON(res.Body, &errResp)
-		if err != nil {
-			return nil, err
-		}
-		if errorObj, ok := errResp["error"].(map[string]any); ok {
-			if message, ok := errorObj["message"].(string); ok {
-				return nil, fmt.Errorf("gemini API error: %s", message)
-			}
-		}
-		return nil, errors.New("unknown error occurred")
+		return nil, base.ParseErrorResponse(res)
 	}
 
 	var geminiResponse *gemini_image_generation.Response
@@ -564,17 +553,7 @@ func (c *Client) NewImageEdit(ctx context.Context, inp *image_edit2.Request) (*i
 	defer res.Body.Close()
 
 	if res.StatusCode != http.StatusOK {
-		var errResp map[string]any
-		err = utils.DecodeJSON(res.Body, &errResp)
-		if err != nil {
-			return nil, err
-		}
-		if errorObj, ok := errResp["error"].(map[string]any); ok {
-			if message, ok := errorObj["message"].(string); ok {
-				return nil, fmt.Errorf("gemini API error: %s", message)
-			}
-		}
-		return nil, errors.New("unknown error occurred")
+		return nil, base.ParseErrorResponse(res)
 	}
 
 	var geminiEditResponse *gemini_image_edit.Response

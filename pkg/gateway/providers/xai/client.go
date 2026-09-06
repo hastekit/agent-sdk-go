@@ -5,7 +5,6 @@ import (
 	"compress/gzip"
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 
@@ -79,9 +78,7 @@ func (c *Client) NewResponses(ctx context.Context, inp *responses2.Request) (*re
 	defer res.Body.Close()
 
 	if res.StatusCode != http.StatusOK {
-		var errResp map[string]any
-		err = utils.DecodeJSON(res.Body, &errResp)
-		return nil, fmt.Errorf("error: %v", errResp)
+		return nil, base.ParseErrorResponse(res)
 	}
 
 	var xaiResponse *xai_responses2.Response
@@ -156,17 +153,7 @@ func (c *Client) NewSpeech(ctx context.Context, in *speech2.Request) (*speech2.R
 	defer res.Body.Close()
 
 	if res.StatusCode != http.StatusOK {
-		var errResp map[string]any
-		err = utils.DecodeJSON(res.Body, &errResp)
-		if err != nil {
-			return nil, err
-		}
-		if errorObj, ok := errResp["error"].(map[string]any); ok {
-			if message, ok := errorObj["message"].(string); ok {
-				return nil, errors.New(message)
-			}
-		}
-		return nil, errors.New("unknown error occurred")
+		return nil, base.ParseErrorResponse(res)
 	}
 
 	var reader io.Reader = res.Body
@@ -214,17 +201,7 @@ func (c *Client) NewImageGeneration(ctx context.Context, in *image_generation2.R
 	defer res.Body.Close()
 
 	if res.StatusCode != http.StatusOK {
-		var errResp map[string]any
-		err = utils.DecodeJSON(res.Body, &errResp)
-		if err != nil {
-			return nil, err
-		}
-		if errorObj, ok := errResp["error"].(map[string]any); ok {
-			if message, ok := errorObj["message"].(string); ok {
-				return nil, errors.New(message)
-			}
-		}
-		return nil, errors.New("unknown error occurred")
+		return nil, base.ParseErrorResponse(res)
 	}
 
 	var xaiResponse *xai_image_generation.Response
@@ -259,17 +236,7 @@ func (c *Client) NewImageEdit(ctx context.Context, in *image_edit2.Request) (*im
 	defer res.Body.Close()
 
 	if res.StatusCode != http.StatusOK {
-		var errResp map[string]any
-		err = utils.DecodeJSON(res.Body, &errResp)
-		if err != nil {
-			return nil, err
-		}
-		if errorObj, ok := errResp["error"].(map[string]any); ok {
-			if message, ok := errorObj["message"].(string); ok {
-				return nil, errors.New(message)
-			}
-		}
-		return nil, errors.New("unknown error occurred")
+		return nil, base.ParseErrorResponse(res)
 	}
 
 	var xaiEditResponse *xai_image_edit.Response

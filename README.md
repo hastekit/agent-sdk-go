@@ -9,6 +9,7 @@ A powerful Golang SDK for building AI agents and making LLM calls across multipl
 ## Features
 
 - **🔄 Multi-Provider Support** - Unified API for OpenAI, Anthropic, Gemini, and more
+- **🧅 Gateway Middleware** - Compose retries, provider fallback, and your own around every LLM call
 - **🤖 Agent SDK** - Build sophisticated AI agents with tools, memory, and multi-step reasoning
 - **👤 Human-in-the-Loop** - Integrate human feedback and approval workflows
 - **🛡️ Durable Execution** - Create fault-tolerant agents with Restate or Temporal
@@ -28,6 +29,10 @@ A powerful Golang SDK for building AI agents and making LLM calls across multipl
 - [Quick Start](#quick-start)
 - [Usage](#usage)
   - [LLM Client](#llm-client)
+    - [Middleware](#middleware)
+    - [Retries](#retries)
+    - [Fallback](#fallback)
+    - [Per-Model Middleware](#per-model-middleware)
   - [Agents](#agents)
     - [Sub-Agents](#sub-agents)
     - [Handoffs](#handoffs)
@@ -173,6 +178,140 @@ Provider constants: `hastekit.ProviderOpenAI`, `ProviderAnthropic`,
 `ProviderOpenRouter`, `ProviderElevenLabs`, `ProviderSarvam`,
 `ProviderDeepSeek`, `ProviderMoonshot` (Kimi models), `ProviderZAI` (GLM
 models).
+
+#### Middleware
+
+Every call a client makes runs through a middleware chain. Nothing is
+installed unless you ask for it — a call that fails is otherwise reported as
+it happened — except tracing, which every client adds innermost so each
+attempt gets its own span.
+
+```go
+import "github.com/hastekit/agent-sdk-go/pkg/gateway/middleware"
+
+client := hastekit.NewLLMClient(configs, hastekit.WithMiddleware(
+    middleware.NewFallbackModels("Anthropic/claude-sonnet-4-5"),
+    middleware.NewRetry(middleware.RetryConfig{}),
+))
+```
+
+The chain is written outermost first, and the order is yours to choose.
+Fallback belongs outside retry: that way a provider is retried on its own
+before the chain gives up on it, where the other way round a 503 that would
+have cleared on the second attempt costs you a switch to a different model
+instead.
+
+Anything satisfying `gateway.Middleware` goes in the same list, so a budget
+check, a cache, or a request log sits alongside the built-in ones:
+
+```go
+type auditLog struct{}
+
+func (auditLog) HandleRequest(next gateway.RequestHandler) gateway.RequestHandler {
+    return func(ctx context.Context, p llm.ProviderName, key string, r *llm.Request) (*llm.Response, error) {
+        resp, err := next(ctx, p, key, r)
+        record(p, r.GetRequestedModel(), err)
+        return resp, err
+    }
+}
+
+func (auditLog) HandleStreamingRequest(next gateway.StreamingRequestHandler) gateway.StreamingRequestHandler {
+    return next
+}
+
+client := hastekit.NewLLMClient(configs, hastekit.WithMiddleware(auditLog{}, middleware.NewRetry(middleware.RetryConfig{})))
+```
+
+Middleware that needs the provider configuration — fallback, which resolves a
+key for a provider the caller never named — is handed it when the chain is
+installed, so you never pass a config store yourself.
+
+#### Retries
+
+`middleware.NewRetry` re-issues a call that failed for a reason another
+attempt could plausibly fix. The zero `RetryConfig` is a usable policy: three
+attempts, 500ms initial backoff doubling to a 30s ceiling, jittered. A
+provider that names its own delay in a `Retry-After` header is obeyed as given
+rather than jittered — it knows when its limit resets.
+
+```go
+middleware.NewRetry(middleware.RetryConfig{
+    MaxAttempts:    5,               // counts the first call
+    InitialBackoff: time.Second,
+    MaxBackoff:     time.Minute,
+})
+```
+
+Retried: 408, 409, 425, 429, and 500/502/503/504, plus transport failures —
+timeouts, connection resets, truncated bodies. Not retried: a cancelled
+context, and every 4xx that describes the request itself, since the same
+request fails the same way on the next attempt.
+
+Streaming is retried only up to the first chunk the caller sees. A stream that
+fails before delivering anything is indistinguishable from one that never
+opened, so it is retried transparently; once a chunk has been forwarded the
+attempt is committed, because there is no way to un-send it and no provider
+supports resuming a stream from the middle.
+
+#### Fallback
+
+`middleware.NewFallbackModels` sends a call to a different provider when the
+one you asked for fails. Each target is tried in order, and — where retry sits
+inside it — each target gets its own full retry budget before the chain moves
+on.
+
+```go
+middleware.NewFallbackModels("Anthropic/claude-sonnet-4-5", "Gemini/gemini-2.5-flash")
+
+// Or built explicitly, when you want to set the policy too.
+middleware.NewFallback(middleware.FallbackConfig{
+    Targets:      middleware.FallbackModels("Anthropic/claude-sonnet-4-5"),
+    Fallbackable: func(err error) bool { return llm.StatusCodeOf(err) == 429 },
+})
+```
+
+Each target's API key is resolved from the configs the client was built with,
+so every target needs one; a target without a key is skipped rather than
+failing the call. An id naming only a provider — `"OpenRouter"` — keeps the
+model the caller asked for and only redirects the provider, which is what a
+target on an OpenAI-compatible mirror wants.
+
+Fallback moves on for almost any failure — a rate limit, an outage, an expired
+key, a retired model. The exceptions are a cancelled context and the two
+statuses that describe the request itself (400 and 422), since a request one
+provider could not parse will not parse anywhere else.
+
+> Streaming follows the same commit rule as retrying: a stream that fails
+> before delivering a chunk can move to the next target, but one that has
+> already delivered anything cannot — half an answer from one model finished
+> by another is worse than a clean failure.
+
+#### Per-Model Middleware
+
+`WithMiddleware` on `Model` replaces the client's chain for that one model.
+There is no merging: a chain is an ordered whole, and picking entries out of
+one by type would not survive middleware you wrote yourself.
+
+```go
+client := hastekit.NewLLMClient(configs, hastekit.WithMiddleware(
+    middleware.NewRetry(middleware.RetryConfig{}),
+))
+
+// Inherits the client's chain.
+fast := client.Model("OpenAI/gpt-4o-mini")
+
+// Tries harder, and falls back.
+critical := client.Model("OpenAI/gpt-4o", hastekit.WithMiddleware(
+    middleware.NewFallbackModels("Anthropic/claude-opus-4-5", "Gemini/gemini-2.5-pro"),
+    middleware.NewRetry(middleware.RetryConfig{MaxAttempts: 5}),
+))
+
+// An LLM judge, held to exactly what the provider did on the first attempt.
+judge := client.Model("OpenAI/gpt-4o", hastekit.WithoutMiddleware())
+```
+
+A model naming its own chain builds one, so bind a model once at setup rather
+than per request.
 
 ### Agents
 

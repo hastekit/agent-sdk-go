@@ -95,8 +95,7 @@ func (c *Client) NewResponses(ctx context.Context, inp *responses2.Request) (*re
 	defer res.Body.Close()
 
 	if res.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(res.Body)
-		return nil, errors.New("bedrock converse failed (" + res.Status + "): " + string(body))
+		return nil, base.ParseErrorResponse(res)
 	}
 
 	var converseResponse bedrock_responses.ConverseResponse
@@ -138,9 +137,8 @@ func (c *Client) NewStreamingResponses(ctx context.Context, inp *responses2.Requ
 	}
 
 	if res.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(res.Body)
-		res.Body.Close()
-		return nil, errors.New("bedrock converse-stream failed (" + res.Status + "): " + string(body))
+		defer res.Body.Close()
+		return nil, base.ParseErrorResponse(res)
 	}
 
 	// Bedrock signals some validation failures with HTTP 200 + JSON body instead

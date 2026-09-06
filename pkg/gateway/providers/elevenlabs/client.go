@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
-	"errors"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -84,20 +83,7 @@ func (c *Client) NewSpeech(ctx context.Context, in *speech2.Request) (*speech2.R
 	defer res.Body.Close()
 
 	if res.StatusCode != http.StatusOK {
-		var errResp map[string]any
-		err = utils.DecodeJSON(res.Body, &errResp)
-		if err != nil {
-			return nil, err
-		}
-		if detail, ok := errResp["detail"].(map[string]any); ok {
-			if message, ok := detail["message"].(string); ok {
-				return nil, errors.New(message)
-			}
-		}
-		if detail, ok := errResp["detail"].(string); ok {
-			return nil, errors.New(detail)
-		}
-		return nil, errors.New("unknown error occurred")
+		return nil, base.ParseErrorResponse(res)
 	}
 
 	// Handle gzip compressed response
@@ -154,20 +140,7 @@ func (c *Client) NewStreamingSpeech(ctx context.Context, in *speech2.Request) (c
 
 	if res.StatusCode != http.StatusOK {
 		defer res.Body.Close()
-		var errResp map[string]any
-		err = utils.DecodeJSON(res.Body, &errResp)
-		if err != nil {
-			return nil, err
-		}
-		if detail, ok := errResp["detail"].(map[string]any); ok {
-			if message, ok := detail["message"].(string); ok {
-				return nil, errors.New(message)
-			}
-		}
-		if detail, ok := errResp["detail"].(string); ok {
-			return nil, errors.New(detail)
-		}
-		return nil, errors.New("unknown error occurred")
+		return nil, base.ParseErrorResponse(res)
 	}
 
 	out := make(chan *speech2.ResponseChunk)
@@ -278,20 +251,7 @@ func (c *Client) NewTranscription(ctx context.Context, in *transcription2.Reques
 	defer res.Body.Close()
 
 	if res.StatusCode != http.StatusOK {
-		var errResp map[string]any
-		err = utils.DecodeJSON(res.Body, &errResp)
-		if err != nil {
-			return nil, err
-		}
-		if detail, ok := errResp["detail"].(map[string]any); ok {
-			if message, ok := detail["message"].(string); ok {
-				return nil, errors.New(message)
-			}
-		}
-		if detail, ok := errResp["detail"].(string); ok {
-			return nil, errors.New(detail)
-		}
-		return nil, errors.New("unknown error occurred")
+		return nil, base.ParseErrorResponse(res)
 	}
 
 	var elResponse *elevenlabs_transcription.Response

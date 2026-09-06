@@ -1,4 +1,4 @@
-package gateway
+package middleware
 
 import (
 	"context"
@@ -56,7 +56,7 @@ func TestTracingMiddleware_NonStreaming(t *testing.T) {
 		}}, nil
 	}
 
-	handler := NewTracingMiddleware().HandleRequest(next)
+	handler := NewTracing().HandleRequest(next)
 	_, err := handler(context.Background(), "openai", "key", &llm.Request{
 		OfChatCompletionInput: &chat_completion.Request{
 			Model:       "gpt-4o",
@@ -98,7 +98,7 @@ func TestTracingMiddleware_RecordsError(t *testing.T) {
 	next := func(context.Context, llm.ProviderName, string, *llm.Request) (*llm.Response, error) {
 		return nil, context.DeadlineExceeded
 	}
-	handler := NewTracingMiddleware().HandleRequest(next)
+	handler := NewTracing().HandleRequest(next)
 	_, err := handler(context.Background(), "anthropic", "key", &llm.Request{
 		OfResponsesInput: &responses.Request{Model: "claude"},
 	})
@@ -131,7 +131,7 @@ func TestTracingMiddleware_Streaming(t *testing.T) {
 	next := func(context.Context, llm.ProviderName, string, *llm.Request) (*llm.StreamingResponse, error) {
 		return &llm.StreamingResponse{ResponsesStreamData: provided}, nil
 	}
-	handler := NewTracingMiddleware().HandleStreamingRequest(next)
+	handler := NewTracing().HandleStreamingRequest(next)
 	resp, err := handler(context.Background(), "openai", "key", &llm.Request{
 		OfResponsesInput: &responses.Request{Model: "gpt-4o"},
 	})
