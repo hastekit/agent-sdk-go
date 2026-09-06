@@ -42,7 +42,7 @@ func (p *InMemoryConversationPersistence) ListThreads(ctx context.Context, names
 			ConversationID: t.ConversationID,
 			Namespace:      t.Namespace,
 			LastRunID:      t.LastRunID,
-			MessageCount:   len(p.messagesByThread[t.ThreadID]),
+			MessageCount:   len(p.messagesByThread[historyKey(t.Namespace, t.ThreadID)]),
 			CreatedAt:      t.CreatedAt,
 			UpdatedAt:      t.CreatedAt,
 		}
@@ -50,8 +50,8 @@ func (p *InMemoryConversationPersistence) ListThreads(ctx context.Context, names
 		// Title comes from the thread's first textual user message —
 		// what a chat UI shows as the conversation name. UpdatedAt is
 		// the newest turn's save time so listings sort by recency.
-		for _, runID := range p.messagesByThread[t.ThreadID] {
-			m := p.messages[runID]
+		for _, runID := range p.messagesByThread[historyKey(t.Namespace, t.ThreadID)] {
+			m := p.messages[historyKey(t.Namespace, runID)]
 			if m == nil {
 				continue
 			}

@@ -126,7 +126,7 @@ func TestFileConversationPersistenceBranchReplay(t *testing.T) {
 		t.Fatalf("failed to save msg-3: %v", err)
 	}
 
-	branchThreadID := p.mem.getMessage("msg-3").ThreadID
+	branchThreadID := p.mem.getMessage("ns", "msg-3").ThreadID
 	if branchThreadID == "thread-1" {
 		t.Fatalf("expected msg-3 to land on a new branch thread")
 	}
@@ -189,7 +189,7 @@ func TestFileConversationPersistenceMultipleConversations(t *testing.T) {
 		t.Fatalf("failed to save msg-c1: %v", err)
 	}
 
-	storedC := p.mem.getMessage("msg-c1")
+	storedC := p.mem.getMessage("ns", "msg-c1")
 	if storedC.ConversationID == "" {
 		t.Fatalf("expected msg-c1 to get a generated conversation ID")
 	}
