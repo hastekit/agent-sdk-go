@@ -63,8 +63,29 @@ func NewWalker(opts RuntimeOptions) *Walker {
 // the non-nil *Input, even on error, so observers can inspect
 // partial state. Each Result.Output is deep-merged into
 // in.RunContext; Status is recorded per node.
-func (w *Walker) Walk(ctx context.Context, c *Compiled, in *Input, ne NodeExecutor) (*Input, error) {
+func (w *Walker) Walk(ctx context.Context, c *Compiled, in *Input, ne NodeExecutor) (out *Input, err error) {
 	in = ensureInit(in)
+	defer func() {
+		if cancelErr := cancellationError(ctx); cancelErr != nil {
+			if !errors.Is(err, ctx.Err()) || !errors.Is(err, context.Cause(ctx)) {
+				err = errors.Join(err, cancelErr)
+			}
+			in.Pause = nil
+			for id := range c.Nodes {
+				switch in.Status[id] {
+				case NodeStatusRunning, NodeStatusPaused:
+					in.SetStatus(id, NodeStatusCancelled)
+				case NodeStatusCompleted, NodeStatusFailed, NodeStatusCancelled:
+					// Preserve settled work for inspection or a later retry.
+				default:
+					in.SetStatus(id, NodeStatusSkipped)
+				}
+			}
+		}
+	}()
+	if err := cancellationError(ctx); err != nil {
+		return in, err
+	}
 	// A fresh walk is not suspended; any prior Pause is either being
 	// resumed (cleared by SetResume) or is stale from a serialised
 	// Input. Either way, start clean and let this walk re-derive it.
@@ -75,6 +96,9 @@ func (w *Walker) Walk(ctx context.Context, c *Compiled, in *Input, ne NodeExecut
 	visited := make(map[string]bool, len(c.Nodes))
 
 	for len(wave) > 0 {
+		if err := cancellationError(ctx); err != nil {
+			return in, err
+		}
 		unique := dedupUnvisited(wave, visited)
 		if len(unique) == 0 {
 			break
@@ -93,9 +117,11 @@ func (w *Walker) Walk(ctx context.Context, c *Compiled, in *Input, ne NodeExecut
 		// Only nodes that still need to run are dispatched to the
 		// executor.
 		var invs []Invocation
-		var dispatchIDs []string
 		results := make([]Result, 0, len(unique))
 		for _, id := range unique {
+			if err := cancellationError(ctx); err != nil {
+				return in, err
+			}
 			if in.Status[id] == NodeStatusCompleted {
 				port, ok := in.Ports[id]
 				if !ok {
@@ -108,7 +134,6 @@ func (w *Walker) Walk(ctx context.Context, c *Compiled, in *Input, ne NodeExecut
 			node := c.Nodes[id]
 			in.SetStatus(id, NodeStatusRunning)
 			invs = append(invs, Invocation{Node: node, NodeID: id, Input: in})
-			dispatchIDs = append(dispatchIDs, id)
 			steps++
 			w.Logger.Info("dispatching node", "node_id", id, "type", node.Type())
 		}
@@ -125,7 +150,7 @@ func (w *Walker) Walk(ctx context.Context, c *Compiled, in *Input, ne NodeExecut
 		var nextCandidates []string
 		var paused bool
 		for _, r := range results {
-			if r.Pause != nil {
+			if r.Pause != nil && ctx.Err() == nil {
 				in.SetStatus(r.NodeID, NodeStatusPaused)
 				in.Pause = r.Pause
 				if in.Pause.NodeID == "" {
@@ -136,14 +161,27 @@ func (w *Walker) Walk(ctx context.Context, c *Compiled, in *Input, ne NodeExecut
 				continue
 			}
 			if r.Err != nil {
-				in.SetStatus(r.NodeID, NodeStatusFailed)
-				w.Logger.Error("node execution failed", "node_id", r.NodeID, "error", r.Err)
+				if errors.Is(r.Err, context.Canceled) || errors.Is(r.Err, context.DeadlineExceeded) {
+					in.SetStatus(r.NodeID, NodeStatusCancelled)
+					w.Logger.Info("node execution cancelled", "node_id", r.NodeID, "error", r.Err)
+				} else {
+					in.SetStatus(r.NodeID, NodeStatusFailed)
+					w.Logger.Error("node execution failed", "node_id", r.NodeID, "error", r.Err)
+				}
 				waveErrs = append(waveErrs, fmt.Errorf("node %q: %w", r.NodeID, r.Err))
+				continue
+			}
+			if r.Pause != nil { // Cancellation supersedes a pending pause.
+				in.SetStatus(r.NodeID, NodeStatusCancelled)
 				continue
 			}
 			in.MergeContext(r.Output)
 			in.SetStatus(r.NodeID, NodeStatusCompleted)
 			in.SetPort(r.NodeID, r.Port)
+
+			if ctx.Err() != nil {
+				continue
+			}
 
 			// Conditional edges take precedence over static port
 			// edges.
@@ -173,6 +211,9 @@ func (w *Walker) Walk(ctx context.Context, c *Compiled, in *Input, ne NodeExecut
 					nextCandidates = append(nextCandidates, edge.ToNode)
 				}
 			}
+		}
+		if cancelErr := cancellationError(ctx); cancelErr != nil {
+			return in, errors.Join(append(waveErrs, cancelErr)...)
 		}
 		if len(waveErrs) > 0 {
 			return in, errors.Join(waveErrs...)
