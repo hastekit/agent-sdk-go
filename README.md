@@ -41,6 +41,8 @@ A powerful Golang SDK for building AI agents and making LLM calls across multipl
   - [Tools](#tools)
   - [Skills](#skills)
   - [Hooks](#hooks)
+    - [Adding a Message to a Model Call](#adding-a-message-to-a-model-call)
+    - [Hook State](#hook-state)
   - [Conversation History](#conversation-history)
   - [Durable Agents](#durable-agents)
 - [Documentation](#documentation)
@@ -871,6 +873,64 @@ Notes:
 - **`GetName()` must be unique per agent and stable across deploys.** Durable runtimes name each hook's journaled step after it, so a renamed hook is a new step on replay.
 - **Hooks run as their own durable steps.** Under Restate or Temporal each hook call is journaled, so a check that talks to a billing service is not re-run on every replay.
 - **A `BeforeModelCall` hook sees the shape of the call, not the prompt** — model, tenant, loop iteration, `ContextTokens`, and usage so far. That's what a budget check needs, and it keeps the conversation from crossing a durable boundary twice.
+
+#### Adding a Message to a Model Call
+
+A `BeforeModelCall` hook can put a message in front of the model for one call.
+The note is appended after the conversation and is **never stored**, so it is
+true of the call it rides on and does not accumulate in the transcript of
+every call after it — the same treatment the loop gives its own
+"you have one turn left" reminder.
+
+```go
+func (p *policy) BeforeModelCall(ctx context.Context, call *agents.ModelCall) (agents.ModelCallHookResult, error) {
+    if call.ContextTokens < 100_000 {
+        return agents.ContinueModelCall(), nil
+    }
+    return agents.ContinueModelCall().WithMessages(
+        responses.UserMessage("You are close to the context limit. Summarise findings before continuing."),
+    ), nil
+}
+```
+
+Hooks append in order, after the conversation. Only `BeforeModelCall` can add
+one — by `AfterModelCall` there is no request left to add to — and nothing is
+appended when a hook answers for the model, since the provider is never
+called.
+
+This is for a note the model should act on *now*. Reshaping the history itself
+— trimming it, summarising it — belongs to the conversation summarizer, which
+already owns the whole transcript; a hook is deliberately never handed it.
+
+#### Hook State
+
+`ModelCall.State` is the run's key-value scratchpad, the same one tools read
+through `ToolCall.State`. Write to it by returning updates, exactly as a tool
+returns `StateUpdates`:
+
+```go
+func (p *policy) BeforeModelCall(ctx context.Context, call *agents.ModelCall) (agents.ModelCallHookResult, error) {
+    if call.State["warned"] == "1" {
+        return agents.ContinueModelCall(), nil
+    }
+    return agents.ContinueModelCall().
+        WithMessages(responses.UserMessage("Heads up: this run is nearly out of budget.")).
+        WithStateUpdates(map[string]string{"warned": "1"}), nil
+}
+```
+
+State persists with the thread, so a hook can remember something across
+invocations — that it has already warned, so it warns once rather than every
+iteration. Tools and hooks share one flat namespace: what a tool wrote, the
+next call's hooks read. A write lands as soon as it is returned, so a later
+hook in the chain reads what an earlier one just wrote; the last writer of a
+key wins, and a hook that writes only its own keys never disturbs another's.
+
+> `WithStateUpdates` is the only way to write. Assigning into `call.State`
+> changes nothing: a durable runtime rebuilds that map from a serialized
+> payload, so a write on the far side reaches nothing — and it is copied
+> locally too, so the mistake fails the same way in both places rather than
+> only once you deploy.
 
 ### Conversation History
 

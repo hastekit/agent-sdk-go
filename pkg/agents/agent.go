@@ -697,7 +697,7 @@ func (e *Agent) ExecuteWithRun(ctx context.Context, in *AgentInput, run *history
 				LoopIteration: run.RunState.LoopIteration,
 				ContextTokens: run.ContextTokens(),
 				Usage:         run.RunState.Usage,
-			}, func(callCtx context.Context) (*responses.Response, error) {
+			}, request, run.State, func(callCtx context.Context) (*responses.Response, error) {
 				// A stop lands mid-stream on the local runtime, where the
 				// provider's request is this process's to cancel. The durable
 				// runtimes cancel inside their own activity or step instead —
@@ -884,7 +884,7 @@ func (e *Agent) ExecuteWithRun(ctx context.Context, in *AgentInput, run *history
 							ThreadID:            in.ThreadID,
 							StreamID:            in.StreamID,
 							RunContext:          in.RunContext,
-							State:               run.State,
+							State:               maps.Clone(run.State),
 							ShouldResume:        resuming,
 							ResumeMessages:      resumeMessages,
 							Progress:            e.progressReporter(in.StreamID, toolCall.CallID, toolCall.Name),

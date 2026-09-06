@@ -272,6 +272,7 @@ func modelHookWorkflow(ctx workflow.Context) (string, error) {
 
 	resp, err := agents.RunWithModelCallHooks(context.Background(), hooks,
 		&agents.ModelCall{AgentName: "Agent", Model: "gpt-x"},
+		&responses.Request{}, map[string]string{},
 		func(context.Context) (*responses.Response, error) {
 			reply := agents.ModelCallText("the model answered")
 			reply.Usage = &responses.Usage{InputTokens: 120, OutputTokens: 34, TotalTokens: 154}

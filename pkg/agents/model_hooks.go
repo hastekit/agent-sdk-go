@@ -2,6 +2,7 @@ package agents
 
 import (
 	"context"
+	"maps"
 
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/constants"
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
@@ -78,6 +79,19 @@ type ModelCall struct {
 
 	// Usage is what the run has spent so far, across every call it has made.
 	Usage responses.Usage `json:"usage"`
+
+	// State is the run's key-value scratchpad, the same one ToolCall.State
+	// hands to tools: whatever earlier tools and hooks have written, and
+	// whatever survived from earlier runs on this thread.
+	//
+	// RunWithModelCallHooks fills this in from the run state it was given, so
+	// a caller building a ModelCall leaves it alone.
+	//
+	// Write with ModelCallHookResult.StateUpdates, not by assigning here. A
+	// durable runtime rebuilds this map from a serialized payload, so writes
+	// to it on the far side reach nothing; it is copied locally too, so that
+	// mistake fails the same way in both places instead of only in production.
+	State map[string]string `json:"state,omitempty"`
 }
 
 // ModelCallResult is what the model's answer cost. It is a struct rather than
@@ -103,6 +117,65 @@ type ModelCallHookResult struct {
 	// Response is that answer. Build it with ModelCallText for the ordinary
 	// case of an assistant message.
 	Response *responses.Response `json:"response,omitempty"`
+
+	// AppendMessages are added to the end of this call's input, after the
+	// conversation, in hook order.
+	//
+	// They are ephemeral. The model sees them on this call and they are never
+	// written to history — the same treatment the loop gives its own budget
+	// reminder, and for the same reason: a note that says "you have one turn
+	// left" is true of one call, and would be a lie in the transcript of every
+	// call after it.
+	//
+	// This is how a hook says something the model should act on now — a policy
+	// warning, an approaching deadline, a budget nearly spent. Only
+	// BeforeModelCall can append; by AfterModelCall there is no request left
+	// to add to, and appends there are ignored. So are appends from a hook
+	// that answers for the model, since the provider is never called.
+	AppendMessages []responses.InputMessageUnion `json:"append_messages,omitempty"`
+
+	// StateUpdates are merged into the run's State, exactly as
+	// ToolCallResponse.StateUpdates are. Hooks apply in order, so the last
+	// writer of a key wins, and a hook that writes only its own keys never
+	// disturbs another's.
+	//
+	// State persists with the thread, so this is how a hook remembers
+	// something across invocations: that it has already warned about a budget,
+	// say, so that it warns once rather than on every iteration.
+	StateUpdates map[string]string `json:"state_updates,omitempty"`
+}
+
+// WithMessages returns r with msgs appended to this call's input. It composes
+// with either decision:
+//
+//	return agents.ContinueModelCall().
+//	    WithMessages(responses.UserMessage("You are nearly out of budget.")).
+//	    WithStateUpdates(map[string]string{"warned": "1"}), nil
+func (r ModelCallHookResult) WithMessages(msgs ...responses.InputMessageUnion) ModelCallHookResult {
+	if len(msgs) == 0 {
+		return r
+	}
+	// Copied rather than appended in place: r is a value, but its slice header
+	// is not, and two results built from one base would otherwise share — and
+	// overwrite — the same backing array.
+	out := make([]responses.InputMessageUnion, 0, len(r.AppendMessages)+len(msgs))
+	out = append(out, r.AppendMessages...)
+	out = append(out, msgs...)
+	r.AppendMessages = out
+	return r
+}
+
+// WithStateUpdates returns r with updates merged into what it writes back to
+// the run's State.
+func (r ModelCallHookResult) WithStateUpdates(updates map[string]string) ModelCallHookResult {
+	if len(updates) == 0 {
+		return r
+	}
+	merged := make(map[string]string, len(r.StateUpdates)+len(updates))
+	maps.Copy(merged, r.StateUpdates)
+	maps.Copy(merged, updates)
+	r.StateUpdates = merged
+	return r
 }
 
 // ContinueModelCall lets the call go on: to the next hook, and then to the
@@ -139,20 +212,53 @@ func ModelCallText(text string) *responses.Response {
 }
 
 // RunWithModelCallHooks runs a model call through its hooks: every
-// BeforeModelCall in order until one answers, then call unless one did, then
-// every AfterModelCall in order.
+// BeforeModelCall in order until one answers, then request unless one did,
+// then every AfterModelCall in order.
 //
-// Locally the hooks are the real ones and call reaches the provider; inside a
-// workflow the hooks are proxies that journal each method as its own step —
-// same order, same decisions, one call to the provider.
+// Locally the hooks are the real ones and the request reaches the provider;
+// inside a workflow the hooks are proxies that journal each method as its own
+// step — same order, same decisions, one call to the provider.
+//
+// Everything the hooks are allowed to change, this function applies:
+//
+//   - runState is what they read and write. They are shown a copy of it, and
+//     what they return in StateUpdates is merged back in hook order.
+//   - request gains whatever they appended, in hook order, after the messages
+//     it already carries. Nothing is appended once a hook has answered for
+//     the model, since the request is then never sent.
+//
+// The caller hands over the request and the run state and gets a response
+// back; it does not assemble any of this itself, so the loop cannot apply the
+// rules differently from the durable runtimes.
 func RunWithModelCallHooks(
 	ctx context.Context,
 	hooks []ModelCallHook,
 	call *ModelCall,
+	request *responses.Request,
+	runState map[string]string,
 	invoke func(context.Context) (*responses.Response, error),
 ) (*responses.Response, error) {
-	var response *responses.Response
-	handled := false
+	// Hooks read a copy. Writing to it reaches nothing under a durable
+	// runtime, where this map was rebuilt from a serialized payload, and
+	// copying here makes that true locally as well.
+	call.State = maps.Clone(runState)
+
+	var (
+		response *responses.Response
+		appended []responses.InputMessageUnion
+		handled  bool
+	)
+
+	// apply merges a hook's state writes as they are returned, so a hook later
+	// in the chain reads what an earlier one wrote even on the call that wrote
+	// it. Later writers win a shared key, the rule tool results already follow.
+	apply := func(res ModelCallHookResult) {
+		if len(res.StateUpdates) == 0 {
+			return
+		}
+		maps.Copy(runState, res.StateUpdates)
+		maps.Copy(call.State, res.StateUpdates)
+	}
 
 	for _, hook := range hooks {
 		if hook == nil {
@@ -162,13 +268,19 @@ func RunWithModelCallHooks(
 		if err != nil {
 			return nil, err
 		}
+		apply(res)
+		appended = append(appended, res.AppendMessages...)
 		if res.Handled {
+			// Anything appended so far goes with the request that is now
+			// never sent.
 			response, handled = res.Response, true
 			break
 		}
 	}
 
 	if !handled {
+		appendToRequest(request, appended)
+
 		var err error
 		response, err = invoke(ctx)
 		if err != nil {
@@ -189,10 +301,28 @@ func RunWithModelCallHooks(
 		if err != nil {
 			return nil, err
 		}
+		apply(res)
 		if res.Handled {
 			response = res.Response
 		}
 	}
 
 	return response, nil
+}
+
+// appendToRequest adds the hooks' messages to the end of the request's input.
+//
+// The list is rebuilt rather than appended to in place: the caller still holds
+// the slice it passed, and appending into its spare capacity would write these
+// ephemeral notes over whatever it does with it next.
+func appendToRequest(request *responses.Request, appended []responses.InputMessageUnion) {
+	if request == nil || len(appended) == 0 {
+		return
+	}
+
+	existing := request.Input.OfInputMessageList
+	merged := make([]responses.InputMessageUnion, 0, len(existing)+len(appended))
+	merged = append(merged, existing...)
+	merged = append(merged, appended...)
+	request.Input.OfInputMessageList = merged
 }
