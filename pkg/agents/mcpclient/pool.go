@@ -14,6 +14,10 @@ var (
 	// globalPool is the package-level connection pool shared across all MCPClient instances.
 	// Since temporal/restate workers are long-lived processes, this pool is shared across
 	// all activity/handler executions on the same worker.
+	//
+	// The timeout is how long a connection may sit doing nothing, not how long
+	// it may live: a call in flight holds it open however long it takes. See
+	// poolEntry.inFlight.
 	globalPool = newConnectionPool(5 * time.Minute)
 )
 
@@ -64,7 +68,61 @@ func (e *CachedToolEntry) expired() bool {
 type poolEntry struct {
 	client   *mcp.ClientSession
 	lastUsed time.Time
-	mu       sync.Mutex
+
+	// inFlight counts the callers currently using this session — a tool call
+	// waiting on the server, and in time a background task's wait polling
+	// tasks/get. A connection with work on it is not idle, however long ago it
+	// was handed out: a tool that takes ten minutes updates lastUsed twice,
+	// at each end, and nothing in between.
+	//
+	// Closing under such a call is what this exists to prevent. The session's
+	// Close blocks until in-flight requests finish, so a pool that closed one
+	// would then sit inside Close holding its own lock, and every other
+	// conversation would block trying to check a connection out.
+	inFlight int
+
+	mu sync.Mutex
+}
+
+// idle reports whether nothing is using this connection and nothing has for
+// longer than timeout.
+func (e *poolEntry) idle(now time.Time, timeout time.Duration) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.inFlight == 0 && now.Sub(e.lastUsed) > timeout
+}
+
+// acquire marks one caller as using the connection, and returns the function
+// that says they are done.
+func (e *poolEntry) acquire() func() {
+	e.mu.Lock()
+	e.inFlight++
+	e.lastUsed = time.Now()
+	e.mu.Unlock()
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			e.mu.Lock()
+			e.inFlight--
+			// Idleness is measured from the end of the work, not the start of
+			// it — otherwise a long call comes back already stale and the next
+			// sweep closes a connection that has just proved it is useful.
+			e.lastUsed = time.Now()
+			e.mu.Unlock()
+		})
+	}
+}
+
+func (e *poolEntry) close() {
+	e.mu.Lock()
+	client := e.client
+	e.client = nil
+	e.mu.Unlock()
+
+	if client != nil {
+		client.Close()
+	}
 }
 
 // connectionPool manages reusable MCP connections keyed by endpoint+transport+headers.
@@ -97,7 +155,11 @@ func newConnectionPool(idleTimeout time.Duration) *connectionPool {
 // the activity/handler context is cancelled after the function returns. If the SSE
 // reader goroutine were tied to that context, it would die after the first tool call,
 // making the pooled connection unusable for subsequent calls.
-func (p *connectionPool) Checkout(ctx context.Context, conn serverConn) (*mcp.ClientSession, error) {
+// The returned release must be called when the caller is done with the
+// session. Until it is, the connection counts as in use and is never swept as
+// idle — which is what keeps a long tool call, or a background task's wait,
+// from having the connection closed under it.
+func (p *connectionPool) Checkout(ctx context.Context, conn serverConn) (*mcp.ClientSession, func(), error) {
 	key := conn.key()
 
 	p.mu.RLock()
@@ -106,12 +168,11 @@ func (p *connectionPool) Checkout(ctx context.Context, conn serverConn) (*mcp.Cl
 
 	if exists {
 		entry.mu.Lock()
-		entry.lastUsed = time.Now()
 		cli := entry.client
 		entry.mu.Unlock()
 
 		if cli != nil {
-			return cli, nil
+			return cli, entry.acquire(), nil
 		}
 	}
 
@@ -120,32 +181,46 @@ func (p *connectionPool) Checkout(ctx context.Context, conn serverConn) (*mcp.Cl
 	// context (e.g. a Temporal activity context).
 	cli, err := createConnection(context.Background(), conn)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+
+	fresh := &poolEntry{client: cli, lastUsed: time.Now()}
+	release := fresh.acquire()
 
 	p.mu.Lock()
-	p.connections[key] = &poolEntry{
-		client:   cli,
-		lastUsed: time.Now(),
+	// Another caller may have raced us to it. Theirs is already in the map and
+	// may have work on it, so this one is the spare: hand back the one that is
+	// in the pool and close ours rather than replacing a connection somebody
+	// is using.
+	if existing, ok := p.connections[key]; ok && existing.client != nil {
+		p.mu.Unlock()
+		release()
+		go fresh.close()
+		return existing.client, existing.acquire(), nil
 	}
+	p.connections[key] = fresh
 	p.mu.Unlock()
 
-	return cli, nil
+	return cli, release, nil
 }
 
-// Remove removes a connection from the pool (e.g., when it's known to be dead).
+// Remove takes a connection out of the pool, for one believed dead.
+//
+// Detaching is immediate, so nobody else is handed it again. Closing is not:
+// the session's Close waits for whatever is still in flight on it, and the
+// caller here is a tool call wanting to retry — it should not wait on somebody
+// else's request to a server that has probably stopped answering.
 func (p *connectionPool) Remove(conn serverConn) {
 	key := conn.key()
+
 	p.mu.Lock()
-	if entry, ok := p.connections[key]; ok {
-		entry.mu.Lock()
-		if entry.client != nil {
-			entry.client.Close()
-		}
-		entry.mu.Unlock()
-		delete(p.connections, key)
-	}
+	entry, ok := p.connections[key]
+	delete(p.connections, key)
 	p.mu.Unlock()
+
+	if ok {
+		go entry.close()
+	}
 }
 
 func (p *connectionPool) cleanupLoop() {
@@ -162,37 +237,61 @@ func (p *connectionPool) cleanupLoop() {
 	}
 }
 
+// cleanupIdle closes connections nothing has used for a while.
+//
+// It closes outside the pool's lock, always. A session's Close waits for its
+// in-flight requests, so closing under the lock would park the sweep inside
+// Close with the pool held — and every conversation in the process would block
+// checking a connection out, on a server none of them were talking to.
+// Entries with work on them are not swept at all; this is the second line.
 func (p *connectionPool) cleanupIdle() {
-	now := time.Now()
+	for _, entry := range p.takeIdle(time.Now()) {
+		entry.close()
+	}
+}
+
+// takeIdle detaches the connections nothing has used for a while and hands
+// them back for the caller to close.
+//
+// Detaching and closing are separate on purpose, and this is where the split
+// lives: a session's Close waits for its in-flight requests, so closing inside
+// here would park the sweep with the pool held, and every conversation in the
+// process would block checking a connection out — on a server none of them
+// were talking to. Nothing that takes the pool's lock may also close.
+func (p *connectionPool) takeIdle(now time.Time) []*poolEntry {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	var idle []*poolEntry
 	for key, entry := range p.connections {
-		entry.mu.Lock()
-		if now.Sub(entry.lastUsed) > p.idleTimeout {
-			if entry.client != nil {
-				entry.client.Close()
-			}
-			delete(p.connections, key)
-			slog.Debug("MCP connection pool: closed idle connection", slog.String("key", key))
+		if !entry.idle(now, p.idleTimeout) {
+			continue
 		}
-		entry.mu.Unlock()
+		delete(p.connections, key)
+		idle = append(idle, entry)
+		slog.Debug("MCP connection pool: closing idle connection", slog.String("key", key))
 	}
+	return idle
 }
 
 // Close closes all connections and stops the cleanup goroutine.
 func (p *connectionPool) Close() {
 	p.stopOnce.Do(func() {
 		close(p.stopCleanup)
+
 		p.mu.Lock()
-		defer p.mu.Unlock()
+		closing := make([]*poolEntry, 0, len(p.connections))
 		for key, entry := range p.connections {
-			entry.mu.Lock()
-			if entry.client != nil {
-				entry.client.Close()
-			}
-			entry.mu.Unlock()
+			closing = append(closing, entry)
 			delete(p.connections, key)
+		}
+		p.mu.Unlock()
+
+		// Outside the lock, like the sweep — and waited for, unlike Remove:
+		// this is shutdown, and a server with a request still in flight
+		// deserves the chance to finish it.
+		for _, entry := range closing {
+			entry.close()
 		}
 	})
 }
