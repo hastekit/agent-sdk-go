@@ -2,6 +2,7 @@ package temporal_runtime
 
 import (
 	"context"
+	"time"
 
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/messages"
@@ -49,6 +50,13 @@ type TemporalStreamBrokerProxy struct {
 	wrappedBroker agents.StreamBroker
 }
 
+// The proxy must offer every optional capability the loop looks for, or that
+// capability silently disappears inside a workflow.
+var (
+	_ agents.StreamBroker = (*TemporalStreamBrokerProxy)(nil)
+	_ agents.RunFeed      = (*TemporalStreamBrokerProxy)(nil)
+)
+
 func NewTemporalStreamBrokerProxy(workflowCtx workflow.Context, prefix string, wrappedBroker agents.StreamBroker) agents.StreamBroker {
 	return &TemporalStreamBrokerProxy{
 		workflowCtx:   workflowCtx,
@@ -88,6 +96,38 @@ func (p *TemporalStreamBrokerProxy) IsStopped(ctx context.Context, channel strin
 		return false, err
 	}
 	return stopped, nil
+}
+
+// PublishRunEvent and ReadRunEvents forward the run feed to the real broker.
+//
+// Delegated rather than wrapped in an activity, like Publish above: this is a
+// fire-and-forget notification, and the loop only publishes from inside a
+// DurableStep, so it happens once at the live edge rather than on every replay.
+//
+// They have to be here at all because a capability is only offered by the type
+// that declares it. The loop reaches the feed by asking whether its broker is
+// an agents.RunFeed, and a proxy that merely holds one that is would answer no
+// — which is exactly what happened: under Temporal the feed went quiet, with
+// nothing to say why.
+func (p *TemporalStreamBrokerProxy) PublishRunEvent(ctx context.Context, event agents.RunEvent) error {
+	feed, ok := p.wrappedBroker.(agents.RunFeed)
+	if !ok {
+		return nil
+	}
+	return feed.PublishRunEvent(ctx, event)
+}
+
+func (p *TemporalStreamBrokerProxy) ReadRunEvents(
+	ctx context.Context,
+	namespaces []string,
+	cursor string,
+	wait time.Duration,
+) ([]agents.RunEvent, string, error) {
+	feed, ok := p.wrappedBroker.(agents.RunFeed)
+	if !ok {
+		return nil, cursor, nil
+	}
+	return feed.ReadRunEvents(ctx, namespaces, cursor, wait)
 }
 
 func (p *TemporalStreamBrokerProxy) DrainMessages(ctx context.Context, channel string) ([]messages.Message, error) {

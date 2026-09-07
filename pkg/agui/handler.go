@@ -140,6 +140,15 @@ func NewHandler(registry Registry, opts ...Option) http.Handler {
 		serveStream(w, r, agent, r.PathValue("thread"), o)
 	})
 
+	mux.HandleFunc("GET /agents/{agent}/runs", func(w http.ResponseWriter, r *http.Request) {
+		agent, ok := registry.Agent(r.PathValue("agent"))
+		if !ok {
+			writeJSONError(w, http.StatusNotFound, "agent not found")
+			return
+		}
+		serveRunFeed(w, r, agent, o)
+	})
+
 	mux.HandleFunc("GET /agents/{agent}/threads", func(w http.ResponseWriter, r *http.Request) {
 		agent, ok := registry.Agent(r.PathValue("agent"))
 		if !ok {
@@ -196,9 +205,14 @@ func serveThreadMessages(w http.ResponseWriter, r *http.Request, agent *agents.A
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
+	// run carries what the last run left outstanding — a pause waiting on a
+	// decision, tasks still working. A browser that has just loaded has no run
+	// to learn either from, and without this an approval the agent is still
+	// waiting on simply is not on the screen.
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"threadId": threadID,
 		"messages": HistoryToMessages(rows),
+		"run":      threadRunState(rows),
 	})
 }
 
@@ -301,8 +315,16 @@ func serveStream(w http.ResponseWriter, r *http.Request, agent *agents.Agent, th
 
 	// Subscribing to a channel with no run behind it would block until the
 	// client gives up: nothing publishes to it and nothing closes it.
-	active, err := agent.StreamBroker().IsActive(ctx, streamID)
+	//
+	// `wait` lets a client that has just been told a run started hold on for
+	// it rather than race it. A watch reports the claim, and the run publishes
+	// its first chunk a moment later; without the wait a rejoin landing in
+	// between would be told there is nothing to join.
+	active, err := waitForRunChange(ctx, agent.StreamBroker(), streamID, false, watchWait(r, 0))
 	if err != nil {
+		if ctx.Err() != nil {
+			return
+		}
 		writeJSONError(w, http.StatusInternalServerError, "unable to check run: "+err.Error())
 		return
 	}
@@ -335,6 +357,16 @@ func serveStream(w http.ResponseWriter, r *http.Request, agent *agents.Agent, th
 	// is why chunks are translated only once a run is seen.
 	var translator *Translator
 
+	// Chunks that arrived before the run did, held rather than dropped.
+	//
+	// Something can be published to a channel between it being claimed for a
+	// run and that run opening — a background task announcing that its result
+	// has landed does exactly that. Discarding those would lose the event, and
+	// emitting them as they arrive would put a CUSTOM event ahead of
+	// RUN_STARTED, which @ag-ui/client rejects. So they wait, and go out in
+	// order once the run has opened.
+	var pending []*responses.ResponseChunk
+
 	keepalive := time.NewTicker(o.keepalive)
 	defer keepalive.Stop()
 
@@ -358,13 +390,22 @@ func serveStream(w http.ResponseWriter, r *http.Request, agent *agents.Agent, th
 				runID := runIDOf(chunk)
 				if runID == "" {
 					// Nothing to attribute this to yet — the run's opening
-					// chunk hasn't been replayed.
+					// chunk hasn't been replayed. Hold it.
+					pending = append(pending, chunk)
 					continue
 				}
 				translator = NewTranslator(threadID, runID)
 				if err := enc.EncodeAll(ctx, translator.Start()); err != nil {
 					return
 				}
+				for _, held := range pending {
+					if events := translator.Translate(held); len(events) > 0 {
+						if err := enc.EncodeAll(ctx, events); err != nil {
+							return
+						}
+					}
+				}
+				pending = nil
 			}
 
 			if events := translator.Translate(chunk); len(events) > 0 {

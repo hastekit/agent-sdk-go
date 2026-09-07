@@ -14,8 +14,17 @@ import {
   fetchMessages,
   runUrl,
   relativeTime,
+  watchRunFeed,
   type ThreadInfo,
+  type ThreadRunState,
+  type ThreadBackgroundTask,
 } from "./api";
+
+// How long the run feed holds a request open, and how long to wait after a
+// failure before asking again. The wait sits comfortably inside the idle
+// timeouts proxies usually impose.
+const FEED_WAIT_SECONDS = 25;
+const FEED_RETRY_MS = 2000;
 
 // App drives the SDK's AG-UI endpoints through CopilotKit v2 + an
 // @ag-ui/client HttpAgent registered via `selfManagedAgents`. A
@@ -33,10 +42,35 @@ import {
 interface Active {
   threadId: string;
   initialMessages: AGUIMessage[];
+  // What the thread's last run left outstanding — a decision it is waiting
+  // on, tasks still working. Null for a settled thread, and for a new one.
+  run: ThreadRunState | null;
 }
 
 function newActive(): Active {
-  return { threadId: crypto.randomUUID(), initialMessages: [] };
+  return { threadId: crypto.randomUUID(), initialMessages: [], run: null };
+}
+
+// The open conversation, in the address bar.
+//
+// Without it a reload lands in a brand-new empty chat and the conversation the
+// user was in is only in the sidebar — which is no use at all when the agent
+// is sitting on a question, since the prompt to answer it is on the thread
+// they just lost. In the URL rather than storage so it survives a shared link
+// and back/forward.
+const THREAD_PARAM = "thread";
+
+function threadFromURL(): string {
+  return new URLSearchParams(window.location.search).get(THREAD_PARAM) ?? "";
+}
+
+// replaceState, not push: switching conversation is not a navigation the back
+// button should have to walk through.
+function rememberThread(threadId: string) {
+  const url = new URL(window.location.href);
+  if (threadId) url.searchParams.set(THREAD_PARAM, threadId);
+  else url.searchParams.delete(THREAD_PARAM);
+  window.history.replaceState(null, "", url.toString());
 }
 
 export default function App() {
@@ -55,6 +89,18 @@ export default function App() {
   // starts or the thread/agent changes.
   const [runError, setRunError] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+
+  // The open conversation, readable from the feed loop without restarting it.
+  // The loop outlives any one thread — that is the point of it — so it cannot
+  // close over the thread id.
+  const activeThreadIdRef = useRef(active.threadId);
+  useEffect(() => {
+    activeThreadIdRef.current = active.threadId;
+  }, [active.threadId]);
+
+  // Likewise the agent: useMemo replaces it whenever the thread changes, and
+  // the feed loop must not be torn down and restarted each time.
+  const agentRef = useRef<StoppableHttpAgent | null>(null);
 
   // Load the agent list once.
   useEffect(() => {
@@ -107,6 +153,10 @@ export default function App() {
     });
   }, [agentName, active.threadId, active.initialMessages, fullHistory]);
 
+  useEffect(() => {
+    agentRef.current = agent;
+  }, [agent]);
+
   // Rejoining a run in flight is CopilotChat's own doing: it connects to
   // the thread whenever it is given an explicit threadId, and the server
   // replays the run so far before following it live. Nothing to start from
@@ -123,6 +173,48 @@ export default function App() {
     if (!agent) return;
     agent.subscribe({
       onRunInitialized: () => setRunError(null),
+      // A live run says what is happening, so the snapshot the page loaded
+      // with is behind it and goes.
+      //
+      // On the RUN_STARTED event, not on initialization: CopilotChat connects
+      // to the thread whenever it is given one, and connectAgent runs the same
+      // path a real run does — so initialization fires even when there was
+      // nothing to join. Clearing there wiped a restored approval card the
+      // instant it was drawn. This fires only when a run is actually
+      // streaming, which is the thing that supersedes it.
+      onRunStartedEvent: () => setRestored(null),
+      onCustomEvent: ({ event }: any) => {
+        const value = event?.value ?? {};
+        if (event?.name === "hastekit.background_task_started" && value.taskId) {
+          setLiveTasks((current) => {
+            const next = new Map(current);
+            next.set(value.taskId, {
+              taskId: value.taskId,
+              callId: value.toolCallId,
+              toolName: value.toolName,
+              streamId: value.streamId,
+            });
+            return next;
+          });
+          return;
+        }
+        if (event?.name === "hastekit.background_task_completed" && value.taskId) {
+          setLiveTasks((current) => {
+            if (!current.has(value.taskId)) return current;
+            const next = new Map(current);
+            next.delete(value.taskId);
+            return next;
+          });
+          // The snapshot the page opened with may also be carrying it.
+          setRestored((current) => {
+            if (!current?.backgroundTasks?.length) return current;
+            const remaining = current.backgroundTasks.filter(
+              (t) => t.taskId !== value.taskId
+            );
+            return { ...current, backgroundTasks: remaining };
+          });
+        }
+      },
       onRunFinalized: () => refreshThreads(),
       onRunErrorEvent: ({ event }: any) =>
         setRunError(event?.message || "The agent run failed."),
@@ -133,8 +225,123 @@ export default function App() {
     // by useMemo when threadId changes, dropping the subscription.
   }, [agent, refreshThreads]);
 
+  // Conversations that have done something since the user last looked at
+  // them. Cleared when the thread is opened, so the badge means "there is
+  // something here you have not seen", not "this ran recently".
+  const [unseen, setUnseen] = useState<Set<string>>(() => new Set());
+
+  // Watch every conversation in the namespace, not just the open one.
+  //
+  // The per-thread watch below covers the conversation on screen. This covers
+  // the rest: a background task finishing in conversation A while the user
+  // reads conversation B, or a conversation that did not exist when the page
+  // loaded. Neither could be reached by anything keyed to a thread.
+  //
+  // The cursor is what makes a run that started and ended while the tab was
+  // in the background still count — the feed replays it on the next poll
+  // rather than dropping it.
+  useEffect(() => {
+    if (!agentName) return;
+
+    let stopped = false;
+    const controller = new AbortController();
+
+    const loop = async () => {
+      let cursor = "";
+      while (!stopped) {
+        try {
+          const seen = await watchRunFeed(
+            agentName,
+            cursor,
+            FEED_WAIT_SECONDS,
+            undefined,
+            controller.signal
+          );
+          if (stopped) return;
+          cursor = seen.cursor;
+
+          if (seen.events.length === 0) continue;
+
+          // A run ending is when the thread row is worth re-reading: its
+          // title and timestamp are written server-side as the run saves.
+          if (seen.events.some((e) => e.event === "RUN_FINISHED")) {
+            refreshThreads();
+          }
+
+          // A run on the conversation the user is reading is one to join, not
+          // to badge: the answer belongs on screen as it is written.
+          if (seen.events.some((e) => e.event === "RUN_STARTED" && e.threadId === activeThreadIdRef.current)) {
+            void agentRef.current?.joinIfIdle();
+          }
+
+          setUnseen((current) => {
+            const next = new Set(current);
+            let changed = false;
+            for (const event of seen.events) {
+              // The conversation on screen is being read as it happens;
+              // badging it would only ask the user to look at what they are
+              // already looking at.
+              if (event.threadId === activeThreadIdRef.current) continue;
+              if (next.has(event.threadId)) continue;
+              next.add(event.threadId);
+              changed = true;
+            }
+            return changed ? next : current;
+          });
+        } catch (error) {
+          if (stopped || controller.signal.aborted) return;
+          console.error("run feed failed; retrying", error);
+          await new Promise((done) => setTimeout(done, FEED_RETRY_MS));
+        }
+      }
+    };
+
+    void loop();
+    return () => {
+      stopped = true;
+      controller.abort();
+    };
+  }, [agentName, refreshThreads]);
+
   // Clear a stale run error when the user switches thread or agent.
   useEffect(() => setRunError(null), [active.threadId, agentName]);
+
+  // What the thread was left waiting on, as the page found it. Held apart
+  // from `active` because it is transient: the moment a run starts, the run
+  // is the source of truth and this is stale.
+  const [restored, setRestored] = useState<ThreadRunState | null>(null);
+  useEffect(() => setRestored(active.run), [active.threadId, active.run]);
+
+  // Tasks seen starting in this session, keyed by task id.
+  //
+  // The reopened snapshot only covers a conversation the page has just
+  // loaded. A task that starts while the user is sitting here is not in it —
+  // the run that started the task ends normally, and without this the chat
+  // simply goes quiet with nothing to say why. The run's own stream announces
+  // both ends, so that is what this follows.
+  const [liveTasks, setLiveTasks] = useState<Map<string, ThreadBackgroundTask>>(
+    () => new Map()
+  );
+  useEffect(() => setLiveTasks(new Map()), [active.threadId]);
+
+  // What the conversation is waiting on, however we came to know: the
+  // snapshot it was opened with, plus anything seen starting since.
+  const runningTasks = useMemo(() => {
+    const byID = new Map<string, ThreadBackgroundTask>();
+    for (const task of restored?.backgroundTasks ?? []) byID.set(task.taskId, task);
+    for (const [id, task] of liveTasks) byID.set(id, task);
+    return [...byID.values()];
+  }, [restored, liveTasks]);
+
+  // Opening a conversation is what marks it seen.
+  useEffect(() => {
+    setUnseen((current) => {
+      if (!current.has(active.threadId)) return current;
+      const next = new Set(current);
+      next.delete(active.threadId);
+      return next;
+    });
+  }, [active.threadId]);
 
   // Steering: a turn typed while the agent is working folds into the run
   // in flight (see StoppableHttpAgent.steer). Memoised so the composer
@@ -148,21 +355,41 @@ export default function App() {
     [steer]
   );
 
-  const selectThread = useCallback(
-    async (t: ThreadInfo) => {
-      if (t.thread_id === active.threadId) return;
+  const openThread = useCallback(
+    async (threadId: string) => {
       try {
-        const messages = await fetchMessages(agentName, t.thread_id);
-        setActive({
-          threadId: t.thread_id,
-          initialMessages: messages,
-        });
+        const { messages, run } = await fetchMessages(agentName, threadId);
+        setActive({ threadId, initialMessages: messages, run });
       } catch (e) {
         setError(String(e));
       }
     },
-    [agentName, active.threadId]
+    [agentName]
   );
+
+  const selectThread = useCallback(
+    async (t: ThreadInfo) => {
+      if (t.thread_id === active.threadId) return;
+      await openThread(t.thread_id);
+    },
+    [openThread, active.threadId]
+  );
+
+  // Reopen whatever the address bar names, once there is an agent to open it
+  // against. Runs on load and on an agent change; a thread already open is
+  // left alone so this cannot fight the sidebar.
+  useEffect(() => {
+    if (!agentName) return;
+    const wanted = threadFromURL();
+    if (!wanted || wanted === active.threadId) return;
+    void openThread(wanted);
+    // active.threadId is deliberately not a dependency: this is for arriving
+    // at a URL, not for following the user around after that.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agentName, openThread]);
+
+  // And keep it pointing at whatever is open.
+  useEffect(() => rememberThread(active.threadId), [active.threadId]);
 
   const startNewChat = useCallback(() => setActive(newActive()), []);
 
@@ -185,6 +412,7 @@ export default function App() {
       <Sidebar
         threads={threads}
         activeThreadId={active.threadId}
+        unseen={unseen}
         onSelect={selectThread}
         onNew={startNewChat}
         onCollapse={() => setSidebarOpen(false)}
@@ -216,6 +444,34 @@ export default function App() {
             </header>
             <InterruptHandler agentName={agentName} />
             <InlineToolRenderer agentName={agentName} />
+            {runningTasks.length > 0 && (
+              // Keyed by the tasks it is about, so dismissing it hides that
+              // set and a job starting later says so rather than staying
+              // silent because the note was waved away once.
+              <BackgroundTaskNote
+                key={runningTasks.map((t) => t.taskId).join(",")}
+                tasks={runningTasks}
+              />
+            )}
+            {restored?.interrupts?.length ? (
+              <div className="restored-interrupt">
+                <div className="hint">
+                  This conversation is waiting on you. Reloading the page lost the
+                  prompt, not the request.
+                </div>
+                <InterruptCard
+                  entries={restored.interrupts as unknown as InterruptEntry[]}
+                  onSubmit={(decisions) => {
+                    // Clear first: the resume starts a run, and the run is
+                    // what shows what happened next.
+                    setRestored(null);
+                    agent.resume(decisions).catch((e) => {
+                      setRunError(String(e));
+                    });
+                  }}
+                />
+              </div>
+            ) : null}
             {runError && (
               <div className="run-error" role="alert">
                 <span className="ico">⚠</span>
@@ -293,6 +549,7 @@ const LOGO = `${import.meta.env.BASE_URL}hastekit-logo.svg`;
 function Sidebar({
   threads,
   activeThreadId,
+  unseen,
   onSelect,
   onNew,
   onCollapse,
@@ -301,6 +558,7 @@ function Sidebar({
 }: {
   threads: ThreadInfo[];
   activeThreadId: string;
+  unseen: Set<string>;
   onSelect: (t: ThreadInfo) => void;
   onNew: () => void;
   onCollapse: () => void;
@@ -335,16 +593,27 @@ function Sidebar({
         {listingSupported && !error && threads.length === 0 && (
           <div className="hint">No conversations yet — start a new chat.</div>
         )}
-        {threads.map((t) => (
-          <button
-            key={t.thread_id}
-            className={"thread-item" + (t.thread_id === activeThreadId ? " selected" : "")}
-            onClick={() => onSelect(t)}
-            title={`${t.title || "Untitled"} · ${relativeTime(t.updated_at)}`}
-          >
-            {t.title || "Untitled"}
-          </button>
-        ))}
+        {threads.map((t) => {
+          const hasUnseen = unseen.has(t.thread_id);
+          return (
+            <button
+              key={t.thread_id}
+              className={
+                "thread-item" +
+                (t.thread_id === activeThreadId ? " selected" : "") +
+                (hasUnseen ? " unseen" : "")
+              }
+              onClick={() => onSelect(t)}
+              title={
+                `${t.title || "Untitled"} · ${relativeTime(t.updated_at)}` +
+                (hasUnseen ? " · new activity" : "")
+              }
+            >
+              <span className="thread-title">{t.title || "Untitled"}</span>
+              {hasUnseen && <span className="thread-dot" aria-label="New activity" />}
+            </button>
+          );
+        })}
       </div>
     </aside>
   );
@@ -800,4 +1069,34 @@ function safePretty(v: unknown): string {
   } catch {
     return String(v);
   }
+}
+
+// BackgroundTaskNote says a tool is still working after the turn that called
+// it finished.
+//
+// Without it a reloaded page reads as though the agent simply stopped
+// talking: the tool answered, the run ended, and the actual work is somewhere
+// else entirely. The note is dismissible because the task may well outlast
+// the user's interest in being told about it.
+function BackgroundTaskNote({ tasks }: { tasks: ThreadBackgroundTask[] }) {
+  const [hidden, setHidden] = useState(false);
+  if (hidden) return null;
+
+  return (
+    <div className="background-note" role="status">
+      <span className="spinner" aria-hidden="true" />
+      <div className="msg">
+        {tasks.length === 1
+          ? `${tasks[0].toolName || "A background job"} is still running. Its result will arrive here when it finishes.`
+          : `${tasks.length} background jobs are still running. Their results will arrive here when they finish.`}
+      </div>
+      <button
+        className="dismiss"
+        onClick={() => setHidden(true)}
+        aria-label="Dismiss"
+      >
+        ×
+      </button>
+    </div>
+  );
 }

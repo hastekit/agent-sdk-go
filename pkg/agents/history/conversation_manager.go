@@ -190,10 +190,19 @@ func NewRun(ctx context.Context, cm *CommonConversationManager, namespace string
 		// GetMessages of every turn see "no context yet" and skip
 		// summarization — so an agent that answers in one LLM call per turn
 		// (no tool loop) would never summarize at all.
+		//
+		// Background tasks carry forward for the same reason: a task outlives
+		// the run that started it, so the record of what is still outstanding
+		// belongs to the thread. Left behind, a task would stop being reported
+		// the moment the user took a turn of their own — and the reader has no
+		// other way to know it is still working. Each is dropped when its
+		// result arrives, which is what keeps the list from growing forever.
 		var lastAgent string
 		var contextTokens, pendingContextTokens int
+		var backgroundTasks map[string]agentstate.BackgroundTask
 		if cr.RunState != nil {
 			lastAgent = cr.RunState.LastAgentName
+			backgroundTasks = cr.RunState.BackgroundTasks
 			contextTokens = cr.RunState.ContextTokens
 			// The estimate carries too, though it is usually zero here: a run
 			// that ends normally does so straight after an LLM call, and that
@@ -209,6 +218,7 @@ func NewRun(ctx context.Context, cm *CommonConversationManager, namespace string
 		cr.RunState.LastAgentName = lastAgent
 		cr.RunState.ContextTokens = contextTokens
 		cr.RunState.PendingContextTokens = pendingContextTokens
+		cr.RunState.BackgroundTasks = backgroundTasks
 	} else {
 		// Continuing the previous run
 		runID = cr.previousRunId
@@ -649,6 +659,13 @@ func (cm *ConversationRunManager) ProcessIncomingMessages(message Message, queue
 }
 
 func (cm *ConversationRunManager) processIncoming(message Message, queue, estimate bool) {
+	// A background task's result landing is the answer to something the run is
+	// carrying, the same as an approval is — so it is reconciled here, where
+	// every incoming bundle already passes and where the run state is to hand.
+	// Both ways a result can arrive reach this: the turn that opens a run
+	// woken by one, and the queue a run already going drains.
+	cm.RunState.CompleteBackgroundTask(message.BackgroundTaskID)
+
 	// Process incoming message, and extract tool approvals and user messages
 	hasNewApproval := false
 	var stored []responses.InputMessageUnion

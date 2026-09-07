@@ -15,6 +15,14 @@ type EventStream = ReturnType<typeof transformHttpEventStream>;
 // the broker stream id that identifies it (agui.CustomNameStreamID).
 const STREAM_ID_EVENT = "hastekit.stream_id";
 
+// The gap between a POST /run claiming the thread and the local run reporting
+// itself started. The feed can see the claim first; pausing this long before
+// acting on it lets the local run declare itself, so we do not stream a run we
+// are already streaming.
+const JOIN_SETTLE_MS = 250;
+
+const sleep = (ms: number) => new Promise((done) => setTimeout(done, ms));
+
 // Roles a client can contribute. Everything else (assistant, tool) is
 // the server's own output being echoed back to it.
 const INCOMING_ROLES = new Set(["user", "system", "developer"]);
@@ -77,6 +85,12 @@ export class StoppableHttpAgent extends HttpAgent {
   // vanishes until reloaded. Re-seeding it below puts it back.
   private readonly history: Message[];
 
+  // Whether a run is going through this agent's own pipeline — one the user
+  // started, or one the watch joined. The watch reads it to keep from
+  // attaching a second connection to a run already being streamed, which
+  // would feed the pipeline every event twice.
+  private running = false;
+
   constructor(config: {
     agentName: string;
     url: string;
@@ -99,6 +113,7 @@ export class StoppableHttpAgent extends HttpAgent {
       // so the chat re-renders even when there is no run to rejoin. Keyed by
       // id, so an ordinary turn (which still has its history) is untouched.
       onRunInitialized: ({ messages }) => {
+        this.running = true;
         const missing = this.history.filter(
           (m) => !messages.some((seen) => seen.id === m.id)
         );
@@ -125,6 +140,7 @@ export class StoppableHttpAgent extends HttpAgent {
       // finished one. The steered turns are likewise done — the next run
       // seeds its snapshot from agent.messages, which now carries them.
       onRunFinalized: () => {
+        this.running = false;
         this.streamId = undefined;
         this.steered = [];
       },
@@ -204,6 +220,43 @@ export class StoppableHttpAgent extends HttpAgent {
     void this.connectAgent();
   }
 
+  // ── resume ─────────────────────────────────────────────────────────
+  //
+  // Answers a pause the agent is still sitting on, from a page that has just
+  // loaded and so never saw the interrupt event.
+  //
+  // The live path goes through CopilotKit's useInterrupt, whose resolve()
+  // rides forwardedProps on the next run. There is no live pause to resolve
+  // here — the run that raised it finished, which is how a pause is reported —
+  // so the decisions are posted the same way that hook would have posted them.
+  //
+  // No messages: a resume contributes no new turn. The server builds the
+  // resolution from the decisions alone.
+  async resume(decisions: unknown[]): Promise<void> {
+    const input = {
+      ...this.prepareRunAgentInput(),
+      messages: [],
+      forwardedProps: { command: { resume: { decisions } } },
+    };
+
+    const res = await fetch(this.url, this.requestInit(input as RunAgentInput));
+    if (res.status === 204) {
+      // Folded into a run that had started in the meantime; its stream is
+      // where the answer appears.
+      void this.connectAgent();
+      return;
+    }
+    if (!res.ok) {
+      void res.body?.cancel();
+      throw new Error(`resume → ${res.status}`);
+    }
+
+    // Nothing is reading this response, so drop it and pick the run up on the
+    // thread's own stream — the same way a rejoin does.
+    void res.body?.cancel();
+    void this.connectAgent();
+  }
+
   // connect attaches to whatever this thread already has running, instead
   // of starting a turn. AbstractAgent.connect throws by default — nothing
   // to attach to over plain HTTP — so this points it at the thread's
@@ -217,6 +270,30 @@ export class StoppableHttpAgent extends HttpAgent {
         headers: { Accept: "text/event-stream" },
       })
     );
+  }
+
+  // ── joining a run nobody here started ──────────────────────────────
+  //
+  // The run feed says something began on this thread; this attaches to it.
+  //
+  // Kept apart from the feed on purpose. The feed reports that a run exists;
+  // joining goes through the ordinary rejoin, so a run this browser started
+  // is never streamed twice into the same pipeline.
+  async joinIfIdle(): Promise<void> {
+    // A run of our own owns the thread until it finishes. Attaching a second
+    // connection to it would feed the pipeline every event twice.
+    if (this.running) return;
+
+    // Let a run this browser just started declare itself before we decide it
+    // is somebody else's: the POST claims the thread a moment before the
+    // local run reports itself started, and the feed can see the claim first.
+    await sleep(JOIN_SETTLE_MS);
+    if (this.running) return;
+
+    // connectAgent feeds the thread's stream through the same pipeline a
+    // normal run uses, so the messages land in the chat as they would have,
+    // and resolves when the run ends.
+    await this.connectAgent();
   }
 
   abortRun(): void {

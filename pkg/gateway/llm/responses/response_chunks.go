@@ -74,6 +74,12 @@ type ResponseChunk struct {
 	// is not replayed under durable runtimes. For MCP tools it is the
 	// SDK-native projection of the server's notifications/progress.
 	OfToolProgress *ChunkToolProgress[constants.ChunkTypeToolProgress] `json:",omitempty"`
+
+	// Background tasks: a tool answered its call and kept working. Started
+	// carries the mapping a client needs to follow it; completed says the
+	// agent has taken the result in.
+	OfBackgroundTaskStarted   *ChunkBackgroundTask[constants.ChunkTypeBackgroundTaskStarted]   `json:",omitempty"`
+	OfBackgroundTaskCompleted *ChunkBackgroundTask[constants.ChunkTypeBackgroundTaskCompleted] `json:",omitempty"`
 }
 
 func (u *ResponseChunk) UnmarshalJSON(data []byte) error {
@@ -87,6 +93,18 @@ func (u *ResponseChunk) UnmarshalJSON(data []byte) error {
 	var toolProgress *ChunkToolProgress[constants.ChunkTypeToolProgress]
 	if err := sonic.Unmarshal(data, &toolProgress); err == nil {
 		u.OfToolProgress = toolProgress
+		return nil
+	}
+
+	var backgroundStarted *ChunkBackgroundTask[constants.ChunkTypeBackgroundTaskStarted]
+	if err := sonic.Unmarshal(data, &backgroundStarted); err == nil {
+		u.OfBackgroundTaskStarted = backgroundStarted
+		return nil
+	}
+
+	var backgroundCompleted *ChunkBackgroundTask[constants.ChunkTypeBackgroundTaskCompleted]
+	if err := sonic.Unmarshal(data, &backgroundCompleted); err == nil {
+		u.OfBackgroundTaskCompleted = backgroundCompleted
 		return nil
 	}
 
@@ -423,6 +441,14 @@ func (u *ResponseChunk) MarshalJSON() ([]byte, error) {
 		return sonic.Marshal(u.OfToolProgress)
 	}
 
+	if u.OfBackgroundTaskStarted != nil {
+		return sonic.Marshal(u.OfBackgroundTaskStarted)
+	}
+
+	if u.OfBackgroundTaskCompleted != nil {
+		return sonic.Marshal(u.OfBackgroundTaskCompleted)
+	}
+
 	if u.OfCodeInterpreterCallInProgress != nil {
 		return sonic.Marshal(u.OfCodeInterpreterCallInProgress)
 	}
@@ -592,6 +618,14 @@ func (u *ResponseChunk) ChunkType() string {
 		return u.OfToolProgress.Type.Value()
 	}
 
+	if u.OfBackgroundTaskStarted != nil {
+		return u.OfBackgroundTaskStarted.Type.Value()
+	}
+
+	if u.OfBackgroundTaskCompleted != nil {
+		return u.OfBackgroundTaskCompleted.Type.Value()
+	}
+
 	return ""
 }
 
@@ -616,6 +650,27 @@ type ChunkToolProgress[T any] struct {
 	Progress       float64 `json:"progress"`
 	Total          float64 `json:"total,omitempty"`
 	Message        string  `json:"message,omitempty"`
+}
+
+// ChunkBackgroundTask is a background task beginning or landing, on the run's
+// own event stream.
+//
+// Started carries everything a client needs to follow the task: which call it
+// belongs to, so the row already on screen is the one that updates, and the
+// stream the task publishes its progress on — which is its own, not this run's,
+// because the run is over long before the task is.
+//
+// Completed says the result has arrived, and carries the same identifiers: the
+// run taking it in is usually not the run that started the task, so a client
+// watching only that run has nothing else to place it against.
+type ChunkBackgroundTask[T any] struct {
+	Type     T      `json:"type"`
+	TaskID   string `json:"task_id"`
+	CallID   string `json:"call_id,omitempty"`
+	ToolName string `json:"tool_name,omitempty"`
+
+	// StreamID is the task's own broker channel, where its progress goes.
+	StreamID string `json:"stream_id,omitempty"`
 }
 
 type ChunkRunData struct {

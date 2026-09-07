@@ -2,6 +2,7 @@ package temporal_runtime
 
 import (
 	"context"
+	"log/slog"
 	"maps"
 	"time"
 
@@ -60,7 +61,20 @@ func (a *TemporalAgentV2) GetActivities() map[string]interface{} {
 	for _, tool := range agents.WithSkillTool(a.options.Tools, a.options.Skills) {
 		temporalTool := NewTemporalTool(tool, a.broker)
 		activities[getToolName(a.options.Name, tool)+"_ExecuteToolActivity"] = temporalTool.Execute
+
+		// A tool that starts background tasks needs a second activity: the one
+		// the task's own workflow waits in, long after this run is over.
+		if backgroundTool, ok := tool.(agents.BackgroundTool); ok {
+			temporalBackground := NewTemporalBackgroundTask(backgroundTool, a.broker)
+			activities[getToolName(a.options.Name, tool)+awaitTaskActivitySuffix] = temporalBackground.AwaitTask
+		}
 	}
+
+	// Closing a task's stream and deciding where its result goes are the same
+	// two steps whichever tool started it, so they are registered per agent.
+	temporalDelivery := NewTemporalBackgroundDelivery(a.broker)
+	activities[a.options.Name+closeTaskStreamActivityName] = temporalDelivery.CloseTaskStream
+	activities[a.options.Name+deliverTaskActivityName] = temporalDelivery.DeliverTask
 
 	// Four activities per hook, so the workflow can run each method as its own
 	// step.
@@ -73,6 +87,14 @@ func (a *TemporalAgentV2) GetActivities() map[string]interface{} {
 	}
 
 	return activities
+}
+
+// GetWorkflows returns the workflows to register for this agent, by name.
+func (a *TemporalAgentV2) GetWorkflows() map[string]any {
+	return map[string]any{
+		a.options.Name + "_AgentWorkflow":         a.Execute,
+		a.options.Name + backgroundWorkflowSuffix: NewBackgroundTaskWorkflow(a.options.Name).Execute,
+	}
 }
 
 func (a *TemporalAgentV2) Execute(ctx workflow.Context, in *agents.AgentInput) (*agents.AgentOutput, error) {
@@ -104,6 +126,23 @@ func (a *TemporalAgentV2) Execute(ctx workflow.Context, in *agents.AgentInput) (
 }
 
 func (a *TemporalAgentV2) newTemporalProxyAgent(ctx workflow.Context) *agents.Agent {
+	return a.proxyAgent(ctx, map[string]*agents.Agent{})
+}
+
+// proxyAgent builds the workflow-side agent, reusing any it has already built
+// while walking this graph.
+//
+// built is what makes a cycle finite. Handoffs are a graph, not a tree — a
+// specialist that can hand back to the agent that called it is the ordinary
+// shape — and rebuilding each target in turn walked that cycle until the stack
+// ran out. Registering an agent before wiring its edges is what breaks it: the
+// second visit finds the one already under construction and points at that,
+// so the cycle exists in the rebuilt graph exactly as it does in the original.
+func (a *TemporalAgentV2) proxyAgent(ctx workflow.Context, built map[string]*agents.Agent) *agents.Agent {
+	if existing, ok := built[a.options.Name]; ok {
+		return existing
+	}
+
 	promptProxy := NewTemporalPromptProxy(ctx, a.options.Name)
 
 	llmProxy := NewTemporalLLMProxy(ctx, a.options.Name, a.broker)
@@ -137,6 +176,12 @@ func (a *TemporalAgentV2) newTemporalProxyAgent(ctx workflow.Context) *agents.Ag
 		Output:     a.options.Output,
 		Parameters: a.options.Parameters,
 		MaxLoops:   a.options.MaxLoops,
+		// Behaviour the agent was configured with, and which the workflow
+		// rebuild has to carry: a field left out here does not fail, it just
+		// stops applying inside a workflow. Sticky routing went missing that
+		// way, and nothing said so.
+		StickyHandoff: a.options.StickyHandoff,
+		SingleTurn:    a.options.SingleTurn,
 
 		History:     conversationHistory,
 		Instruction: promptProxy,
@@ -153,16 +198,35 @@ func (a *TemporalAgentV2) newTemporalProxyAgent(ctx workflow.Context) *agents.Ag
 		Hooks:        hookProxies(ctx, a.options.Name, a.options.Hooks),
 		StreamBroker: NewTemporalStreamBrokerProxy(ctx, a.options.Name, a.broker),
 		DurableStep:  NewTemporalDurableStep(ctx),
+		// A task's wait outlives this run, so it goes to a workflow of its own
+		// rather than a goroutine that would die with the activity.
+		BackgroundRunner: NewTemporalBackgroundRunner(ctx, a.options.Name),
 	}
+
+	// Built before its edges are wired, and recorded straight away: a target
+	// that hands back to this agent has to find it here rather than start
+	// building it again.
+	agent := agents.NewAgent(opts).WithLLM(llmProxy)
+	built[a.options.Name] = agent
 
 	for _, h := range a.options.Handoffs {
 		agentOptions := a.agentConfigs[h.Name]
-		opts.Handoffs = append(opts.Handoffs, agents.NewHandoff(
-			h.Name, h.Description, NewTemporalAgent(a.agentConfigs, agentOptions, a.broker).newTemporalProxyAgent(ctx),
+		if agentOptions == nil {
+			// A target that was never registered with this runtime. Rebuilding
+			// it would dereference nothing and fail the workflow task, which
+			// Temporal then retries forever — so the edge is dropped and said
+			// aloud instead.
+			slog.Warn("handoff target is not registered with the runtime; the edge will not exist in durable runs",
+				slog.String("agent", a.options.Name), slog.String("target", h.Name))
+			continue
+		}
+		agent.AddHandoffs(agents.NewHandoff(
+			h.Name, h.Description,
+			NewTemporalAgent(a.agentConfigs, agentOptions, a.broker).proxyAgent(ctx, built),
 		))
 	}
 
-	return agents.NewAgent(opts).WithLLM(llmProxy)
+	return agent
 }
 
 func getToolName(prefix string, tool agents.Tool) string {

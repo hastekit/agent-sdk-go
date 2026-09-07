@@ -2,6 +2,7 @@ package restate_runtime
 
 import (
 	"context"
+	"time"
 
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/messages"
@@ -27,6 +28,11 @@ func NewRestateStreamBroker(restateCtx restate.WorkflowContext, wrappedBroker ag
 		wrappedBroker: wrappedBroker,
 	}
 }
+
+var (
+	_ agents.StreamBroker = (*RestateStreamBroker)(nil)
+	_ agents.RunFeed      = (*RestateStreamBroker)(nil)
+)
 
 func (b *RestateStreamBroker) Publish(ctx context.Context, channel string, chunk *responses.ResponseChunk) error {
 	return b.wrappedBroker.Publish(ctx, channel, chunk)
@@ -56,6 +62,32 @@ func (b *RestateStreamBroker) IsStopped(ctx context.Context, channel string) (bo
 	return restate.Run(b.restateCtx, func(ctx restate.RunContext) (bool, error) {
 		return b.wrappedBroker.IsStopped(ctx, channel)
 	}, restate.WithName("IsStopped"))
+}
+
+// PublishRunEvent and ReadRunEvents forward the run feed to the real broker.
+//
+// They have to be here at all because a capability is only offered by the type
+// that declares it. The loop reaches the feed by asking whether its broker is
+// an agents.RunFeed, and a proxy that merely holds one that is would answer no.
+func (b *RestateStreamBroker) PublishRunEvent(ctx context.Context, event agents.RunEvent) error {
+	feed, ok := b.wrappedBroker.(agents.RunFeed)
+	if !ok {
+		return nil
+	}
+	return feed.PublishRunEvent(ctx, event)
+}
+
+func (b *RestateStreamBroker) ReadRunEvents(
+	ctx context.Context,
+	namespaces []string,
+	cursor string,
+	wait time.Duration,
+) ([]agents.RunEvent, string, error) {
+	feed, ok := b.wrappedBroker.(agents.RunFeed)
+	if !ok {
+		return nil, cursor, nil
+	}
+	return feed.ReadRunEvents(ctx, namespaces, cursor, wait)
 }
 
 func (b *RestateStreamBroker) DrainMessages(ctx context.Context, channel string) ([]messages.Message, error) {

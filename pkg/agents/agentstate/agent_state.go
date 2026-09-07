@@ -86,6 +86,92 @@ type RunState struct {
 
 	// LastAgentName is the name of the agent that was responding to the user last.
 	LastAgentName string `json:"last_agent_name,omitempty"`
+
+	// BackgroundTasks are the tool calls still working in the background,
+	// keyed by task id.
+	//
+	// It belongs to the thread rather than to one run: a task outlives the run
+	// that started it, so each new run inherits the list and drops entries as
+	// their results arrive. Without it the only trace of a task would be a
+	// sentence in the transcript, which is no use to a page that has just
+	// loaded and wants to say that something is still running.
+	BackgroundTasks map[string]BackgroundTask `json:"background_tasks,omitempty"`
+}
+
+// BackgroundTask is one tool call that outlived the call that started it: the
+// tool answered immediately with a task id and went on working, and its result
+// arrives later as a message of its own.
+type BackgroundTask struct {
+	// TaskID is what the tool called it. It is the tool's own identifier —
+	// a job id from the service it queued work with, usually — and is only
+	// ever compared for equality here.
+	TaskID string `json:"task_id"`
+
+	// CallID is the tool call that started it, so progress published while
+	// the task runs lands against the call the client already knows about.
+	CallID string `json:"call_id"`
+
+	// ToolName is which tool to ask about the task, since it is the tool that
+	// knows how to wait for one.
+	ToolName string `json:"tool_name"`
+
+	// StreamID is the task's own broker channel, where its progress is
+	// published. It is recorded so a client reading the run can subscribe to
+	// a task without deriving anything.
+	StreamID string `json:"stream_id,omitempty"`
+
+	// StartedAt is when the call that started it returned.
+	StartedAt time.Time `json:"started_at"`
+}
+
+// AddBackgroundTask records a task as outstanding.
+func (s *RunState) AddBackgroundTask(task BackgroundTask) {
+	if s == nil || task.TaskID == "" {
+		return
+	}
+	if s.BackgroundTasks == nil {
+		s.BackgroundTasks = map[string]BackgroundTask{}
+	}
+	s.BackgroundTasks[task.TaskID] = task
+}
+
+// CompleteBackgroundTask drops a task whose result has arrived.
+//
+// The list is what the thread is still waiting on, carried from run to run, so
+// something has to take entries out of it or a thread would report a task as
+// working forever.
+func (s *RunState) CompleteBackgroundTask(taskID string) {
+	if s == nil || taskID == "" {
+		return
+	}
+	delete(s.BackgroundTasks, taskID)
+	if len(s.BackgroundTasks) == 0 {
+		s.BackgroundTasks = nil
+	}
+}
+
+// HasBackgroundTasks reports whether any task is still outstanding.
+func (s *RunState) HasBackgroundTasks() bool {
+	return s != nil && len(s.BackgroundTasks) > 0
+}
+
+// BackgroundTaskList lists the tasks still outstanding, oldest first, so a
+// caller iterating them does the same thing on every replay.
+func (s *RunState) BackgroundTaskList() []BackgroundTask {
+	if s == nil {
+		return nil
+	}
+	out := make([]BackgroundTask, 0, len(s.BackgroundTasks))
+	for _, task := range s.BackgroundTasks {
+		out = append(out, task)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].StartedAt.Equal(out[j].StartedAt) {
+			return out[i].TaskID < out[j].TaskID
+		}
+		return out[i].StartedAt.Before(out[j].StartedAt)
+	})
+	return out
 }
 
 // PendingInterrupts projects the current PendingToolCalls into the unified
@@ -302,6 +388,10 @@ func (s *RunState) ToMeta(opts ...MetaOption) map[string]any {
 		runStateMap["last_agent_name"] = s.LastAgentName
 	}
 
+	if len(s.BackgroundTasks) > 0 {
+		runStateMap["background_tasks"] = s.BackgroundTasks
+	}
+
 	meta := map[string]any{"run_state": runStateMap}
 	if !s.StartedAt.IsZero() {
 		meta[StartedAtMetaKey] = s.StartedAt.UTC().Format(time.RFC3339Nano)
@@ -463,6 +553,13 @@ func LoadRunStateFromMeta(meta map[string]any) *RunState {
 		pendingNestedToolCallsBytes, err := sonic.Marshal(pendingNestedToolCalls)
 		if err == nil {
 			sonic.Unmarshal(pendingNestedToolCallsBytes, &state.PendingNestedToolCalls)
+		}
+	}
+
+	if backgroundTasks, ok := runStateData["background_tasks"]; ok {
+		backgroundTasksBytes, err := sonic.Marshal(backgroundTasks)
+		if err == nil {
+			sonic.Unmarshal(backgroundTasksBytes, &state.BackgroundTasks)
 		}
 	}
 

@@ -28,6 +28,12 @@ type MemoryStreamBroker struct {
 	// than the tail. RedisStreamBroker is rejoinable for the same reason;
 	// this keeps the in-process broker behaving the same way.
 	transcripts map[string][]*responses.ResponseChunk
+
+	// runFeed is the per-namespace run log — see run_feed.go. It has a lock of
+	// its own: a reader waits on it for as long as a client holds a long poll
+	// open, and doing that under the broker's main lock would stop every run
+	// in the process.
+	runFeed *feedHub
 }
 
 // maxTranscript caps retained chunks per channel, mirroring the Redis
@@ -44,6 +50,7 @@ func NewMemoryStreamBroker() *MemoryStreamBroker {
 		queues:      make(map[string][]messages.Message),
 		live:        make(map[string]bool),
 		transcripts: make(map[string][]*responses.ResponseChunk),
+		runFeed:     newFeedHub(),
 	}
 }
 
