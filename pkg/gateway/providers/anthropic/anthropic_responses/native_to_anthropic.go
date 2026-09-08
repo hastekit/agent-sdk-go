@@ -259,26 +259,11 @@ func NativeMessagesToMessage(in responses2.InputUnion) []MessageUnion {
 						}
 
 						if nativeContent.OfInputImage != nil {
-							// Base64
-							if strings.HasPrefix(*nativeContent.OfInputImage.ImageURL, "data:") {
-								contentType, data, err := utils.ParseDataURL(*nativeContent.OfInputImage.ImageURL)
-								if err != nil {
-									slog.Warn("error in parsing data url")
-									continue
-								}
+							contents = append(contents, nativeImageToContent(nativeContent.OfInputImage))
+						}
 
-								contents = append(contents, ContentUnion{
-									OfImage: &ImageContent{
-										Source: ImageContentSource{
-											Type:      "base64",
-											Data:      utils.Ptr(data),
-											MediaType: utils.Ptr(contentType),
-										},
-									},
-								})
-							}
-
-							// TODO: URL & File
+						if nativeContent.OfInputFile != nil {
+							contents = append(contents, nativeFileToContent(nativeContent.OfInputFile))
 						}
 					}
 				}
@@ -311,26 +296,11 @@ func NativeMessagesToMessage(in responses2.InputUnion) []MessageUnion {
 					}
 
 					if nativeContent.OfInputImage != nil {
-						// Base64
-						if strings.HasPrefix(*nativeContent.OfInputImage.ImageURL, "data:") {
-							contentType, data, err := utils.ParseDataURL(*nativeContent.OfInputImage.ImageURL)
-							if err != nil {
-								slog.Warn("error in parsing data url")
-								continue
-							}
+						contents = append(contents, nativeImageToContent(nativeContent.OfInputImage))
+					}
 
-							contents = append(contents, ContentUnion{
-								OfImage: &ImageContent{
-									Source: ImageContentSource{
-										Type:      "base64",
-										Data:      utils.Ptr(data),
-										MediaType: utils.Ptr(contentType),
-									},
-								},
-							})
-						}
-
-						// TODO: URL & File
+					if nativeContent.OfInputFile != nil {
+						contents = append(contents, nativeFileToContent(nativeContent.OfInputFile))
 					}
 				}
 
@@ -373,15 +343,9 @@ func NativeMessagesToMessage(in responses2.InputUnion) []MessageUnion {
 					})
 				}
 
-				if nativeMessage.OfFunctionCallOutput.Output.OfList != nil {
-					for _, nativeOutput := range nativeMessage.OfFunctionCallOutput.Output.OfList {
-						if nativeOutput.OfInputText != nil {
-							output = append(output, ContentUnion{
-								OfText: &TextContent{
-									Text: nativeOutput.OfInputText.Text,
-								},
-							})
-						}
+				for _, nativeOutput := range nativeMessage.OfFunctionCallOutput.Output.OfList {
+					if content := nativeOutputToContent(nativeOutput); content != (ContentUnion{}) {
+						output = append(output, content)
 					}
 				}
 

@@ -160,23 +160,11 @@ func NativeMessagesToMessages(in responses2.InputUnion) []Content {
 						}
 
 						if nativeContent.OfInputImage != nil {
-							// Data URLs
-							if strings.HasPrefix(*nativeContent.OfInputImage.ImageURL, "data:") {
-								contentType, data, err := utils.ParseDataURL(*nativeContent.OfInputImage.ImageURL)
-								if err != nil {
-									slog.Warn("error in parsing data url")
-									continue
-								}
+							parts = append(parts, nativeImageToPart(nativeContent.OfInputImage))
+						}
 
-								parts = append(parts, Part{
-									InlineData: &InlinePartData{
-										MimeType: contentType,
-										Data:     data,
-									},
-								})
-							}
-
-							// TODO: URLs
+						if nativeContent.OfInputFile != nil {
+							parts = append(parts, nativeFileToPart(nativeContent.OfInputFile))
 						}
 					}
 				}
@@ -205,23 +193,11 @@ func NativeMessagesToMessages(in responses2.InputUnion) []Content {
 					}
 
 					if nativeContent.OfInputImage != nil {
-						// Data URLs
-						if strings.HasPrefix(*nativeContent.OfInputImage.ImageURL, "data:") {
-							contentType, data, err := utils.ParseDataURL(*nativeContent.OfInputImage.ImageURL)
-							if err != nil {
-								slog.Warn("error in parsing data url")
-								continue
-							}
+						parts = append(parts, nativeImageToPart(nativeContent.OfInputImage))
+					}
 
-							parts = append(parts, Part{
-								InlineData: &InlinePartData{
-									MimeType: contentType,
-									Data:     data,
-								},
-							})
-						}
-
-						// TODO: URLs
+					if nativeContent.OfInputFile != nil {
+						parts = append(parts, nativeFileToPart(nativeContent.OfInputFile))
 					}
 				}
 
@@ -256,39 +232,19 @@ func NativeMessagesToMessages(in responses2.InputUnion) []Content {
 
 			// Function call output
 			if nativeMessage.OfFunctionCallOutput != nil {
-				parts := []Part{}
-
-				if nativeMessage.OfFunctionCallOutput.Output.OfString != nil {
-					parts = append(parts, Part{
-						FunctionResponse: &FunctionResponse{
-							ID:   nativeMessage.OfFunctionCallOutput.CallID,
-							Name: prevFunctionCallName,
-							Response: map[string]any{
-								"output": nativeMessage.OfFunctionCallOutput.Output.OfString,
-							},
-						},
-					})
-				}
-
-				if nativeMessage.OfFunctionCallOutput.Output.OfList != nil {
-					for _, nativeOutput := range nativeMessage.OfFunctionCallOutput.Output.OfList {
-						if nativeOutput.OfInputText != nil {
-							parts = append(parts, Part{
-								FunctionResponse: &FunctionResponse{
-									ID:   nativeMessage.OfFunctionCallOutput.CallID,
-									Name: prevFunctionCallName,
-									Response: map[string]any{
-										"output": nativeOutput.OfInputText.Text,
-									},
-								},
-							})
-						}
-					}
-				}
-
+				// One response per call, not one per piece of output: a
+				// function response answers a function call, and Gemini pairs
+				// them by id. The text and the attachments are two halves of
+				// the same answer.
 				out = append(out, Content{
-					Role:  RoleUser,
-					Parts: parts,
+					Role: RoleUser,
+					Parts: []Part{{
+						FunctionResponse: nativeOutputToFunctionResponse(
+							nativeMessage.OfFunctionCallOutput.CallID,
+							prevFunctionCallName,
+							nativeMessage.OfFunctionCallOutput.Output,
+						),
+					}},
 				})
 			}
 

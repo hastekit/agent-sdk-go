@@ -3,6 +3,7 @@ package bedrock_responses
 import (
 	"encoding/base64"
 	"log/slog"
+	"path/filepath"
 	"strings"
 
 	"github.com/bytedance/sonic"
@@ -72,6 +73,7 @@ type ConverseMessage struct {
 type ContentBlock struct {
 	Text             *string           `json:"text,omitempty"`
 	Image            *ImageBlock       `json:"image,omitempty"`
+	Document         *DocumentBlock    `json:"document,omitempty"`
 	ToolUse          *ToolUseBlock     `json:"toolUse,omitempty"`
 	ToolResult       *ToolResultBlock  `json:"toolResult,omitempty"`
 	ReasoningContent *ReasoningContent `json:"reasoningContent,omitempty"`
@@ -96,6 +98,16 @@ type ImageBlock struct {
 
 type ImageSourceBlock struct {
 	Bytes string `json:"bytes"` // base64-encoded image bytes
+}
+
+type DocumentBlock struct {
+	Format string              `json:"format"` // "pdf", "csv", "doc", "docx", "html", "txt", "md", "xls", "xlsx"
+	Name   string              `json:"name"`
+	Source DocumentSourceBlock `json:"source"`
+}
+
+type DocumentSourceBlock struct {
+	Bytes string `json:"bytes"` // base64-encoded document bytes
 }
 
 type ToolUseBlock struct {
@@ -388,11 +400,20 @@ func convertFunctionCallOutputToUser(fco *responses.FunctionCallOutputMessage) C
 		resultContent = append(resultContent, ContentBlock{Text: fco.Output.OfString})
 	}
 
-	if fco.Output.OfList != nil {
-		for _, c := range fco.Output.OfList {
-			if c.OfInputText != nil {
-				resultContent = append(resultContent, ContentBlock{Text: utils.Ptr(c.OfInputText.Text)})
-			}
+	// A tool result carries the same attachments a message does — an MCP tool
+	// returning a screenshot, a chart, a generated picture — and Converse's
+	// toolResult takes the same blocks, so they need no special case beyond
+	// being looked for at all.
+	for _, c := range fco.Output.OfList {
+		switch {
+		case c.OfInputText != nil:
+			resultContent = append(resultContent, ContentBlock{Text: utils.Ptr(c.OfInputText.Text)})
+		case c.OfOutputText != nil:
+			resultContent = append(resultContent, ContentBlock{Text: utils.Ptr(c.OfOutputText.Text)})
+		case c.OfInputImage != nil:
+			resultContent = append(resultContent, nativeImageToBlock(c.OfInputImage))
+		case c.OfInputFile != nil:
+			resultContent = append(resultContent, nativeFileToBlock(c.OfInputFile))
 		}
 	}
 
@@ -465,39 +486,152 @@ func convertInputContent(content responses.InputContent) []ContentBlock {
 			blocks = append(blocks, ContentBlock{Text: utils.Ptr(c.OfOutputText.Text)})
 		}
 
-		if c.OfInputImage != nil && c.OfInputImage.ImageURL != nil {
-			if strings.HasPrefix(*c.OfInputImage.ImageURL, "data:") {
-				contentType, data, err := utils.ParseDataURL(*c.OfInputImage.ImageURL)
-				if err != nil {
-					slog.Warn("error parsing data url for image")
-					continue
-				}
+		if c.OfInputImage != nil {
+			blocks = append(blocks, nativeImageToBlock(c.OfInputImage))
+		}
 
-				format := "png"
-				switch {
-				case strings.Contains(contentType, "jpeg"), strings.Contains(contentType, "jpg"):
-					format = "jpeg"
-				case strings.Contains(contentType, "gif"):
-					format = "gif"
-				case strings.Contains(contentType, "webp"):
-					format = "webp"
-				}
-
-				// data from ParseDataURL is already base64-encoded
-				// Converse API expects raw bytes base64-encoded
-				blocks = append(blocks, ContentBlock{
-					Image: &ImageBlock{
-						Format: format,
-						Source: ImageSourceBlock{
-							Bytes: data,
-						},
-					},
-				})
-			}
+		if c.OfInputFile != nil {
+			blocks = append(blocks, nativeFileToBlock(c.OfInputFile))
 		}
 	}
 
 	return blocks
+}
+
+// Converse carries an attachment exactly one way: the bytes, inline. There is
+// no URL it will fetch and no file store to reference, so anything that is not
+// already bytes cannot be sent — and says so, rather than going missing, which
+// is what these used to do.
+
+func nativeImageToBlock(img *responses.InputImageContent) ContentBlock {
+	if img.FileID != nil && *img.FileID != "" {
+		return undeliverable("an image", "this model takes image data inline and cannot resolve a file id")
+	}
+
+	if img.ImageURL == nil || *img.ImageURL == "" {
+		return undeliverable("an image", "it carried neither image data, a URL, nor a file id")
+	}
+
+	if !strings.HasPrefix(*img.ImageURL, "data:") {
+		return undeliverable("an image", "this model takes image data inline and will not fetch a URL")
+	}
+
+	contentType, data, err := utils.ParseDataURL(*img.ImageURL)
+	if err != nil {
+		slog.Error("bedrock: image data URL could not be parsed", slog.Any("error", err))
+		return undeliverable("an image", "its inline data could not be read")
+	}
+
+	format := "png"
+	switch {
+	case strings.Contains(contentType, "jpeg"), strings.Contains(contentType, "jpg"):
+		format = "jpeg"
+	case strings.Contains(contentType, "gif"):
+		format = "gif"
+	case strings.Contains(contentType, "webp"):
+		format = "webp"
+	}
+
+	// data from ParseDataURL is already base64-encoded
+	// Converse API expects raw bytes base64-encoded
+	return ContentBlock{Image: &ImageBlock{
+		Format: format,
+		Source: ImageSourceBlock{Bytes: data},
+	}}
+}
+
+func nativeFileToBlock(file *responses.InputFileContent) ContentBlock {
+	name := "document"
+	if file.FileName != nil && *file.FileName != "" {
+		name = *file.FileName
+	}
+
+	if file.FileID != nil && *file.FileID != "" {
+		return undeliverable("a file", "this model takes file data inline and cannot resolve a file id")
+	}
+
+	if file.FileData == nil || *file.FileData == "" {
+		if file.FileURL != nil && *file.FileURL != "" {
+			return undeliverable("a file", "this model takes file data inline and will not fetch a URL")
+		}
+		return undeliverable("a file", "it carried neither file data, a URL, nor a file id")
+	}
+
+	data := *file.FileData
+	format := documentFormat(name)
+	if strings.HasPrefix(data, "data:") {
+		contentType, encoded, err := utils.ParseDataURL(data)
+		if err != nil {
+			slog.Error("bedrock: file data URL could not be parsed", slog.Any("error", err))
+			return undeliverable("a file", "its inline data could not be read")
+		}
+		data = encoded
+		if f := documentFormatFromMediaType(contentType); f != "" {
+			format = f
+		}
+	}
+
+	return ContentBlock{Document: &DocumentBlock{
+		Format: format,
+		Name:   name,
+		Source: DocumentSourceBlock{Bytes: data},
+	}}
+}
+
+func undeliverable(kind, reason string) ContentBlock {
+	slog.Error("bedrock: attachment dropped from the request",
+		slog.String("kind", kind), slog.String("reason", reason))
+	return ContentBlock{Text: utils.Ptr(responses.UndeliverableAttachment(kind, reason))}
+}
+
+// documentFormat is Converse's own vocabulary, which is a bare word rather
+// than a media type. pdf is the fallback because it is what these are.
+func documentFormat(filename string) string {
+	switch strings.ToLower(strings.TrimPrefix(filepath.Ext(filename), ".")) {
+	case "csv":
+		return "csv"
+	case "doc":
+		return "doc"
+	case "docx":
+		return "docx"
+	case "html", "htm":
+		return "html"
+	case "txt":
+		return "txt"
+	case "md", "markdown":
+		return "md"
+	case "xls":
+		return "xls"
+	case "xlsx":
+		return "xlsx"
+	default:
+		return "pdf"
+	}
+}
+
+func documentFormatFromMediaType(mediaType string) string {
+	switch {
+	case strings.Contains(mediaType, "pdf"):
+		return "pdf"
+	case strings.Contains(mediaType, "csv"):
+		return "csv"
+	case strings.Contains(mediaType, "html"):
+		return "html"
+	case strings.Contains(mediaType, "markdown"):
+		return "md"
+	case strings.Contains(mediaType, "text/plain"):
+		return "txt"
+	case strings.Contains(mediaType, "wordprocessingml"):
+		return "docx"
+	case strings.Contains(mediaType, "spreadsheetml"):
+		return "xlsx"
+	case strings.Contains(mediaType, "msword"):
+		return "doc"
+	case strings.Contains(mediaType, "ms-excel"):
+		return "xls"
+	default:
+		return ""
+	}
 }
 
 func nativeRoleToConverseRole(role constants.Role) string {
