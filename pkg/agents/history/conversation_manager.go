@@ -154,6 +154,14 @@ type ConversationRunManager struct {
 	// to the run that received it, which stops being useful once that run ends
 	// and the message is simply part of the thread's history.
 	steeredIDs map[string]struct{}
+
+	// justDrained holds the bundles the most recent GetMessages folded in off
+	// the queue, waiting to be read once by the loop. It exists because the
+	// moment a queued turn is picked up is the only moment worth announcing:
+	// it is queued at an iteration boundary but may sit there through several
+	// tool calls, and a client told about it any earlier would place it before
+	// work that in fact came first.
+	justDrained []Message
 }
 
 func NewRun(ctx context.Context, cm *CommonConversationManager, namespace string, threadID string, previousRunID string, options ...RunOption) (*ConversationRunManager, error) {
@@ -318,6 +326,7 @@ func (cm *ConversationRunManager) GetMessages(ctx context.Context, agentName str
 		for _, m := range cm.RunState.QueuedMessages {
 			cm.markSteered(m)
 		}
+		cm.justDrained = append(cm.justDrained, cm.RunState.QueuedMessages...)
 		cm.newMessages = append(cm.newMessages, cm.RunState.QueuedMessages...)
 		cm.RunState.QueuedMessages = nil
 	}
@@ -422,6 +431,18 @@ func (cm *ConversationRunManager) summarize(ctx context.Context) error {
 
 // markSteered records that a bundle reached this run mid-flight rather than
 // opening it.
+// TakeSteeredMessages returns the bundles the last GetMessages folded in from
+// the queue, and forgets them — so a caller that reports them reports each
+// exactly once.
+//
+// Nil on every call but the one right after a drain, which is the point: it
+// answers "did anything arrive mid-run, and has the run now picked it up?"
+func (cm *ConversationRunManager) TakeSteeredMessages() []Message {
+	drained := cm.justDrained
+	cm.justDrained = nil
+	return drained
+}
+
 func (cm *ConversationRunManager) markSteered(m Message) {
 	if m.ID == "" || !cm.steeringNotices {
 		return

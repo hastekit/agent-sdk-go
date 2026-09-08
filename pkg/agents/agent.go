@@ -515,8 +515,13 @@ func (e *Agent) ExecuteLocal(ctx context.Context, in *AgentInput) (*AgentOutput,
 	run.RunState.TraceID = traceid
 
 	// Emit run.created once (durable step: not resent on replay).
+	//
+	// The turn that opened the run goes out with it, and after it: a client
+	// following the stream has to see the run begin before it can place
+	// anything inside it.
 	e.durableStep.Do(func() {
 		e.runCreated(ctx, in.StreamID, runId, traceid)
+		publishInputMessages(e.publisher(in.StreamID), in.Message)
 		e.publishRunEvent(ctx, RunEventStarted, in, runId)
 	})
 
@@ -752,6 +757,12 @@ func (e *Agent) ExecuteWithRun(ctx context.Context, in *AgentInput, run *history
 			if err != nil {
 				return &AgentOutput{Status: agentstate.RunStatusError, RunID: runId}, err
 			}
+
+			// Anything that arrived while the run was working has just been
+			// folded in. Reported here rather than where it was queued: it can
+			// sit on the queue through several tool calls, and a client told
+			// earlier would place it before work that in fact came first.
+			publishInputMessages(publish, run.TakeSteeredMessages()...)
 
 			if reminder := budgetReminder(e.maxLoops - run.RunState.LoopIteration); reminder != nil {
 				convMessages = append(convMessages, *reminder)

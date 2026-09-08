@@ -424,6 +424,40 @@ func (t *Translator) Translate(chunk *responses.ResponseChunk) []Event {
 		}}
 	}
 
+	// A turn the run has taken in. AG-UI has a native shape for this — a text
+	// message with the author's role — so it needs no custom event and no
+	// client-side handling beyond what a client already does with messages.
+	//
+	// Self-contained start/content/end under its own id, and deliberately not
+	// touching openTextMessageID: this closes nothing and opens nothing, so an
+	// assistant message that happened to be mid-flight stays mid-flight.
+	if chunk.OfInputMessage != nil {
+		im := chunk.OfInputMessage
+		// The grounding context the handler appends to the user's turn is
+		// scaffolding for the model, and is stripped on rehydration for the
+		// same reason it is stripped here: the user did not write it.
+		text := stripContextBlocks(im.Content)
+		if text == "" {
+			return nil
+		}
+		return []Event{
+			&TextMessageStartEvent{
+				BaseEvent: baseNow(),
+				MessageID: im.MessageID,
+				Role:      roleOrUser(im.Role),
+			},
+			&TextMessageContentEvent{
+				BaseEvent: baseNow(),
+				MessageID: im.MessageID,
+				Delta:     text,
+			},
+			&TextMessageEndEvent{
+				BaseEvent: baseNow(),
+				MessageID: im.MessageID,
+			},
+		}
+	}
+
 	if chunk.OfToolProgress != nil {
 		tp := chunk.OfToolProgress
 		return []Event{&CustomEvent{

@@ -80,6 +80,17 @@ type ResponseChunk struct {
 	// agent has taken the result in.
 	OfBackgroundTaskStarted   *ChunkBackgroundTask[constants.ChunkTypeBackgroundTaskStarted]   `json:",omitempty"`
 	OfBackgroundTaskCompleted *ChunkBackgroundTask[constants.ChunkTypeBackgroundTaskCompleted] `json:",omitempty"`
+
+	// OfInputMessage is a turn the run has taken in — the message that opened
+	// it, or one that reached it mid-flight and it has just picked up.
+	//
+	// It is what makes the stream the whole story rather than half of it. A
+	// client that joins a run already going, or rejoins one it dropped, gets
+	// the transcript replayed; without this the transcript holds only what the
+	// agent said, and the question it was answering is missing. Published where
+	// the run actually takes the message in, so a steering turn lands between
+	// the two model calls it arrived between rather than at the top.
+	OfInputMessage *ChunkInputMessage[constants.ChunkTypeInputMessage] `json:",omitempty"`
 }
 
 func (u *ResponseChunk) UnmarshalJSON(data []byte) error {
@@ -105,6 +116,12 @@ func (u *ResponseChunk) UnmarshalJSON(data []byte) error {
 	var backgroundCompleted *ChunkBackgroundTask[constants.ChunkTypeBackgroundTaskCompleted]
 	if err := sonic.Unmarshal(data, &backgroundCompleted); err == nil {
 		u.OfBackgroundTaskCompleted = backgroundCompleted
+		return nil
+	}
+
+	var inputMessage *ChunkInputMessage[constants.ChunkTypeInputMessage]
+	if err := sonic.Unmarshal(data, &inputMessage); err == nil {
+		u.OfInputMessage = inputMessage
 		return nil
 	}
 
@@ -441,6 +458,9 @@ func (u *ResponseChunk) MarshalJSON() ([]byte, error) {
 		return sonic.Marshal(u.OfToolProgress)
 	}
 
+	if u.OfInputMessage != nil {
+		return sonic.Marshal(u.OfInputMessage)
+	}
 	if u.OfBackgroundTaskStarted != nil {
 		return sonic.Marshal(u.OfBackgroundTaskStarted)
 	}
@@ -618,6 +638,9 @@ func (u *ResponseChunk) ChunkType() string {
 		return u.OfToolProgress.Type.Value()
 	}
 
+	if u.OfInputMessage != nil {
+		return u.OfInputMessage.Type.Value()
+	}
 	if u.OfBackgroundTaskStarted != nil {
 		return u.OfBackgroundTaskStarted.Type.Value()
 	}
@@ -671,6 +694,23 @@ type ChunkBackgroundTask[T any] struct {
 
 	// StreamID is the task's own broker channel, where its progress goes.
 	StreamID string `json:"stream_id,omitempty"`
+}
+
+// ChunkInputMessage carries one message the run has taken in, at the point it
+// took it in.
+//
+// Content is flattened to text: this is for a client rebuilding what was said,
+// not for replaying the message into a provider — history is where the exact
+// bundle lives.
+type ChunkInputMessage[T any] struct {
+	Type      T      `json:"type"`
+	MessageID string `json:"message_id"`
+	Role      string `json:"role"`
+	Content   string `json:"content"`
+
+	// SenderID attributes the turn in a multi-participant thread; empty when
+	// the thread has only the one.
+	SenderID string `json:"sender_id,omitempty"`
 }
 
 type ChunkRunData struct {

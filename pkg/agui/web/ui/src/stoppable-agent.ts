@@ -46,6 +46,18 @@ function newTurnOf(messages: Message[]): Message[] {
   return messages.slice(start);
 }
 
+// serverIdOf is the id the server will know a client-authored message by.
+//
+// This mirrors normalizeMessageID in pkg/agui/run_input.go, and the two must
+// agree for the same reason newTurnOf must: the server applies its rule to
+// whatever it receives, and the run then echoes the turn back under the id
+// that rule produced. Without the mirror the echo looks like a turn nobody has
+// seen, and the tab that sent it shows its own message twice.
+function serverIdOf(id: string): string {
+  if (!id || id.startsWith("msg")) return id;
+  return "msg_" + id;
+}
+
 // StoppableHttpAgent adds the three things a long run needs from a browser
 // that comes and goes: stopping it for real, picking it back up, and
 // steering it while it works.
@@ -91,6 +103,12 @@ export class StoppableHttpAgent extends HttpAgent {
   // would feed the pipeline every event twice.
   private running = false;
 
+  // Turns the run has announced taking in that this tab already has on
+  // screen — its own, echoed back. The text still follows on the stream, and
+  // appending it to a message that is already complete would double it, so
+  // these ids are held until the echo has passed.
+  private readonly acked = new Set<string>();
+
   constructor(config: {
     agentName: string;
     url: string;
@@ -125,6 +143,43 @@ export class StoppableHttpAgent extends HttpAgent {
           this.streamId = event.value.streamId as string;
         }
       },
+      // The run announces every turn it takes in, so a tab that joined late
+      // learns what was asked and not only what was answered. For the tab that
+      // did the asking the same event is an acknowledgement — this is where it
+      // is recognised as one.
+      //
+      // The id is what tells them apart. A turn this tab sent is already on
+      // screen under the id it minted, and the echo carries the id the server
+      // made of it; adopting the server's id here settles the two on one name,
+      // which is also the name the turn will have after a reload.
+      onTextMessageStartEvent: ({ event, messages }: any) => {
+        const id = event.messageId as string;
+        if (messages.some((m: Message) => m.id === id)) {
+          this.acked.add(id);
+          return;
+        }
+        const local = messages.find((m: Message) => serverIdOf(m.id) === id);
+        if (!local) return; // A turn this tab has not seen: let it through.
+        this.acked.add(id);
+        // Rebuilt rather than edited: the pipeline hands subscribers a frozen
+        // clone and takes a mutation back only as a new array, so editing the
+        // message in place changed nothing and the echo was added as a second,
+        // empty bubble — its text having been suppressed as an echo.
+        this.steered = this.steered.map((m) =>
+          m.id === local.id ? { ...m, id } : m
+        );
+        return {
+          messages: messages.map((m: Message) =>
+            m.id === local.id ? { ...m, id } : m
+          ),
+        };
+      },
+      // The echo's text belongs to a message that already has it.
+      onTextMessageContentEvent: ({ event }: any) =>
+        this.acked.has(event.messageId) ? { stopPropagation: true } : undefined,
+      onTextMessageEndEvent: ({ event }: any) => {
+        this.acked.delete(event.messageId);
+      },
       // onEvent mutations are applied to the running pipeline's own message
       // list, which is the only way to reach it from outside. Re-adding is
       // keyed by id, so this settles after one event and leaves the rest of
@@ -143,6 +198,9 @@ export class StoppableHttpAgent extends HttpAgent {
         this.running = false;
         this.streamId = undefined;
         this.steered = [];
+        // A run that died mid-echo would otherwise leave an id here for ever,
+        // and the next run's turn under that id would arrive silently.
+        this.acked.clear();
       },
     });
   }

@@ -246,6 +246,16 @@ func (m *ChunkTypeBackgroundTaskCompleted) UnmarshalJSON(buf []byte) error {
 	return unmarshalConstantString(m, buf)
 }
 
+type ChunkTypeInputMessage string
+
+func (m *ChunkTypeInputMessage) Value() string { return "input_message" }
+func (m ChunkTypeInputMessage) MarshalJSON() ([]byte, error) {
+	return sonic.Marshal(m.Value())
+}
+func (m *ChunkTypeInputMessage) UnmarshalJSON(buf []byte) error {
+	return unmarshalConstantString(m, buf)
+}
+
 type ChunkTypeResponseCreated string
 
 func (m *ChunkTypeResponseCreated) Value() string               { return "response.created" }

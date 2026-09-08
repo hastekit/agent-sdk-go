@@ -124,10 +124,13 @@ func TestRunEmitsDeterministicStreamID(t *testing.T) {
 // mid-run can fetch the thread's messages starting from the user message
 // (rather than seeing nothing until the run completes).
 //
-// Skipped: the run persists nothing until it finishes, so a client that
-// rejoins a live thread sees the conversation without the turn that
-// started it. The rejoined stream still carries the run's output. Enabling
-// this means saving the opening turn before the loop starts.
+// Skipped: the run persists nothing until it finishes, so this endpoint still
+// answers with an empty thread mid-run. Enabling it means saving the opening
+// turn before the loop starts.
+//
+// The gap it was written for is closed elsewhere: the run announces the turns
+// it takes in on its own stream, so a client that rejoins gets them from the
+// replay rather than from here — see TestRejoinCarriesTheTurnsTheRunTookIn.
 func TestMidRunMessagesIncludeUserTurn(t *testing.T) {
 	t.Skip("runs persist only on completion; the opening turn is not readable mid-run")
 
@@ -227,4 +230,77 @@ func TestConcurrentTurnFoldsAndRejoinFollows(t *testing.T) {
 	require.NotEmpty(t, rejoinEvents)
 	assert.Equal(t, "RUN_STARTED", rejoinEvents[0])
 	assert.Contains(t, rejoinEvents, "RUN_FINISHED")
+}
+
+// userTurns collects the text of every message the stream opened under the
+// user's role, in the order the stream told it.
+func userTurns(frames []sseFrame) []string {
+	userIDs := map[string]bool{}
+	for _, f := range frames {
+		if f.event == "TEXT_MESSAGE_START" && f.data["role"] == "user" {
+			userIDs[f.data["messageId"].(string)] = true
+		}
+	}
+	var out []string
+	for _, f := range frames {
+		if f.event != "TEXT_MESSAGE_CONTENT" {
+			continue
+		}
+		if id, _ := f.data["messageId"].(string); userIDs[id] {
+			out = append(out, f.data["delta"].(string))
+		}
+	}
+	return out
+}
+
+// A client that joins a run already going gets the replayed transcript. It
+// used to hold only what the agent had said, so the rejoining tab showed
+// answers with the questions missing — and a turn that folded into the live
+// run was invisible to everyone, including the tab that sent it, until the run
+// ended and the thread was re-read.
+func TestRejoinCarriesTheTurnsTheRunTookIn(t *testing.T) {
+	gate := newGateTool("gate")
+	llm := &scriptedLLM{steps: []scriptedStep{
+		{response: toolCallResponse("call-1", "gate", "{}")},
+		{response: assistantTextResponse("done")},
+		{response: assistantTextResponse("done")},
+	}}
+	agent := agents.NewAgent(&agents.AgentOptions{Name: "Helper", Tools: []agents.Tool{gate}}).WithLLM(llm)
+	server := httptest.NewServer(NewHandler(registry{"Helper": agent}))
+	defer server.Close()
+
+	const threadID = "thread-rejoin-turns"
+
+	firstDone := make(chan []sseFrame, 1)
+	go func() {
+		firstDone <- postRun(t, server, "Helper", RunAgentInput{
+			ThreadID: threadID,
+			Messages: []Message{{ID: "u1", Role: RoleUser, Content: "go"}},
+		})
+	}()
+	<-gate.entered
+
+	// A second turn folds into the live run — the sender gets a 204 and no
+	// stream of its own, so this is the only place it can ever be seen.
+	body2, _ := json.Marshal(RunAgentInput{ThreadID: threadID, Messages: []Message{{ID: "u2", Role: RoleUser, Content: "and hurry"}}})
+	res2, err := http.Post(server.URL+"/agents/Helper/run", "application/json", bytes.NewReader(body2))
+	require.NoError(t, err)
+	_, _ = io.Copy(io.Discard, res2.Body)
+	res2.Body.Close()
+	require.Equal(t, http.StatusNoContent, res2.StatusCode)
+
+	rejoinRes, err := http.Get(server.URL + "/agents/Helper/threads/" + threadID + "/stream")
+	require.NoError(t, err)
+	defer rejoinRes.Body.Close()
+	require.Equal(t, http.StatusOK, rejoinRes.StatusCode)
+
+	rejoinDone := make(chan []sseFrame, 1)
+	go func() { rejoinDone <- readSSEFrames(t, rejoinRes.Body) }()
+
+	close(gate.release)
+	<-firstDone
+	rejoin := <-rejoinDone
+
+	assert.Equal(t, []string{"go", "and hurry"}, userTurns(rejoin),
+		"a client that joined late still learns what it was asked, and in what order")
 }

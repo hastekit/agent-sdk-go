@@ -421,3 +421,66 @@ func TestUnsetModeProjectsAsApproval(t *testing.T) {
 	assert.Equal(t, "tool_approval", value["kind"])
 	assert.Equal(t, "approval", value["interrupts"].([]map[string]any)[0]["mode"])
 }
+
+func inputMessageChunk(id, role, content string) *responses.ResponseChunk {
+	return &responses.ResponseChunk{
+		OfInputMessage: &responses.ChunkInputMessage[constants.ChunkTypeInputMessage]{
+			MessageID: id, Role: role, Content: content,
+		},
+	}
+}
+
+// A turn the run took in becomes an ordinary AG-UI text message under the
+// author's role, so a client needs nothing new to place it.
+func TestInputMessageBecomesATextMessage(t *testing.T) {
+	tr := NewTranslator("thread-1", "run-1")
+	tr.Start()
+
+	events := tr.Translate(inputMessageChunk("msg_u1", "user", "hurry up"))
+	require.Equal(t, []EventType{
+		EventTextMessageStart, EventTextMessageContent, EventTextMessageEnd,
+	}, eventTypes(events))
+
+	start := events[0].(*TextMessageStartEvent)
+	assert.Equal(t, "msg_u1", start.MessageID)
+	assert.Equal(t, RoleUser, start.Role, "the user's turn is not attributed to the agent")
+	assert.Equal(t, "hurry up", events[1].(*TextMessageContentEvent).Delta)
+}
+
+// It closes nothing and opens nothing: an assistant message that happened to
+// be mid-flight has to still be mid-flight afterwards, or its remaining deltas
+// arrive against a message the client has already closed.
+func TestInputMessageLeavesAnOpenAssistantMessageAlone(t *testing.T) {
+	tr := NewTranslator("thread-1", "run-1")
+	tr.Start()
+	tr.Translate(messageAdded("msg_a1"))
+
+	tr.Translate(inputMessageChunk("msg_u1", "user", "hurry up"))
+
+	// No re-open: the assistant message the translator was already holding is
+	// still the one a delta belongs to.
+	assert.Equal(t, []EventType{EventTextMessageContent},
+		eventTypes(tr.Translate(textDelta("msg_a1", "still going"))))
+}
+
+// The grounding context the handler appends is written for the model, and is
+// stripped on rehydration for the same reason it is stripped here.
+func TestInputMessageStripsTheContextBlock(t *testing.T) {
+	tr := NewTranslator("thread-1", "run-1")
+	tr.Start()
+
+	events := tr.Translate(inputMessageChunk("msg_u1", "user",
+		"what is the weather?\n\n<context>\nlocation: Paris\n</context>"))
+	require.Len(t, events, 3)
+	assert.Equal(t, "what is the weather?", events[1].(*TextMessageContentEvent).Delta)
+}
+
+// A turn with nothing left after stripping says nothing at all, rather than
+// opening an empty message the client then has to render.
+func TestInputMessageWithNoTextIsDropped(t *testing.T) {
+	tr := NewTranslator("thread-1", "run-1")
+	tr.Start()
+
+	assert.Empty(t, tr.Translate(inputMessageChunk("msg_u1", "user",
+		"<context>\nlocation: Paris\n</context>")))
+}
