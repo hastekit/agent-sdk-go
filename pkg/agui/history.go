@@ -38,6 +38,8 @@ func stripContextBlocks(s string) string {
 //     summary text (and any encrypted content) so the reasoning panel
 //     rehydrates the same way it rendered live; empty reasoning items
 //     (no summary) are skipped
+//   - bundles carrying a background task's result are skipped whole:
+//     they are a synthetic user turn addressed to the model
 //   - approval responses and other variants are skipped — hydration is
 //     best-effort; the agent's next LLM call loads the authoritative
 //     history server-side anyway
@@ -60,6 +62,15 @@ func HistoryToMessages(rows []history.ConversationMessage) []Message {
 
 	for _, row := range rows {
 		for _, bundle := range row.Messages {
+			// A task's result arrives as a user turn because that is the only
+			// shape a provider will take it in — the call that started the
+			// task was answered when the tool returned. It is addressed to the
+			// model, not written by anyone, so showing it would put words in
+			// the user's mouth. What the user should see is the assistant's
+			// reply to it, which is an ordinary turn and stays.
+			if bundle.BackgroundTaskID != "" {
+				continue
+			}
 			for _, msg := range bundle.Messages {
 				switch {
 				case msg.OfEasyInput != nil:

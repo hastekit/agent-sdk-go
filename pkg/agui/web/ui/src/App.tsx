@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   CopilotKitProvider,
   CopilotChat,
@@ -51,27 +59,53 @@ function newActive(): Active {
   return { threadId: crypto.randomUUID(), initialMessages: [], run: null };
 }
 
-// The open conversation, in the address bar.
+// What is on screen, in the address bar: the agent and the conversation.
 //
-// Without it a reload lands in a brand-new empty chat and the conversation the
-// user was in is only in the sidebar — which is no use at all when the agent
-// is sitting on a question, since the prompt to answer it is on the thread
-// they just lost. In the URL rather than storage so it survives a shared link
-// and back/forward.
+// Without it a reload lands on the first registered agent in a brand-new empty
+// chat, and what the user was looking at is only in the sidebar — which is no
+// use at all when the agent is sitting on a question, since the prompt to
+// answer it is on the thread they just lost. Both live in the URL rather than
+// storage so a link carries the whole address, and so back/forward work.
+//
+// The thread belongs to the agent: a conversation is stored under the agent
+// that held it, so the pair travels together and is cleared together.
+const AGENT_PARAM = "agent";
 const THREAD_PARAM = "thread";
 
-function threadFromURL(): string {
-  return new URLSearchParams(window.location.search).get(THREAD_PARAM) ?? "";
+function paramFromURL(name: string): string {
+  return new URLSearchParams(window.location.search).get(name) ?? "";
 }
 
-// replaceState, not push: switching conversation is not a navigation the back
-// button should have to walk through.
-function rememberThread(threadId: string) {
+// replaceState, not push: switching agent or conversation is not a navigation
+// the back button should have to walk through.
+function rememberParam(name: string, value: string) {
   const url = new URL(window.location.href);
-  if (threadId) url.searchParams.set(THREAD_PARAM, threadId);
-  else url.searchParams.delete(THREAD_PARAM);
+  if (value) url.searchParams.set(name, value);
+  else url.searchParams.delete(name);
   window.history.replaceState(null, "", url.toString());
 }
+
+// What the composer tray is showing: work still running, and a pause waiting
+// on the user.
+//
+// Through context rather than props because the tray renders inside
+// CopilotChat's input slot, and the slot is a component type — passing this
+// down would give it a new identity on every change, remounting the composer
+// and taking whatever the user had half-typed with it.
+interface Tray {
+  tasks: ThreadBackgroundTask[];
+  interrupt: TrayInterrupt | null;
+}
+
+interface TrayInterrupt {
+  // Which pause this is, so the publisher for one can be torn down after the
+  // next has already taken its place without clearing it.
+  key: string;
+  entries: InterruptEntry[];
+  onSubmit: (decisions: ApprovalDecision[]) => void;
+}
+
+const TrayContext = createContext<Tray>({ tasks: [], interrupt: null });
 
 export default function App() {
   const [agents, setAgents] = useState<string[]>([]);
@@ -89,6 +123,20 @@ export default function App() {
   // starts or the thread/agent changes.
   const [runError, setRunError] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+
+  // What the address bar asked for when the page opened, read once at the
+  // first render and then consumed.
+  //
+  // Not read from the URL where it is needed: the effects that keep the URL in
+  // step with the app run before the agent list has arrived, so by then the
+  // address bar says what we defaulted to rather than what was asked for.
+  // Consumed rather than kept because it is for arriving at a URL, not for
+  // following the user around afterwards — a thread left in here would be
+  // reopened again the next time they switched agent.
+  const opened = useRef({
+    agent: paramFromURL(AGENT_PARAM),
+    thread: paramFromURL(THREAD_PARAM),
+  });
 
   // The open conversation, readable from the feed loop without restarting it.
   // The loop outlives any one thread — that is the point of it — so it cannot
@@ -108,8 +156,15 @@ export default function App() {
       .then(({ agents: names, fullHistory }) => {
         setAgents(names);
         setFullHistory(fullHistory);
-        if (names.length) setAgentName(names[0]);
-        else setError("No agents registered on the server.");
+        if (!names.length) {
+          setError("No agents registered on the server.");
+          return;
+        }
+        // A name the server no longer registers falls back to the first
+        // rather than erroring: the link is stale, not wrong, and an empty
+        // chat against a real agent is a better landing than a dead page.
+        const wanted = opened.current.agent;
+        setAgentName(names.includes(wanted) ? wanted : names[0]);
       })
       .catch((e) => setError(String(e)));
   }, []);
@@ -324,6 +379,12 @@ export default function App() {
   );
   useEffect(() => setLiveTasks(new Map()), [active.threadId]);
 
+  // The pause the running chat is showing, lifted out of the message list so
+  // it can be drawn in the same place as a pause the page was reloaded into.
+  // Cleared with the thread, like everything else keyed to one conversation.
+  const [liveInterrupt, setLiveInterrupt] = useState<TrayInterrupt | null>(null);
+  useEffect(() => setLiveInterrupt(null), [active.threadId]);
+
   // What the conversation is waiting on, however we came to know: the
   // snapshot it was opened with, plus anything seen starting since.
   const runningTasks = useMemo(() => {
@@ -332,6 +393,31 @@ export default function App() {
     for (const [id, task] of liveTasks) byID.set(id, task);
     return [...byID.values()];
   }, [restored, liveTasks]);
+
+  // One tray, whichever way the pause reached us. A live one wins: it is the
+  // run talking, and the snapshot the page loaded with is behind it.
+  const tray = useMemo<Tray>(() => {
+    if (liveInterrupt) return { tasks: runningTasks, interrupt: liveInterrupt };
+
+    const waiting = (restored?.interrupts ?? []) as unknown as InterruptEntry[];
+    if (waiting.length) {
+      return {
+        tasks: runningTasks,
+        interrupt: {
+          key: "restored",
+          entries: waiting,
+          onSubmit: (decisions) => {
+            // Cleared first: the resume starts a run, and the run is what
+            // shows what happened next.
+            setRestored(null);
+            agent?.resume(decisions).catch((e) => setRunError(String(e)));
+          },
+        },
+      };
+    }
+
+    return { tasks: runningTasks, interrupt: null };
+  }, [liveInterrupt, restored, runningTasks, agent]);
 
   // Opening a conversation is what marks it seen.
   useEffect(() => {
@@ -380,7 +466,8 @@ export default function App() {
   // left alone so this cannot fight the sidebar.
   useEffect(() => {
     if (!agentName) return;
-    const wanted = threadFromURL();
+    const wanted = opened.current.thread;
+    opened.current.thread = "";
     if (!wanted || wanted === active.threadId) return;
     void openThread(wanted);
     // active.threadId is deliberately not a dependency: this is for arriving
@@ -388,8 +475,9 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agentName, openThread]);
 
-  // And keep it pointing at whatever is open.
-  useEffect(() => rememberThread(active.threadId), [active.threadId]);
+  // And keep both pointing at whatever is open.
+  useEffect(() => rememberParam(AGENT_PARAM, agentName), [agentName]);
+  useEffect(() => rememberParam(THREAD_PARAM, active.threadId), [active.threadId]);
 
   const startNewChat = useCallback(() => setActive(newActive()), []);
 
@@ -442,36 +530,8 @@ export default function App() {
                 onAgentChange={onAgentChange}
               />
             </header>
-            <InterruptHandler agentName={agentName} />
+            <InterruptHandler agentName={agentName} publish={setLiveInterrupt} />
             <InlineToolRenderer agentName={agentName} />
-            {runningTasks.length > 0 && (
-              // Keyed by the tasks it is about, so dismissing it hides that
-              // set and a job starting later says so rather than staying
-              // silent because the note was waved away once.
-              <BackgroundTaskNote
-                key={runningTasks.map((t) => t.taskId).join(",")}
-                tasks={runningTasks}
-              />
-            )}
-            {restored?.interrupts?.length ? (
-              <div className="restored-interrupt">
-                <div className="hint">
-                  This conversation is waiting on you. Reloading the page lost the
-                  prompt, not the request.
-                </div>
-                <InterruptCard
-                  entries={restored.interrupts as unknown as InterruptEntry[]}
-                  onSubmit={(decisions) => {
-                    // Clear first: the resume starts a run, and the run is
-                    // what shows what happened next.
-                    setRestored(null);
-                    agent.resume(decisions).catch((e) => {
-                      setRunError(String(e));
-                    });
-                  }}
-                />
-              </div>
-            ) : null}
             {runError && (
               <div className="run-error" role="alert">
                 <span className="ico">⚠</span>
@@ -485,18 +545,20 @@ export default function App() {
                 </button>
               </div>
             )}
-            <div className="chat-inner">
-              <CopilotChat
-                agentId={agentName}
-                threadId={active.threadId}
-                labels={{
-                  chatInputPlaceholder: "Ask anything",
-                  chatDisclaimerText:
-                    "The agent can make mistakes. Check important info.",
-                }}
-                input={inputSlot}
-              />
-            </div>
+            <TrayContext.Provider value={tray}>
+              <div className="chat-inner">
+                <CopilotChat
+                  agentId={agentName}
+                  threadId={active.threadId}
+                  labels={{
+                    chatInputPlaceholder: "Ask anything",
+                    chatDisclaimerText:
+                      "The agent can make mistakes. Check important info.",
+                  }}
+                  input={inputSlot}
+                />
+              </div>
+            </TrayContext.Provider>
           </div>
         </CopilotKitProvider>
       )}
@@ -520,22 +582,65 @@ function SteerableInput(props: any) {
   // onSteer is ours; CopilotChatInput spreads what it doesn't recognise
   // onto its DOM node.
   const { onSteer, ...inputProps } = props;
+  const tray = useContext(TrayContext);
 
   const hasText = ((props.value ?? "") as string).trim().length > 0;
   const steering = !!props.isRunning && !!onSteer && hasText;
 
   return (
-    <CopilotChatInput
-      {...inputProps}
-      isRunning={props.isRunning && !steering}
-      onSubmitMessage={(text: string) => {
-        if (props.isRunning && onSteer && text.trim()) {
-          onSteer(text);
-          return;
-        }
-        props.onSubmitMessage?.(text);
-      }}
-    />
+    <>
+      <ComposerTray tray={tray} />
+      <CopilotChatInput
+        {...inputProps}
+        isRunning={props.isRunning && !steering}
+        onSubmitMessage={(text: string) => {
+          if (props.isRunning && onSteer && text.trim()) {
+            onSteer(text);
+            return;
+          }
+          props.onSubmitMessage?.(text);
+        }}
+      />
+    </>
+  );
+}
+
+// ComposerTray is the one place the chat says what it is waiting on — a tool
+// still working, a decision it needs — directly above the box the user would
+// answer in.
+//
+// It renders inside the composer's slot because that is where the answer is
+// given. It used to be two places: an approval that arrived live was drawn
+// inline among the messages by CopilotKit, and the same approval after a
+// reload was drawn above the transcript, so the same question moved depending
+// on how the page came to know about it. It also puts the note within reach
+// of a long conversation, where the top of the transcript is nowhere near
+// where the user is reading.
+//
+// Sitting in CopilotChat's input overlay means the transcript's bottom padding
+// tracks it — the overlay is measured — so nothing is left hidden behind it.
+function ComposerTray({ tray }: { tray: Tray }) {
+  if (!tray.tasks.length && !tray.interrupt) return null;
+
+  return (
+    <div className="composer-tray">
+      {tray.tasks.length > 0 && (
+        // Keyed by the tasks it is about, so dismissing it hides that set and
+        // a job starting later says so rather than staying silent because the
+        // note was waved away once.
+        <BackgroundTaskNote
+          key={tray.tasks.map((t) => t.taskId).join(",")}
+          tasks={tray.tasks}
+        />
+      )}
+      {tray.interrupt && (
+        <InterruptCard
+          key={tray.interrupt.key}
+          entries={tray.interrupt.entries}
+          onSubmit={tray.interrupt.onSubmit}
+        />
+      )}
+    </div>
   );
 }
 
@@ -784,7 +889,19 @@ interface InterruptPayload {
   interrupts?: InterruptEntry[];
 }
 
-function InterruptHandler({ agentName }: { agentName: string }) {
+// InterruptHandler turns CopilotKit's inline interrupt into a tray entry.
+//
+// useInterrupt renders where it is asked to, which is among the messages. That
+// is one of the two places an approval used to appear, and the one that moved
+// when the page was reloaded. So the render hands the pause upward and draws
+// nothing itself; the tray decides where it goes.
+function InterruptHandler({
+  agentName,
+  publish,
+}: {
+  agentName: string;
+  publish: (next: (current: TrayInterrupt | null) => TrayInterrupt | null) => void;
+}) {
   useInterrupt<ApprovalDecision[]>({
     agentId: agentName,
     enabled: (event: any) => {
@@ -803,19 +920,56 @@ function InterruptHandler({ agentName }: { agentName: string }) {
         ? payload.interrupts
         : (payload.pendingToolCalls ?? []).map((c) => ({ ...c, mode: "approval" }));
       return (
-        <InterruptCard
-          entries={entries}
-          onSubmit={(decisions) => {
-            // useInterrupt forwards resolve()'s argument verbatim under
-            // forwardedProps.command.resume on the next run. Wrap as
-            // { decisions } so the server's canonical parse path
-            // (command.resume.decisions) picks it up.
-            resolve({ decisions } as any);
-          }}
-        />
+        <InterruptPublisher entries={entries} resolve={resolve} publish={publish} />
       );
     },
   });
+  return null;
+}
+
+// InterruptPublisher is the pause, held as state for as long as CopilotKit
+// keeps it mounted, and drawn elsewhere.
+//
+// A component rather than a call in render because publishing is a state
+// change, and the mount/unmount pair is exactly the lifetime the pause has.
+function InterruptPublisher({
+  entries,
+  resolve,
+  publish,
+}: {
+  entries: InterruptEntry[];
+  resolve: (value: unknown) => void;
+  publish: (next: (current: TrayInterrupt | null) => TrayInterrupt | null) => void;
+}) {
+  // resolve is rebuilt on each of CopilotKit's renders; the tray holds one
+  // callback for the life of the pause, so it reaches the current one here
+  // instead of being republished to keep up.
+  const resolveRef = useRef(resolve);
+  useEffect(() => {
+    resolveRef.current = resolve;
+  });
+
+  const key = entries.map((e) => e.toolCallId).join(",");
+  useEffect(() => {
+    publish(() => ({
+      key,
+      entries,
+      onSubmit: (decisions) => {
+        // useInterrupt forwards resolve()'s argument verbatim under
+        // forwardedProps.command.resume on the next run. Wrap as
+        // { decisions } so the server's canonical parse path
+        // (command.resume.decisions) picks it up.
+        resolveRef.current({ decisions } as any);
+      },
+    }));
+    // Only if it is still ours: a pause resolved into another pause unmounts
+    // this one after the next has already published, and a blind clear would
+    // take the new one down with it.
+    return () => publish((current) => (current?.key === key ? null : current));
+    // entries is fixed for a given set of call ids, which is what key is.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key, publish]);
+
   return null;
 }
 

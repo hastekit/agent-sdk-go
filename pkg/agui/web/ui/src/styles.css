@@ -557,14 +557,41 @@ body {
   background: var(--accent, #c96442);
 }
 
-/* A pause the page found already waiting, rather than one it watched
-   arrive. Same card, introduced so it does not read as a fresh prompt. */
-.restored-interrupt {
-  padding: 0 16px;
+/* ── Composer tray ───────────────────────────────────────── */
+/* What the chat is waiting on, directly above the box it is answered in:
+   a tool still working, a decision it needs.
+
+   It lives inside CopilotChat's input overlay, which is absolutely
+   positioned across the bottom and — being an overlay — is transparent
+   and does not take pointer events. Both have to be given back, or the
+   transcript scrolls visibly through the card and the approve button
+   cannot be clicked. The width mirrors the composer's own container
+   (max-w-3xl, centred, px-4 below the sm breakpoint) so the tray and the
+   box below it read as one control. */
+.composer-tray {
+  pointer-events: auto;
+  width: 100%;
+  max-width: 48rem;
+  margin: 0 auto;
+  padding: 0 16px 8px;
+  background: var(--hk-bg);
+  /* The transcript ends at the tray's top edge rather than sliding under
+     it: the overlay is measured, so this fade is the only seam. */
+  box-shadow: 0 -12px 12px -6px var(--hk-bg);
+  max-height: 55vh;
+  overflow-y: auto;
 }
 
-.restored-interrupt .hint {
-  margin-bottom: 8px;
+@media (min-width: 640px) {
+  .composer-tray {
+    padding-inline: 0;
+  }
+}
+
+/* Inside the tray the card is the tray's own content: it supplies the
+   margins, so the card does not add its own on top. */
+.composer-tray .hk-approval {
+  margin: 0 0 8px;
 }
 
 /* A tool still working after the turn that called it ended. */
@@ -572,7 +599,7 @@ body {
   display: flex;
   align-items: center;
   gap: 10px;
-  margin: 8px 16px;
+  margin: 0 0 8px;
   padding: 10px 12px;
   border: 1px solid var(--border, #2a2a2a);
   border-radius: 8px;
