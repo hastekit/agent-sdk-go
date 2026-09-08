@@ -52,14 +52,14 @@ func (p *InMemoryConversationPersistence) LoadTranscript(ctx context.Context, na
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
-	messageIDs, ok := p.messagesByThread[threadID]
+	messageIDs, ok := p.messagesByThread[historyKey(namespace, threadID)]
 	if !ok {
 		return []ConversationMessage{}, nil
 	}
 
 	result := make([]ConversationMessage, 0, len(messageIDs))
 	for _, msgID := range messageIDs {
-		m := p.messages[msgID]
+		m := p.messages[historyKey(namespace, msgID)]
 		if m == nil {
 			continue
 		}

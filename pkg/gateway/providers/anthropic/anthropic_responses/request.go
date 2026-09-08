@@ -107,6 +107,7 @@ type ContentUnion struct {
 	OfServerToolUse               *ServerToolUseContent           `json:",omitempty"`
 	OfWebSearchResult             *WebSearchResultContent         `json:",omitempty"`
 	OfBashCodeExecutionToolResult *BashCodeExecutionResultContent `json:",omitempty"`
+	OfDocument                    *DocumentContent                `json:",omitempty"`
 }
 
 func (u *ContentUnion) UnmarshalJSON(data []byte) error {
@@ -164,6 +165,12 @@ func (u *ContentUnion) UnmarshalJSON(data []byte) error {
 		return nil
 	}
 
+	var documentContent DocumentContent
+	if err := sonic.Unmarshal(data, &documentContent); err == nil {
+		u.OfDocument = &documentContent
+		return nil
+	}
+
 	return errors.New("invalid input content union")
 }
 
@@ -204,6 +211,10 @@ func (u *ContentUnion) MarshalJSON() ([]byte, error) {
 		return sonic.Marshal(u.OfBashCodeExecutionToolResult)
 	}
 
+	if u.OfDocument != nil {
+		return sonic.Marshal(u.OfDocument)
+	}
+
 	return nil, nil
 }
 
@@ -229,9 +240,35 @@ type ImageContent struct {
 type ImageContentSource struct {
 	Type string `json:"type"` // base64, url, file
 
-	// Only for type = base64
-	Data      *string `json:"data"`       // base64 encoded image data
-	MediaType *string `json:"media_type"` // Mime Type
+	// Only for type = base64. Omitted rather than sent as null: a url or file
+	// source that carried "data": null alongside its own field is a shape the
+	// API has no reason to accept.
+	Data      *string `json:"data,omitempty"`       // base64 encoded image data
+	MediaType *string `json:"media_type,omitempty"` // Mime Type
+
+	// Only for type=file
+	FileID *string `json:"file_id,omitempty"`
+
+	// Only for type=url
+	URL *string `json:"url,omitempty"`
+}
+
+// DocumentContent carries a file — a PDF in practice — under the same three
+// transports as an image.
+type DocumentContent struct {
+	Type   ContentTypeDocument   `json:"type"` // "document"
+	Source DocumentContentSource `json:"source"`
+
+	// Title is what the model calls the document when it cites it.
+	Title *string `json:"title,omitempty"`
+}
+
+type DocumentContentSource struct {
+	Type string `json:"type"` // base64, url, file, text
+
+	// Only for type=base64 and type=text
+	Data      *string `json:"data,omitempty"`
+	MediaType *string `json:"media_type,omitempty"`
 
 	// Only for type=file
 	FileID *string `json:"file_id,omitempty"`

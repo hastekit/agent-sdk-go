@@ -139,7 +139,7 @@ func (p *FileConversationPersistence) SaveMessages(ctx context.Context, namespac
 	// Read back the stored message: branching resolves the thread and
 	// conversation IDs at save time, and the record must carry the
 	// resolved values for replay to reconstruct the same state.
-	stored := p.mem.getMessage(runId)
+	stored := p.mem.getMessage(namespace, runId)
 	if stored == nil {
 		return fmt.Errorf("run %s missing after save", runId)
 	}
@@ -187,7 +187,7 @@ func (p *FileConversationPersistence) SaveSummary(ctx context.Context, namespace
 	// conversation's file, falling back to the thread ID for unknown
 	// threads so the record is never dropped.
 	conversationID := summary.ThreadID
-	if thread := p.mem.getThread(summary.ThreadID); thread != nil {
+	if thread := p.mem.getThread(namespace, summary.ThreadID); thread != nil {
 		conversationID = thread.ConversationID
 	}
 
@@ -265,7 +265,7 @@ func (p *FileConversationPersistence) replay() error {
 }
 
 func (p *FileConversationPersistence) replayFile(path string) error {
-	f, err := os.Open(path)
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
 	if err != nil {
 		return err
 	}
@@ -291,7 +291,7 @@ func (p *FileConversationPersistence) applyRecord(rec *fileRecord) error {
 		if rec.Summary == nil {
 			return fmt.Errorf("summary record has no summary body")
 		}
-		p.mem.summaries[rec.Summary.ThreadID] = &inMemorySummary{
+		p.mem.summaries[historyKey(rec.Summary.Namespace, rec.Summary.ThreadID)] = &inMemorySummary{
 			ID:                  rec.Summary.ID,
 			ThreadID:            rec.Summary.ThreadID,
 			Namespace:           rec.Summary.Namespace,
@@ -318,23 +318,23 @@ func (p *FileConversationPersistence) applyMessageRecord(rec *fileMessageRecord)
 	// run record rather than overwriting it (which would drop the
 	// earlier increments) and don't re-index it in the thread — mirrors
 	// InMemory.SaveMessages' merge so replay reconstructs the same state.
-	if existing, ok := m.messages[rec.RunID]; ok {
+	if existing, ok := m.messages[historyKey(rec.Namespace, rec.RunID)]; ok {
 		existing.Messages = append(existing.Messages, rec.Messages...)
 		if rec.Meta != nil {
 			existing.Meta = rec.Meta
 		}
-		if t := m.threads[existing.ThreadID]; t != nil {
+		if t := m.threads[historyKey(rec.Namespace, existing.ThreadID)]; t != nil {
 			t.LastRunID = rec.RunID
 		}
 		return
 	}
 
-	thread, exists := m.threads[rec.ThreadID]
+	thread, exists := m.threads[historyKey(rec.Namespace, rec.ThreadID)]
 	if !exists {
 		var prefix []string
 		if rec.PreviousRunID != "" {
-			if prev, ok := m.messages[rec.PreviousRunID]; ok && prev.ThreadID != rec.ThreadID {
-				for _, id := range m.messagesByThread[prev.ThreadID] {
+			if prev, ok := m.messages[historyKey(rec.Namespace, rec.PreviousRunID)]; ok && prev.ThreadID != rec.ThreadID {
+				for _, id := range m.messagesByThread[historyKey(rec.Namespace, prev.ThreadID)] {
 					prefix = append(prefix, id)
 					if id == rec.PreviousRunID {
 						break
@@ -350,12 +350,12 @@ func (p *FileConversationPersistence) applyMessageRecord(rec *fileMessageRecord)
 			Namespace:      rec.Namespace,
 			CreatedAt:      rec.CreatedAt,
 		}
-		m.threads[rec.ThreadID] = thread
-		m.messagesByThread[rec.ThreadID] = prefix
+		m.threads[historyKey(rec.Namespace, rec.ThreadID)] = thread
+		m.messagesByThread[historyKey(rec.Namespace, rec.ThreadID)] = prefix
 	}
 	thread.LastRunID = rec.RunID
 
-	m.messages[rec.RunID] = &inMemoryMessage{
+	m.messages[historyKey(rec.Namespace, rec.RunID)] = &inMemoryMessage{
 		RunID:          rec.RunID,
 		PreviousRunID:  rec.PreviousRunID,
 		ThreadID:       rec.ThreadID,
@@ -365,7 +365,7 @@ func (p *FileConversationPersistence) applyMessageRecord(rec *fileMessageRecord)
 		Meta:           rec.Meta,
 		CreatedAt:      rec.CreatedAt,
 	}
-	m.messagesByThread[rec.ThreadID] = append(m.messagesByThread[rec.ThreadID], rec.RunID)
+	m.messagesByThread[historyKey(rec.Namespace, rec.ThreadID)] = append(m.messagesByThread[historyKey(rec.Namespace, rec.ThreadID)], rec.RunID)
 }
 
 // replayLines invokes apply for each non-empty line of the file. A
@@ -374,24 +374,38 @@ func (p *FileConversationPersistence) applyMessageRecord(rec *fileMessageRecord)
 func replayLines(f *os.File, apply func(line []byte) error) error {
 	reader := bufio.NewReader(f)
 	lineNo := 0
+	var validOffset int64
 	for {
 		line, readErr := reader.ReadBytes('\n')
 		if readErr != nil && readErr != io.EOF {
 			return readErr
 		}
-
 		atEOF := readErr == io.EOF
+		lineNo++
 		if trimmed := bytes.TrimSpace(line); len(trimmed) > 0 {
-			lineNo++
 			if err := apply(trimmed); err != nil {
 				if !atEOF {
 					return fmt.Errorf("line %d: %w", lineNo, err)
 				}
-				slog.Warn("skipping partial trailing record", "file", f.Name(), "line", lineNo, "error", err)
+				// Repair the file itself: otherwise the next append joins the broken
+				// suffix and makes a subsequent restart fail on a non-final record.
+				if err := f.Truncate(validOffset); err != nil {
+					return err
+				}
+				slog.Warn("truncated partial trailing record", "file", f.Name(), "line", lineNo, "error", err)
+				return f.Sync()
 			}
 		}
-
+		validOffset += int64(len(line))
 		if atEOF {
+			// A complete JSON record without a newline is valid, but needs a
+			// separator before future appends (including after an interrupted write).
+			if len(line) > 0 {
+				if _, err := f.WriteAt([]byte{'\n'}, validOffset); err != nil {
+					return err
+				}
+				return f.Sync()
+			}
 			return nil
 		}
 	}

@@ -47,17 +47,44 @@ export async function fetchThreads(
   return { supported: true, threads: (await r.json()).threads ?? [] };
 }
 
+// ThreadRunState is what the thread's last run left outstanding. Absent means
+// nothing is: a settled thread reports no run at all.
+export interface ThreadRunState {
+  runId?: string;
+  status?: string;
+  awaitingApproval: boolean;
+  interrupts?: Record<string, unknown>[];
+  pendingToolCalls?: Record<string, unknown>[];
+  backgroundTasks?: ThreadBackgroundTask[];
+}
+
+export interface ThreadBackgroundTask {
+  taskId: string;
+  callId?: string;
+  toolName?: string;
+  streamId?: string;
+  startedAt?: string;
+}
+
+// fetchMessages returns the thread's history and whatever its last run left
+// outstanding.
+//
+// The run state matters on a reload. An approval card is drawn from an event
+// only a live run emits, so a browser that refreshes while the agent waits for
+// a decision would otherwise show nothing at all — the agent still waiting,
+// and no way to answer it.
 export async function fetchMessages(
   agent: string,
   threadId: string
-): Promise<AGUIMessage[]> {
+): Promise<{ messages: AGUIMessage[]; run: ThreadRunState | null }> {
   const r = await fetch(
     `${API}/agents/${encodeURIComponent(agent)}/threads/${encodeURIComponent(
       threadId
     )}/messages`
   );
   if (!r.ok) throw new Error(`messages → ${r.status}`);
-  return (await r.json()).messages ?? [];
+  const body = await r.json();
+  return { messages: body.messages ?? [], run: body.run ?? null };
 }
 
 export function runUrl(agent: string): string {
@@ -69,13 +96,25 @@ export function runUrl(agent: string): string {
 
 // streamUrl is the thread's run stream: attaching to it replays the run
 // so far and then follows it live, without starting a turn.
-export function streamUrl(agent: string, threadId: string): string {
-  return new URL(
+//
+// waitSeconds asks the server to hold the request open for that long if no
+// run is going yet, instead of answering 204 at once. A rejoin that follows a
+// watch uses it: the watch reports the run the moment it claims the thread,
+// and the run publishes its first chunk a beat later — without the wait, a
+// rejoin landing in between is told there is nothing to join.
+export function streamUrl(
+  agent: string,
+  threadId: string,
+  waitSeconds = 0
+): string {
+  const url = new URL(
     `${API}/agents/${encodeURIComponent(agent)}/threads/${encodeURIComponent(
       threadId
     )}/stream`,
     window.location.origin
-  ).toString();
+  );
+  if (waitSeconds > 0) url.searchParams.set("wait", String(waitSeconds));
+  return url.toString();
 }
 
 // stopRun asks the server to end a run in flight, identified by the
@@ -105,4 +144,50 @@ export function relativeTime(iso: string): string {
   if (diff < day) return `${Math.floor(diff / hr)}h ago`;
   if (diff < 7 * day) return `${Math.floor(diff / day)}d ago`;
   return d.toLocaleDateString();
+}
+
+// RunFeedEvent is one run beginning or ending, anywhere in the namespaces
+// being watched.
+export interface RunFeedEvent {
+  event: "RUN_STARTED" | "RUN_FINISHED";
+  namespace: string;
+  threadId: string;
+  runId?: string;
+  agentName?: string;
+  streamId: string;
+  at: string;
+}
+
+// watchRunFeed is the long poll that tells a browser something happened in a
+// conversation it is not looking at.
+//
+// The per-thread watch cannot: it is keyed to one thread's channel, so a
+// conversation that starts elsewhere — or one that did not exist when this
+// page loaded — has nothing the browser could have been attached to. This
+// watches whole namespaces instead.
+//
+// The cursor is opaque and belongs to the server. Hand back what it last gave
+// you and a run that started and ended while the tab was hidden is still
+// reported; send nothing and the feed starts from now, which is what a page
+// loading for the first time wants.
+export async function watchRunFeed(
+  agent: string,
+  cursor: string,
+  waitSeconds: number,
+  namespaces?: string[],
+  signal?: AbortSignal
+): Promise<{ events: RunFeedEvent[]; cursor: string }> {
+  const url = new URL(
+    `${API}/agents/${encodeURIComponent(agent)}/runs`,
+    window.location.origin
+  );
+  url.searchParams.set("wait", String(waitSeconds));
+  if (cursor) url.searchParams.set("cursor", cursor);
+  if (namespaces?.length) url.searchParams.set("namespaces", namespaces.join(","));
+
+  const r = await fetch(url.toString(), { signal });
+  if (r.status === 501) return { events: [], cursor };
+  if (!r.ok) throw new Error(`runs → ${r.status}`);
+  const body = await r.json();
+  return { events: body.events ?? [], cursor: body.cursor ?? cursor };
 }

@@ -42,6 +42,9 @@ func IsPauseErr(err error) (*PauseError, bool) {
 // Node is the interface every workflow node implements. Validate
 // runs at Compile time; Execute runs at run time and returns a
 // partial RunContext update plus the port name edges should follow.
+// Execute must honor ctx cancellation, pass ctx to blocking operations, and
+// return promptly once cancelled. It must not mutate Input: return updates
+// through output instead. Parallel nodes share the input for the current wave.
 type Node interface {
 	Type() NodeType
 	Validate() error

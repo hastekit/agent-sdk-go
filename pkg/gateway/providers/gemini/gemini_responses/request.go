@@ -60,6 +60,10 @@ type Part struct {
 
 	InlineData *InlinePartData `json:"inlineData,omitempty"`
 
+	// FileData points at bytes Gemini already holds — a Files API URI, a
+	// gs:// object on Vertex — rather than carrying them inline.
+	FileData *FilePartData `json:"fileData,omitempty"`
+
 	ExecutableCode      *ExecutableCodePart      `json:"executableCode,omitempty"`
 	CodeExecutionResult *CodeExecutionResultPart `json:"codeExecutionResult,omitempty"`
 }
@@ -67,6 +71,11 @@ type Part struct {
 type InlinePartData struct {
 	MimeType string `json:"mimeType,omitempty"`
 	Data     string `json:"data,omitempty"`
+}
+
+type FilePartData struct {
+	MimeType string `json:"mimeType,omitempty"`
+	FileURI  string `json:"fileUri"`
 }
 
 func (p *Part) IsThought() bool {
@@ -85,6 +94,30 @@ type FunctionResponse struct {
 	ID       string         `json:"id"`
 	Name     string         `json:"name"`
 	Response map[string]any `json:"response,omitempty"`
+
+	// Parts carries what will not fit in Response, which is JSON and so has
+	// nowhere to put an image. A tool that returns a screenshot puts it here.
+	Parts []FunctionResponsePart `json:"parts,omitempty"`
+}
+
+type FunctionResponsePart struct {
+	InlineData *FunctionResponseBlob     `json:"inlineData,omitempty"`
+	FileData   *FunctionResponseFileData `json:"fileData,omitempty"`
+}
+
+type FunctionResponseBlob struct {
+	MimeType string `json:"mimeType"`
+	Data     string `json:"data"`
+
+	// DisplayName names the part so the structured Response can point at it
+	// with {"$ref": "<displayName>"}, and names it for the model either way.
+	DisplayName string `json:"displayName,omitempty"`
+}
+
+type FunctionResponseFileData struct {
+	MimeType    string `json:"mimeType,omitempty"`
+	FileURI     string `json:"fileUri"`
+	DisplayName string `json:"displayName,omitempty"`
 }
 
 type ExecutableCodePart struct {

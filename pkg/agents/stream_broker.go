@@ -2,6 +2,8 @@ package agents
 
 import (
 	"context"
+	"log/slog"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/history"
@@ -18,6 +20,9 @@ var (
 
 	_ StopWatcher = (*streambroker.MemoryStreamBroker)(nil)
 	_ StopWatcher = (*streambroker.RedisStreamBroker)(nil)
+
+	_ RunFeed = (*streambroker.MemoryStreamBroker)(nil)
+	_ RunFeed = (*streambroker.RedisStreamBroker)(nil)
 )
 
 // StreamIDForThread returns the broker channel a thread's runs stream on.
@@ -35,6 +40,23 @@ func StreamIDForThread(namespace, threadID string) string {
 		return uuid.NewString()
 	}
 	return uuid.NewSHA1(uuid.NameSpaceURL, []byte("hastekit:stream:"+namespace+"\x00"+threadID)).String()
+}
+
+// StreamIDForTask returns the broker channel a background task streams its
+// progress on.
+//
+// A task gets a channel of its own rather than sharing the thread's. The
+// thread's channel belongs to whatever run holds it, and a run claiming it
+// resets the transcript — so a task publishing there would have its progress
+// wiped by the next turn, and what survived would be interleaved into another
+// run's stream keyed to a call that run never made.
+//
+// Like StreamIDForThread it is deterministic, so a client holding the task id
+// can derive the channel rather than being told it. Task ids are expected to
+// be unique per task: two tasks sharing one id share one channel.
+func StreamIDForTask(namespace, threadID, taskID string) string {
+	return uuid.NewSHA1(uuid.NameSpaceURL,
+		[]byte("hastekit:task:"+namespace+"\x00"+threadID+"\x00"+taskID)).String()
 }
 
 // StreamBroker provides an abstraction for streaming response chunks
@@ -115,4 +137,73 @@ type RunClaimBroker interface {
 	//     Subscribes and runs with msgs as the run's input.
 	// The claim is released by Close.
 	EnqueueOrStart(ctx context.Context, streamID string, msgs []history.Message) (started bool, err error)
+}
+
+// Run lifecycle events, in the vocabulary the AG-UI stream uses.
+const (
+	RunEventStarted  = "RUN_STARTED"
+	RunEventFinished = "RUN_FINISHED"
+)
+
+// RunEvent is one run beginning or ending, as a watcher of a whole namespace
+// sees it.
+type RunEvent = streambroker.RunEvent
+
+// RunFeed is an optional StreamBroker capability: run lifecycle fanned in per
+// namespace, so a client can watch every conversation in a namespace instead
+// of one thread at a time.
+//
+// The thread streams cannot answer this. Each is keyed by its own channel, and
+// a conversation that has not started yet has no channel to name — so a client
+// sitting in one conversation could never learn that another had begun. This
+// is a second, much thinner wire alongside them, carrying only the fact that a
+// run started or ended.
+//
+// It is a feed rather than a broadcast because the interesting runs are the
+// ones nobody was watching: a background task finishing at 3am. A client that
+// reconnects passes back the cursor it last held and is told what it missed,
+// which a fire-and-forget subscription could not do.
+type RunFeed interface {
+	// PublishRunEvent records one run beginning or ending. The namespace is
+	// passed rather than derived: a channel id is a one-way hash of it.
+	PublishRunEvent(ctx context.Context, event RunEvent) error
+
+	// ReadRunEvents returns what happened in these namespaces after cursor,
+	// waiting up to wait for something if there is nothing yet.
+	//
+	// The returned cursor is opaque and belongs to the implementation; a
+	// client stores it and passes it back. An empty cursor means "from now",
+	// not "from the beginning" — a client attaching for the first time wants
+	// what happens next, not a replay of the day.
+	ReadRunEvents(ctx context.Context, namespaces []string, cursor string, wait time.Duration) ([]RunEvent, string, error)
+}
+
+// publishRunEvent tells whoever is watching the namespace that a run began or
+// ended.
+//
+// This is a second, much thinner wire than the run's own stream, and it exists
+// because that stream cannot answer the question: it is keyed by the thread's
+// channel, so a browser sitting in one conversation has nothing to attach to
+// that would tell it another had started — least of all a conversation that
+// did not exist when it attached.
+//
+// Best effort. A run is not worth failing over a notification nobody may be
+// listening for, and the runs themselves are in the thread list regardless.
+func (e *Agent) publishRunEvent(ctx context.Context, event string, in *AgentInput, runID string) {
+	feed, ok := e.streamBroker.(RunFeed)
+	if !ok || in == nil {
+		return
+	}
+
+	if err := feed.PublishRunEvent(ctx, RunEvent{
+		Event:     event,
+		Namespace: in.Namespace,
+		ThreadID:  in.ThreadID,
+		RunID:     runID,
+		AgentName: e.Name,
+		StreamID:  in.StreamID,
+	}); err != nil {
+		slog.WarnContext(ctx, "failed to publish a run event",
+			slog.String("event", event), slog.String("thread_id", in.ThreadID), slog.Any("error", err))
+	}
 }

@@ -1,7 +1,6 @@
 package gemini_responses
 
 import (
-	"fmt"
 	"strings"
 	"time"
 
@@ -147,17 +146,12 @@ func (content *Content) ToNativeMessage() responses2.InputMessageUnion {
 		}
 
 		if part.FunctionResponse != nil {
-			for _, v := range part.FunctionResponse.Response {
-				return responses2.InputMessageUnion{
-					OfFunctionCallOutput: &responses2.FunctionCallOutputMessage{
-						ID:     part.FunctionResponse.ID,
-						CallID: part.FunctionResponse.ID,
-						Output: responses2.FunctionCallOutputContentUnion{
-							OfString: utils.Ptr(v.(string)),
-							OfList:   responses2.InputContent{},
-						},
-					},
-				}
+			return responses2.InputMessageUnion{
+				OfFunctionCallOutput: &responses2.FunctionCallOutputMessage{
+					ID:     part.FunctionResponse.ID,
+					CallID: part.FunctionResponse.ID,
+					Output: functionResponseToNativeOutput(part.FunctionResponse),
+				},
 			}
 		}
 
@@ -189,14 +183,8 @@ func (content *Content) ToNativeMessage() responses2.InputMessageUnion {
 			})
 		}
 
-		if part.InlineData != nil {
-			if strings.HasPrefix(part.InlineData.MimeType, "image") {
-				contents = append(contents, responses2.InputContentUnion{
-					OfInputImage: &responses2.InputImageContent{
-						ImageURL: utils.Ptr(fmt.Sprintf("data:%s;base64,%s", part.InlineData.MimeType, part.InlineData.Data)),
-					},
-				})
-			}
+		if attachment, ok := partToNativeContent(&part); ok {
+			contents = append(contents, attachment)
 		}
 	}
 

@@ -210,21 +210,28 @@ func (c *LLMClient) getKey(ctx context.Context, providerName llm.ProviderName) s
 		return ""
 	}
 
-	if len(providerConfig.ApiKeys) == 0 {
+	return SelectAPIKey(providerConfig)
+}
+
+// SelectAPIKey picks one of a provider's configured keys, weighted by
+// APIKeyConfig.Weight. It is exported for middleware.Fallback, which has to
+// resolve a key for a provider the caller never named.
+func SelectAPIKey(cfg *ProviderConfig) string {
+	if cfg == nil || len(cfg.ApiKeys) == 0 {
 		return ""
 	}
 
-	if len(providerConfig.ApiKeys) == 1 {
-		return providerConfig.ApiKeys[0].APIKey
+	if len(cfg.ApiKeys) == 1 {
+		return cfg.ApiKeys[0].APIKey
 	}
 
 	// Weight random selection
-	weights := make([]int, len(providerConfig.ApiKeys))
-	for idx, key := range providerConfig.ApiKeys {
+	weights := make([]int, len(cfg.ApiKeys))
+	for idx, key := range cfg.ApiKeys {
 		weights[idx] = key.Weight
 	}
 
-	return providerConfig.ApiKeys[utils2.WeightedRandomIndex(weights)].APIKey
+	return cfg.ApiKeys[utils2.WeightedRandomIndex(weights)].APIKey
 }
 
 func (c *LLMClient) getProviderAndModelName(input string) (llm.ProviderName, string, error) {

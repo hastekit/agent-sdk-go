@@ -3,9 +3,6 @@ package gateway
 import (
 	"context"
 	"maps"
-
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/trace"
 )
 
 type gatewayContextKey struct{}
@@ -53,22 +50,4 @@ func GetContext(ctx context.Context) map[string]string {
 		return gatewayContext
 	}
 	return map[string]string{}
-}
-
-func addToSpan(ctx context.Context, span trace.Span) {
-	if span == nil {
-		return
-	}
-
-	attributes := []attribute.KeyValue{}
-
-	gatewayContextAny := ctx.Value(gatewayContextKey{})
-	gatewayContext, ok := gatewayContextAny.(map[string]string)
-	if ok {
-		for k, v := range gatewayContext {
-			attributes = append(attributes, attribute.String(k, v))
-		}
-
-		span.SetAttributes(attributes...)
-	}
 }

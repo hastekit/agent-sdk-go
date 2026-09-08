@@ -2,6 +2,7 @@ package temporal_runtime
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
 	"go.temporal.io/sdk/activity"
@@ -53,12 +54,18 @@ type TemporalToolProxy struct {
 	wrappedTool agents.Tool
 }
 
+// NewTemporalToolProxy wraps a tool for the workflow, keeping whichever
+// capabilities the loop will ask it about — see TemporalBackgroundToolProxy.
 func NewTemporalToolProxy(workflowCtx workflow.Context, prefix string, wrappedTool agents.Tool) agents.Tool {
-	return &TemporalToolProxy{
+	proxy := &TemporalToolProxy{
 		workflowCtx: workflowCtx,
 		prefix:      prefix,
 		wrappedTool: wrappedTool,
 	}
+	if _, ok := wrappedTool.(agents.BackgroundTool); ok {
+		return &TemporalBackgroundToolProxy{TemporalToolProxy: proxy}
+	}
+	return proxy
 }
 
 func (t *TemporalToolProxy) Execute(ctx context.Context, params *agents.ToolCall) (*agents.ToolCallResponse, error) {
@@ -82,3 +89,30 @@ func (t *TemporalToolProxy) GetToolDescriptor() *agents.BaseTool {
 	}
 	return t.wrappedTool.GetToolDescriptor()
 }
+
+// TemporalBackgroundToolProxy is the proxy for a tool that also starts
+// background tasks. The loop asks a tool whether it is an agents.BackgroundTool
+// before letting it answer with a task id, and it asks the proxy, not the tool
+// behind it — so the proxy has to be one too.
+//
+// Its AwaitTask is never called in the workflow. Waiting is what the background
+// workflow's activity does, on the real tool; this exists so the loop
+// recognises the capability, and so the runner learns which activity waits.
+type TemporalBackgroundToolProxy struct {
+	*TemporalToolProxy
+}
+
+var (
+	_ agents.BackgroundTool   = (*TemporalBackgroundToolProxy)(nil)
+	_ backgroundActivityNamer = (*TemporalBackgroundToolProxy)(nil)
+)
+
+func (t *TemporalBackgroundToolProxy) AwaitTask(context.Context, agents.BackgroundTaskRef, agents.ProgressReporter) (agents.BackgroundResult, error) {
+	return agents.BackgroundResult{}, fmt.Errorf(
+		"a background task is waited on by its own workflow, not inside the run that started it")
+}
+
+// BackgroundActivityName is the activity registered to wait for this tool's
+// tasks — the tool's activity prefix, which is scoped to the agent the same
+// way every other activity here is.
+func (t *TemporalBackgroundToolProxy) BackgroundActivityName() string { return t.prefix }

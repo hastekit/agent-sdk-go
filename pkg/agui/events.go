@@ -491,4 +491,10 @@ const (
 	CustomNameAnnotation    = "hastekit.annotation"
 	CustomNameStreamID      = "hastekit.stream_id"
 	CustomNameToolProgress  = "hastekit.tool_progress"
+
+	// Background tasks: a tool answered its call and kept working. Started
+	// carries where to follow it; completed says the agent has taken the
+	// result in.
+	CustomNameBackgroundTaskStarted   = "hastekit.background_task_started"
+	CustomNameBackgroundTaskCompleted = "hastekit.background_task_completed"
 )

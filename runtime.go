@@ -74,14 +74,14 @@ func (r *TemporalRuntime) Start() {
 		w := worker.New(cli, "AgentWorkflowTaskQueue", worker.Options{})
 
 		// Register workflows and activities based on the agents available in the SDK
-		for agentName, agentOptions := range temporalAgentConfigs {
+		for _, agentOptions := range temporalAgentConfigs {
 			temporalAgentProxy := temporal_runtime.NewTemporalAgent(temporalAgentConfigs, agentOptions, r.broker)
 			for name, fn := range temporalAgentProxy.GetActivities() {
 				w.RegisterActivityWithOptions(fn, activity.RegisterOptions{Name: name})
 			}
-			w.RegisterWorkflowWithOptions(temporalAgentProxy.Execute, workflow.RegisterOptions{
-				Name: agentName + "_AgentWorkflow",
-			})
+			for name, fn := range temporalAgentProxy.GetWorkflows() {
+				w.RegisterWorkflowWithOptions(fn, workflow.RegisterOptions{Name: name})
+			}
 		}
 
 		err = w.Run(worker.InterruptCh())
@@ -108,9 +108,14 @@ func NewRestateRuntime(restateEndpoint string, broker agents.StreamBroker) (*Res
 func (r *RestateRuntime) Start() {
 	wf := restate_runtime.NewRestateWorkflow(restateAgentConfigs, r.broker)
 
+	// Background tasks wait in their own service invocation, so that a wait
+	// outlives the run that started it.
+	background := restate_runtime.NewBackgroundTaskService(restateAgentConfigs, r.broker)
+
 	go func() {
 		if err := server.NewRestate().
 			Bind(restate.Reflect(wf)).
+			Bind(restate.Reflect(background)).
 			Start(context.Background(), "localhost:8082"); err != nil {
 			log.Fatal(err)
 		}

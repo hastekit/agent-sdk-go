@@ -527,3 +527,121 @@ body {
   overflow: auto;
   max-height: 200px;
 }
+
+/* A conversation that has done something the user has not looked at yet —
+   a background task's result arriving, most often. The dot rather than a
+   count: the point is "there is something here", not how much. */
+.thread-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.thread-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  text-align: left;
+}
+
+.thread-item.unseen .thread-title {
+  font-weight: 600;
+}
+
+.thread-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent, #c96442);
+}
+
+/* ── Composer tray ───────────────────────────────────────── */
+/* What the chat is waiting on, directly above the box it is answered in:
+   a tool still working, a decision it needs.
+
+   It lives inside CopilotChat's input overlay, which is absolutely
+   positioned across the bottom and — being an overlay — is transparent
+   and does not take pointer events. Both have to be given back, or the
+   transcript scrolls visibly through the card and the approve button
+   cannot be clicked. The width mirrors the composer's own container
+   (max-w-3xl, centred, px-4 below the sm breakpoint) so the tray and the
+   box below it read as one control. */
+.composer-tray {
+  pointer-events: auto;
+  width: 100%;
+  max-width: 48rem;
+  margin: 0 auto;
+  padding: 0 16px 8px;
+  background: var(--hk-bg);
+  /* The transcript ends at the tray's top edge rather than sliding under
+     it: the overlay is measured, so this fade is the only seam. */
+  box-shadow: 0 -12px 12px -6px var(--hk-bg);
+  max-height: 55vh;
+  overflow-y: auto;
+}
+
+@media (min-width: 640px) {
+  .composer-tray {
+    padding-inline: 0;
+  }
+}
+
+/* Inside the tray the card is the tray's own content: it supplies the
+   margins, so the card does not add its own on top. */
+.composer-tray .hk-approval {
+  margin: 0 0 8px;
+}
+
+/* A tool still working after the turn that called it ended. */
+.background-note {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--border, #2a2a2a);
+  border-radius: 8px;
+  font-size: 13px;
+}
+
+.background-note .msg {
+  flex: 1;
+}
+
+.background-note .dismiss {
+  background: none;
+  border: 0;
+  color: inherit;
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  opacity: 0.6;
+}
+
+.background-note .dismiss:hover {
+  opacity: 1;
+}
+
+.background-note .spinner {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid var(--border, #2a2a2a);
+  border-top-color: var(--accent, #c96442);
+  animation: hk-spin 0.9s linear infinite;
+}
+
+@keyframes hk-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .background-note .spinner {
+    animation: none;
+  }
+}

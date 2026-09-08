@@ -234,16 +234,27 @@ func TestEndToEndTextRun(t *testing.T) {
 	assert.Equal(t, "RUN_STARTED", events[0])
 	assert.Equal(t, "RUN_FINISHED", events[len(events)-1])
 
-	// The text streamed through with correct bracketing.
+	// The text streamed through with correct bracketing. Both halves of the
+	// exchange are on the stream now, so the deltas are gathered per message
+	// rather than into one string.
 	assert.Contains(t, events, "TEXT_MESSAGE_START")
 	assert.Contains(t, events, "TEXT_MESSAGE_END")
-	text := ""
+	roles := map[string]string{}
 	for _, f := range frames {
-		if f.event == "TEXT_MESSAGE_CONTENT" {
-			text += f.data["delta"].(string)
+		if f.event == "TEXT_MESSAGE_START" {
+			role, _ := f.data["role"].(string)
+			roles[f.data["messageId"].(string)] = role
 		}
 	}
-	assert.Equal(t, "Hello there!", text)
+	byRole := map[string]string{}
+	for _, f := range frames {
+		if f.event == "TEXT_MESSAGE_CONTENT" {
+			id := f.data["messageId"].(string)
+			byRole[roles[id]] += f.data["delta"].(string)
+		}
+	}
+	assert.Equal(t, "Hello there!", byRole["assistant"])
+	assert.Equal(t, "hi", byRole["user"], "the turn the run answered is on the stream too")
 
 	finished, ok := findFrame(frames, "RUN_FINISHED")
 	require.True(t, ok)

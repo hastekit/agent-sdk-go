@@ -47,6 +47,7 @@ type NodeStatus string
 
 const (
 	NodeStatusRunning   NodeStatus = "running"
+	NodeStatusCancelled NodeStatus = "cancelled"
 	NodeStatusCompleted NodeStatus = "completed"
 	NodeStatusFailed    NodeStatus = "failed"
 	NodeStatusSkipped   NodeStatus = "skipped"

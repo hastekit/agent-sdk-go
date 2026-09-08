@@ -2,20 +2,30 @@ package agents
 
 import (
 	"context"
+	"encoding/json"
 
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
 )
 
 type ToolCall struct {
 	*responses.FunctionCallMessage
-	AgentName    string            `json:"agent_name"`
-	AgentVersion string            `json:"agent_version"`
-	Namespace    string            `json:"namespace"`
-	SessionID    string            `json:"session_id"`
-	ThreadID     string            `json:"thread_id"`
-	StreamID     string            `json:"stream_id,omitempty"`
-	RunContext   map[string]any    `json:"run_context"`
-	State        map[string]string `json:"state,omitempty"`
+	AgentName    string         `json:"agent_name"`
+	AgentVersion string         `json:"agent_version"`
+	Namespace    string         `json:"namespace"`
+	SessionID    string         `json:"session_id"`
+	ThreadID     string         `json:"thread_id"`
+	StreamID     string         `json:"stream_id,omitempty"`
+	RunContext   map[string]any `json:"run_context"`
+
+	// State is the run's key-value scratchpad: whatever earlier tools and
+	// hooks have written, and whatever survived from earlier runs on this
+	// thread.
+	//
+	// Write with ToolCallResponse.StateUpdates, not by assigning here. A
+	// durable runtime rebuilds this map from a serialized payload, so writes
+	// to it on the far side reach nothing; it is copied locally too, so that
+	// mistake fails the same way in both places instead of only in production.
+	State map[string]string `json:"state,omitempty"`
 
 	// ShouldResume tells Execute to continue an in-flight call
 	// instead of starting a fresh one. The tool implementation reads
@@ -45,6 +55,25 @@ type ToolCallResponse struct {
 	*responses.FunctionCallOutputMessage
 	StateUpdates map[string]string     `json:"state_updates,omitempty"`
 	Interrupts   []responses.Interrupt `json:"interrupts,omitempty"`
+
+	// TaskID says the tool has started work that outlives this call, and
+	// names it. The Output alongside it is what the model reads now — "started
+	// indexing, job 41ff" — and the run carries on rather than waiting.
+	//
+	// The tool must implement BackgroundTool: the agent calls AwaitTask to
+	// wait for the outcome, and delivers it to the thread when it arrives. A
+	// task id from a tool that cannot be waited on fails the run, because the
+	// work has already started and nothing would ever report it.
+	TaskID string `json:"task_id,omitempty"`
+
+	// TaskPayload is whatever the tool needs when it is asked to wait, carried
+	// back to it on BackgroundTaskRef.Payload.
+	//
+	// It exists because starting a task and waiting for one are not the same
+	// call, and under a durable runtime they are not even the same process:
+	// anything the wait needs — the call's arguments, a cursor, a handle — has
+	// to travel, and a field in memory does not.
+	TaskPayload json.RawMessage `json:"task_payload,omitempty"`
 }
 
 type Tool interface {

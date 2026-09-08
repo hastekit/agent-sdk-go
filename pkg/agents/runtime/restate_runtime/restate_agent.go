@@ -2,6 +2,7 @@ package restate_runtime
 
 import (
 	"fmt"
+	"log/slog"
 
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/agentstate"
@@ -53,6 +54,29 @@ func (w *AgentWorkflow) Run(restateCtx restate.WorkflowContext, input *WorkflowI
 }
 
 func (w *AgentWorkflow) newRestateAgentProxy(restateCtx restate.WorkflowContext, agentOptions *agents.AgentOptions, providerConfigKey string, streamID string) *agents.Agent {
+	return w.proxyAgent(restateCtx, agentOptions, providerConfigKey, streamID, map[string]*agents.Agent{})
+}
+
+// proxyAgent builds the workflow-side agent, reusing any it has already built
+// while walking this graph.
+//
+// built is what makes a cycle finite. Handoffs are a graph, not a tree — a
+// specialist that can hand back to the agent that called it is the ordinary
+// shape — and rebuilding each target in turn walked that cycle until the stack
+// ran out. Registering an agent before wiring its edges is what breaks it: the
+// second visit finds the one already under construction and points at that,
+// so the cycle exists in the rebuilt graph exactly as it does in the original.
+func (w *AgentWorkflow) proxyAgent(
+	restateCtx restate.WorkflowContext,
+	agentOptions *agents.AgentOptions,
+	providerConfigKey string,
+	streamID string,
+	built map[string]*agents.Agent,
+) *agents.Agent {
+	if existing, ok := built[agentOptions.Name]; ok {
+		return existing
+	}
+
 	promptProxy := NewRestatePrompt(restateCtx, agentOptions.Instruction)
 
 	llmProxy := NewRestateLLM(restateCtx, agentOptions.LLM, providerConfigKey, w.broker, streamID)
@@ -74,7 +98,7 @@ func (w *AgentWorkflow) newRestateAgentProxy(restateCtx restate.WorkflowContext,
 	// run outside the workflow's journal.
 	var restateTools []agents.Tool
 	for _, tool := range agents.WithSkillTool(agentOptions.Tools, agentOptions.Skills) {
-		restateTools = append(restateTools, NewRestateTool(restateCtx, tool, w.broker))
+		restateTools = append(restateTools, newRestateTool(restateCtx, tool, w.broker))
 	}
 
 	var mcpClients []agents.MCPToolset
@@ -87,6 +111,12 @@ func (w *AgentWorkflow) newRestateAgentProxy(restateCtx restate.WorkflowContext,
 		Output:     agentOptions.Output,
 		Parameters: agentOptions.Parameters,
 		MaxLoops:   agentOptions.MaxLoops,
+		// Behaviour the agent was configured with, and which the workflow
+		// rebuild has to carry: a field left out here does not fail, it just
+		// stops applying inside a workflow. Sticky routing went missing that
+		// way, and nothing said so.
+		StickyHandoff: agentOptions.StickyHandoff,
+		SingleTurn:    agentOptions.SingleTurn,
 
 		Instruction: promptProxy,
 		History:     conversationHistory,
@@ -102,14 +132,33 @@ func (w *AgentWorkflow) newRestateAgentProxy(restateCtx restate.WorkflowContext,
 		Hooks:        restateHooks(restateCtx, agentOptions.Hooks),
 		StreamBroker: NewRestateStreamBroker(restateCtx, w.broker),
 		DurableStep:  NewRestateDurableStep(restateCtx),
+		// A task's wait outlives this run, so it goes to an invocation of its
+		// own rather than a goroutine that would die with the step.
+		BackgroundRunner: NewRestateBackgroundRunner(restateCtx, agentOptions.Name, providerConfigKey),
 	}
+
+	// Built before its edges are wired, and recorded straight away: a target
+	// that hands back to this agent has to find it here rather than start
+	// building it again.
+	agent := agents.NewAgent(opts).WithLLM(llmProxy)
+	built[agentOptions.Name] = agent
 
 	for _, h := range agentOptions.Handoffs {
 		agentOption := w.agentConfigs[h.Name]
-		opts.Handoffs = append(opts.Handoffs, agents.NewHandoff(
-			h.Name, h.Description, w.newRestateAgentProxy(restateCtx, agentOption, providerConfigKey, streamID),
+		if agentOption == nil {
+			// A target that was never registered with this runtime. Rebuilding
+			// it would dereference nothing and fail the invocation, which
+			// Restate then retries — so the edge is dropped and said aloud
+			// instead.
+			slog.Warn("handoff target is not registered with the runtime; the edge will not exist in durable runs",
+				slog.String("agent", agentOptions.Name), slog.String("target", h.Name))
+			continue
+		}
+		agent.AddHandoffs(agents.NewHandoff(
+			h.Name, h.Description,
+			w.proxyAgent(restateCtx, agentOption, providerConfigKey, streamID, built),
 		))
 	}
 
-	return agents.NewAgent(opts).WithLLM(llmProxy)
+	return agent
 }

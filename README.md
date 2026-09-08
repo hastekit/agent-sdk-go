@@ -9,6 +9,7 @@ A powerful Golang SDK for building AI agents and making LLM calls across multipl
 ## Features
 
 - **🔄 Multi-Provider Support** - Unified API for OpenAI, Anthropic, Gemini, and more
+- **🧅 Gateway Middleware** - Compose retries, provider fallback, and your own around every LLM call
 - **🤖 Agent SDK** - Build sophisticated AI agents with tools, memory, and multi-step reasoning
 - **👤 Human-in-the-Loop** - Integrate human feedback and approval workflows
 - **🛡️ Durable Execution** - Create fault-tolerant agents with Restate or Temporal
@@ -28,14 +29,21 @@ A powerful Golang SDK for building AI agents and making LLM calls across multipl
 - [Quick Start](#quick-start)
 - [Usage](#usage)
   - [LLM Client](#llm-client)
+    - [Middleware](#middleware)
+    - [Retries](#retries)
+    - [Fallback](#fallback)
+    - [Per-Model Middleware](#per-model-middleware)
   - [Agents](#agents)
     - [Sub-Agents](#sub-agents)
     - [Handoffs](#handoffs)
     - [Steering a Running Agent](#steering-a-running-agent)
   - [AG-UI](#ag-ui)
   - [Tools](#tools)
+    - [Background Tool Execution](#background-tool-execution)
   - [Skills](#skills)
   - [Hooks](#hooks)
+    - [Adding a Message to a Model Call](#adding-a-message-to-a-model-call)
+    - [Hook State](#hook-state)
   - [Conversation History](#conversation-history)
   - [Durable Agents](#durable-agents)
 - [Documentation](#documentation)
@@ -173,6 +181,140 @@ Provider constants: `hastekit.ProviderOpenAI`, `ProviderAnthropic`,
 `ProviderOpenRouter`, `ProviderElevenLabs`, `ProviderSarvam`,
 `ProviderDeepSeek`, `ProviderMoonshot` (Kimi models), `ProviderZAI` (GLM
 models).
+
+#### Middleware
+
+Every call a client makes runs through a middleware chain. Nothing is
+installed unless you ask for it — a call that fails is otherwise reported as
+it happened — except tracing, which every client adds innermost so each
+attempt gets its own span.
+
+```go
+import "github.com/hastekit/agent-sdk-go/pkg/gateway/middleware"
+
+client := hastekit.NewLLMClient(configs, hastekit.WithMiddleware(
+    middleware.NewFallbackModels("Anthropic/claude-sonnet-4-5"),
+    middleware.NewRetry(middleware.RetryConfig{}),
+))
+```
+
+The chain is written outermost first, and the order is yours to choose.
+Fallback belongs outside retry: that way a provider is retried on its own
+before the chain gives up on it, where the other way round a 503 that would
+have cleared on the second attempt costs you a switch to a different model
+instead.
+
+Anything satisfying `gateway.Middleware` goes in the same list, so a budget
+check, a cache, or a request log sits alongside the built-in ones:
+
+```go
+type auditLog struct{}
+
+func (auditLog) HandleRequest(next gateway.RequestHandler) gateway.RequestHandler {
+    return func(ctx context.Context, p llm.ProviderName, key string, r *llm.Request) (*llm.Response, error) {
+        resp, err := next(ctx, p, key, r)
+        record(p, r.GetRequestedModel(), err)
+        return resp, err
+    }
+}
+
+func (auditLog) HandleStreamingRequest(next gateway.StreamingRequestHandler) gateway.StreamingRequestHandler {
+    return next
+}
+
+client := hastekit.NewLLMClient(configs, hastekit.WithMiddleware(auditLog{}, middleware.NewRetry(middleware.RetryConfig{})))
+```
+
+Middleware that needs the provider configuration — fallback, which resolves a
+key for a provider the caller never named — is handed it when the chain is
+installed, so you never pass a config store yourself.
+
+#### Retries
+
+`middleware.NewRetry` re-issues a call that failed for a reason another
+attempt could plausibly fix. The zero `RetryConfig` is a usable policy: three
+attempts, 500ms initial backoff doubling to a 30s ceiling, jittered. A
+provider that names its own delay in a `Retry-After` header is obeyed as given
+rather than jittered — it knows when its limit resets.
+
+```go
+middleware.NewRetry(middleware.RetryConfig{
+    MaxAttempts:    5,               // counts the first call
+    InitialBackoff: time.Second,
+    MaxBackoff:     time.Minute,
+})
+```
+
+Retried: 408, 409, 425, 429, and 500/502/503/504, plus transport failures —
+timeouts, connection resets, truncated bodies. Not retried: a cancelled
+context, and every 4xx that describes the request itself, since the same
+request fails the same way on the next attempt.
+
+Streaming is retried only up to the first chunk the caller sees. A stream that
+fails before delivering anything is indistinguishable from one that never
+opened, so it is retried transparently; once a chunk has been forwarded the
+attempt is committed, because there is no way to un-send it and no provider
+supports resuming a stream from the middle.
+
+#### Fallback
+
+`middleware.NewFallbackModels` sends a call to a different provider when the
+one you asked for fails. Each target is tried in order, and — where retry sits
+inside it — each target gets its own full retry budget before the chain moves
+on.
+
+```go
+middleware.NewFallbackModels("Anthropic/claude-sonnet-4-5", "Gemini/gemini-2.5-flash")
+
+// Or built explicitly, when you want to set the policy too.
+middleware.NewFallback(middleware.FallbackConfig{
+    Targets:      middleware.FallbackModels("Anthropic/claude-sonnet-4-5"),
+    Fallbackable: func(err error) bool { return llm.StatusCodeOf(err) == 429 },
+})
+```
+
+Each target's API key is resolved from the configs the client was built with,
+so every target needs one; a target without a key is skipped rather than
+failing the call. An id naming only a provider — `"OpenRouter"` — keeps the
+model the caller asked for and only redirects the provider, which is what a
+target on an OpenAI-compatible mirror wants.
+
+Fallback moves on for almost any failure — a rate limit, an outage, an expired
+key, a retired model. The exceptions are a cancelled context and the two
+statuses that describe the request itself (400 and 422), since a request one
+provider could not parse will not parse anywhere else.
+
+> Streaming follows the same commit rule as retrying: a stream that fails
+> before delivering a chunk can move to the next target, but one that has
+> already delivered anything cannot — half an answer from one model finished
+> by another is worse than a clean failure.
+
+#### Per-Model Middleware
+
+`WithMiddleware` on `Model` replaces the client's chain for that one model.
+There is no merging: a chain is an ordered whole, and picking entries out of
+one by type would not survive middleware you wrote yourself.
+
+```go
+client := hastekit.NewLLMClient(configs, hastekit.WithMiddleware(
+    middleware.NewRetry(middleware.RetryConfig{}),
+))
+
+// Inherits the client's chain.
+fast := client.Model("OpenAI/gpt-4o-mini")
+
+// Tries harder, and falls back.
+critical := client.Model("OpenAI/gpt-4o", hastekit.WithMiddleware(
+    middleware.NewFallbackModels("Anthropic/claude-opus-4-5", "Gemini/gemini-2.5-pro"),
+    middleware.NewRetry(middleware.RetryConfig{MaxAttempts: 5}),
+))
+
+// An LLM judge, held to exactly what the provider did on the first attempt.
+judge := client.Model("OpenAI/gpt-4o", hastekit.WithoutMiddleware())
+```
+
+A model naming its own chain builds one, so bind a model once at setup rather
+than per request.
 
 ### Agents
 
@@ -347,6 +489,10 @@ for chunk := range handle.Chunks {
 out, err := handle.Wait()
 ```
 
+Provider streams now report terminal failures through `ResponseChunk.OfError`. Agent handles return those failures as errors; a stream that ends without `response.completed` also fails instead of returning a partial answer. Custom providers must emit a completion event on success.
+
+The OpenAI, Anthropic, and Gemini clients attach the caller's context to HTTP requests and accept an optional `ClientOptions.HTTPClient` for custom timeouts and transports. Cancelling the request context stops both the HTTP request and blocked stream sends.
+
 The `StreamID` on the handle (also returned in the `X-Stream-Id` HTTP header when serving over HTTP) lets you re-subscribe to the same broker channel — useful for resuming a stream after a page refresh, or for stopping the run from a different process.
 
 #### Steering a Running Agent
@@ -386,6 +532,8 @@ registry := &hastekit.AgentRegistry{}
 // Exposes:
 //   GET  /agents                                   → registered agent names
 //   POST /agents/{agent}/run                       → AG-UI run endpoint (SSE)
+//   GET  /agents/{agent}/threads/{thread}/stream   → rejoin the run in flight (SSE)
+//   GET  /agents/{agent}/runs                      → long poll: runs across namespaces
 //   GET  /agents/{agent}/threads                   → stored conversation threads, newest first
 //   GET  /agents/{agent}/threads/{thread}/messages → thread history as AG-UI messages
 http.ListenAndServe(":8080", agui.NewHandler(registry))
@@ -527,6 +675,210 @@ A tool call hook is handed the same descriptor, which is where a policy usually 
 Every hint is a pointer, so "nothing was said" stays distinguishable from "false was said". Prefer the `Is*` helpers over reading fields directly: they are nil-safe and apply MCP's defaults, which are deliberately conservative — an unset `DestructiveHint` reads as destructive, an unset `ReadOnlyHint` as not read-only.
 
 > Hints are self-reported: they describe intent, not enforcement. Never let a hint from an untrusted MCP server widen what a tool is allowed to do.
+
+#### Background Tool Execution
+
+A tool that starts work outlasting the call answers with a `TaskID`. The run
+does not wait: the model reads the tool's immediate output, carries on, and the
+result is delivered later as its own turn.
+
+`hastekit.NewBackgroundTool` is `NewTool` for that kind of work — write the
+long-running function and it handles the rest:
+
+```go
+indexTool := hastekit.NewBackgroundTool(
+    func(ctx context.Context, in IndexArgs, progress hastekit.ProgressReporter) (IndexResult, error) {
+        for i, doc := range in.Docs {
+            progress.Report(ctx, hastekit.ToolProgress{
+                Progress: float64(i + 1), Total: float64(len(in.Docs)), Message: doc.Name,
+            })
+            index(doc)
+        }
+        return IndexResult{Indexed: len(in.Docs)}, nil
+    },
+    hastekit.WithName("index_docs"),
+    hastekit.WithDescription("Index documents. Takes a while."),
+)
+```
+
+The model gets an immediate answer naming the task, the run carries on, and
+whatever the function returns is delivered to the thread when it returns.
+Progress is nil-safe, so report freely whether or not anyone is listening, and
+`WithStartedMessage` replaces what the model is told at the moment the task
+starts. Every ordinary tool option — `WithName`, `WithDestructive`,
+`WithNeedsApproval` — works the same way it does on `NewTool`.
+
+The return value is encoded like an ordinary tool's, **unless it already is a
+tool output** — then it travels as it is. That is how a task answers with an
+image or a file rather than a line of JSON:
+
+```go
+chartTool := hastekit.NewBackgroundTool(
+    func(ctx context.Context, in ChartArgs, progress hastekit.ProgressReporter) (*responses.FunctionCallOutputMessage, error) {
+        png := render(in)
+        return &responses.FunctionCallOutputMessage{
+            Output: responses.FunctionCallOutputContentUnion{
+                OfList: responses.InputContent{
+                    {OfInputText: &responses.InputTextContent{Text: "chart rendered"}},
+                    {OfInputImage: &responses.InputImageContent{ImageURL: utils.Ptr(png)}},
+                },
+            },
+        }, nil
+    },
+    hastekit.WithName("render_chart"),
+)
+```
+
+The function runs **off the run's path, not inside it**: in this process a
+goroutine of the agent's, and under Temporal or Restate whatever that runtime
+keeps for the task. That is why it is handed its arguments rather than closing
+over them — it may well run somewhere the call that started it never reached,
+so anything it needs has to travel in the arguments.
+
+For work that has to be *started* now and only watched later — a job queued
+with another service — implement `agents.BackgroundTool` yourself, which splits
+starting from waiting:
+
+```go
+func (t *indexTool) Execute(ctx context.Context, params *agents.ToolCall) (*agents.ToolCallResponse, error) {
+    job, err := t.client.StartIndexing(ctx)
+    if err != nil {
+        return nil, err
+    }
+    return &agents.ToolCallResponse{
+        FunctionCallOutputMessage: &responses.FunctionCallOutputMessage{
+            ID: params.ID, CallID: params.CallID,
+            Output: responses.FunctionCallOutputContentUnion{
+                OfString: utils.Ptr("Indexing started, job " + job.ID),
+            },
+        },
+        TaskID: job.ID,
+    }, nil
+}
+
+// AwaitTask blocks until the job is done. Poll it, subscribe to it, wait on a
+// channel — whatever the service offers.
+func (t *indexTool) AwaitTask(ctx context.Context, task agents.BackgroundTaskRef, progress agents.ProgressReporter) (agents.BackgroundResult, error) {
+    for {
+        job, err := t.client.Job(ctx, task.TaskID)
+        if err != nil {
+            return agents.BackgroundResult{}, err
+        }
+        progress.Report(ctx, agents.ToolProgress{
+            Progress: job.Done, Total: job.Total, Message: job.Phase,
+        })
+        if job.Finished {
+            return agents.BackgroundResult{Output: job.Summary}, nil
+        }
+        time.Sleep(5 * time.Second)
+    }
+}
+```
+
+Implementing `AwaitTask` is what makes a tool a background tool, and
+`NewBackgroundTool` is one implementation of it. A `TaskID` from a tool without
+it fails the run — the work has already started, and nothing would ever report
+it. Anything the wait needs beyond the task id travels on
+`ToolCallResponse.TaskPayload`, and comes back as `BackgroundTaskRef.Payload`.
+
+**Where the result lands.** When the task finishes, the agent looks at the
+thread:
+
+- a run is still going — the result joins its queue and is folded in at the
+  next iteration boundary, the same cadence as a steering message;
+- the agent is idle — a new run starts with the result as its input, so the
+  agent reports back without being asked.
+
+After a handoff the task belongs to the agent the **run entered at**, not to
+the specialist that started it: a specialist reached by handoff is running
+inside someone else's run, so its own history is not that conversation and its
+own broker is not that stream. The result therefore wakes the root agent, which
+can route back into the specialist by sticky handoff.
+
+Either way the result arrives as its own turn rather than as a second output
+for the original call, which is not something a provider will accept: that call
+was answered the moment the tool returned. `BackgroundResult.Output` is a
+`*responses.FunctionCallOutputMessage` — the same shape a tool returns from
+`Execute` — and its content blocks are carried into that turn intact, so an
+image or a file survives the trip.
+
+**Events on the run's stream.** Starting a task emits a
+`background_task.started` chunk on the run that started it, carrying the tool
+call it belongs to and the stream the task will publish progress on:
+
+```json
+{"type":"background_task.started","task_id":"job-41ff","call_id":"call_1",
+ "tool_name":"index_docs","stream_id":"…"}
+```
+
+When the result lands, `background_task.completed` is published on the
+thread's stream carrying the same identifiers — announced by the delivery
+itself, which has the task, the call and the tool in hand. The agent loop is
+not involved: what it receives is an ordinary user turn, because the call that
+started the task was answered when the tool returned and a provider will not
+accept a second output against it, so it would have to be told what it was
+looking at.
+
+On an idle thread the announcement is published in the moment between the
+delivery claiming the channel and the woken run opening on it — so it arrives
+*before* that run's first chunk. Readers hold back what precedes a run and emit
+it once the run has opened, which keeps `RUN_STARTED` first as AG-UI requires.
+
+Over AG-UI both arrive as CUSTOM events (`hastekit.background_task_started` /
+`..._completed`).
+
+**Progress.** The reporter handed to `AwaitTask` publishes the same
+`tool.progress` chunks a tool can emit during `Execute`, keyed to the call that
+started the task — so a client updates the row it already drew rather than
+growing a new one.
+
+Each task streams on a **channel of its own**, not the thread's. The thread's
+channel belongs to whichever run holds it, and a run claiming it resets the
+transcript — so a task publishing there would have its progress wiped by the
+next turn, and what survived would be interleaved into another run's stream
+keyed to a call that run never made. On its own channel, progress survives
+whatever the thread does, replays to a client that subscribes late, and the
+channel closes when the task ends.
+
+The channel id is `hastekit.StreamIDForTask(namespace, threadID, taskID)`, and
+is also recorded on the run's `BackgroundTasks` entry — so a UI can either
+derive it or read it, and decide for itself whether to watch:
+
+```go
+taskStream := hastekit.StreamIDForTask("user-123", threadID, "job-41ff")
+chunks, err := broker.Subscribe(ctx, taskStream)
+```
+
+Task ids are expected to be unique per task: two tasks sharing an id share a
+channel.
+
+**Waiting for tasks.** `agent.WaitForBackgroundTasks()` blocks until everything
+in flight has been delivered. No run waits on it — that is the point — but a
+process shutting down should.
+
+**Under a durable runtime.** The wait has to outlive the call that started it,
+which a goroutine cannot do once the activity or step it ran in has ended. Each
+runtime supplies its own way of keeping one, so the tool interface is unchanged
+and only the machinery behind it differs:
+
+| Runtime | How the wait is kept | How an idle thread is woken |
+|---|---|---|
+| Local | a goroutine | `agent.Execute` |
+| Temporal | a child workflow, `ParentClosePolicy: ABANDON`, running `AwaitTask` as a long activity | a child `_AgentWorkflow` |
+| Restate | a one-way send to `BackgroundTaskService`, whose `Await` handler journals each step | a one-way `WorkflowSend` to `AgentWorkflow` |
+
+The delivery decision itself — join a live run, or claim the thread and start
+one — is `agents.DeliverBackgroundResult`, shared by all three. Getting it
+wrong is the same mistake everywhere: joining a run that has ended strands the
+result, and starting one that has not leaves two runs writing a single stream.
+
+An agent with no runner at all fails a tool that returns a `TaskID`, with
+`agents.ErrBackgroundUnsupported`, rather than starting work nothing will ever
+report. Supply your own with `AgentOptions.BackgroundRunner` to teach another
+runtime the trick.
+
+> MCP tools cannot start background tasks yet — the protocol has no task
+> concept for the client to carry.
 
 ### Skills
 
@@ -729,6 +1081,64 @@ Notes:
 - **Hooks run as their own durable steps.** Under Restate or Temporal each hook call is journaled, so a check that talks to a billing service is not re-run on every replay.
 - **A `BeforeModelCall` hook sees the shape of the call, not the prompt** — model, tenant, loop iteration, `ContextTokens`, and usage so far. That's what a budget check needs, and it keeps the conversation from crossing a durable boundary twice.
 
+#### Adding a Message to a Model Call
+
+A `BeforeModelCall` hook can put a message in front of the model for one call.
+The note is appended after the conversation and is **never stored**, so it is
+true of the call it rides on and does not accumulate in the transcript of
+every call after it — the same treatment the loop gives its own
+"you have one turn left" reminder.
+
+```go
+func (p *policy) BeforeModelCall(ctx context.Context, call *agents.ModelCall) (agents.ModelCallHookResult, error) {
+    if call.ContextTokens < 100_000 {
+        return agents.ContinueModelCall(), nil
+    }
+    return agents.ContinueModelCall().WithMessages(
+        responses.UserMessage("You are close to the context limit. Summarise findings before continuing."),
+    ), nil
+}
+```
+
+Hooks append in order, after the conversation. Only `BeforeModelCall` can add
+one — by `AfterModelCall` there is no request left to add to — and nothing is
+appended when a hook answers for the model, since the provider is never
+called.
+
+This is for a note the model should act on *now*. Reshaping the history itself
+— trimming it, summarising it — belongs to the conversation summarizer, which
+already owns the whole transcript; a hook is deliberately never handed it.
+
+#### Hook State
+
+`ModelCall.State` is the run's key-value scratchpad, the same one tools read
+through `ToolCall.State`. Write to it by returning updates, exactly as a tool
+returns `StateUpdates`:
+
+```go
+func (p *policy) BeforeModelCall(ctx context.Context, call *agents.ModelCall) (agents.ModelCallHookResult, error) {
+    if call.State["warned"] == "1" {
+        return agents.ContinueModelCall(), nil
+    }
+    return agents.ContinueModelCall().
+        WithMessages(responses.UserMessage("Heads up: this run is nearly out of budget.")).
+        WithStateUpdates(map[string]string{"warned": "1"}), nil
+}
+```
+
+State persists with the thread, so a hook can remember something across
+invocations — that it has already warned, so it warns once rather than every
+iteration. Tools and hooks share one flat namespace: what a tool wrote, the
+next call's hooks read. A write lands as soon as it is returned, so a later
+hook in the chain reads what an earlier one just wrote; the last writer of a
+key wins, and a hook that writes only its own keys never disturbs another's.
+
+> `WithStateUpdates` is the only way to write. Assigning into `call.State`
+> changes nothing: a durable runtime rebuilds that map from a serialized
+> payload, so a write on the far side reaches nothing — and it is copied
+> locally too, so the mistake fails the same way in both places rather than
+> only once you deploy.
+
 ### Conversation History
 
 Enable conversation memory across interactions:
@@ -770,6 +1180,8 @@ handle, err = agent.Execute(context.Background(), &agents.AgentInput{
 })
 out, err = handle.Result()
 ```
+
+The built-in memory and file history adapters scope thread IDs, run IDs, and summaries by namespace. The same IDs can coexist in different namespaces. Reads use the exact namespace, including the empty namespace; only `ListThreads` treats an empty namespace as a request to list all namespaces.
 
 Passing `ThreadID` alone continues from the thread's tip. To branch from a specific earlier turn instead — a retry, or an edit of an earlier message — set `PreviousRunID` to the `RunID` of the run you want to continue from:
 

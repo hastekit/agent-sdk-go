@@ -36,6 +36,9 @@ func (l *TemporalLLM) NewStreamingResponsesActivity(ctx context.Context, in *res
 
 	stream, err := l.wrappedLLM.NewStreamingResponses(ctx, in)
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, cancellationError(agents.ErrModelCallStopped)
+		}
 		return nil, cancellationError(err)
 	}
 

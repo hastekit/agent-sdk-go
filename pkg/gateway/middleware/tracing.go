@@ -1,36 +1,60 @@
-package gateway
+package middleware
 
 import (
 	"context"
 	"strings"
 
+	"github.com/hastekit/agent-sdk-go/pkg/gateway"
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm"
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/chat_completion"
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/speech"
 	"github.com/hastekit/agent-sdk-go/pkg/genai"
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 )
 
-// TracingMiddleware emits one OpenTelemetry span per LLM gateway request,
-// following the GenAI semantic conventions. It replaces the span code that
-// used to live inline in every per-modality handler: it inspects the
-// llm.Request to name the span and record request attributes, and the
-// llm.Response (or, for streaming, the response chunks) to record the result.
+var tracer = otel.Tracer("LLMGateway")
+
+// addToSpan stamps the caller's gateway context — tenant, session, whatever
+// AddContext was given — onto the request span.
+func addToSpan(ctx context.Context, span trace.Span) {
+	if span == nil {
+		return
+	}
+
+	values := gateway.GetContext(ctx)
+	if len(values) == 0 {
+		return
+	}
+
+	attributes := make([]attribute.KeyValue, 0, len(values))
+	for k, v := range values {
+		attributes = append(attributes, attribute.String(k, v))
+	}
+	span.SetAttributes(attributes...)
+}
+
+// Tracing emits one OpenTelemetry span per LLM gateway request, following the
+// GenAI semantic conventions. It replaces the span code that used to live
+// inline in every per-modality handler: it inspects the llm.Request to name
+// the span and record request attributes, and the llm.Response (or, for
+// streaming, the response chunks) to record the result.
 //
-// NewLLMGateway installs it by default so tracing is on out of the box.
-// Because it is an ordinary gateway Middleware, callers can compose it with
-// their own middleware, and it is the single place gateway tracing lives.
-type TracingMiddleware struct{}
+// sdk.NewLLMClient installs it on every client, so tracing is on out of the
+// box. Because it is an ordinary gateway.Middleware, callers composing a
+// gateway by hand can order it against their own, and it stays the single
+// place gateway tracing lives.
+type Tracing struct{}
 
-// NewTracingMiddleware returns the built-in gateway tracing middleware.
-func NewTracingMiddleware() *TracingMiddleware { return &TracingMiddleware{} }
+// NewTracing returns the built-in gateway tracing middleware.
+func NewTracing() *Tracing { return &Tracing{} }
 
-var _ Middleware = (*TracingMiddleware)(nil)
+var _ gateway.Middleware = (*Tracing)(nil)
 
-func (m *TracingMiddleware) HandleRequest(next RequestHandler) RequestHandler {
+func (m *Tracing) HandleRequest(next gateway.RequestHandler) gateway.RequestHandler {
 	return func(ctx context.Context, providerName llm.ProviderName, key string, r *llm.Request) (*llm.Response, error) {
 		ctx, span := startLLMSpan(ctx, providerName, r, false)
 		defer span.End()
@@ -47,7 +71,7 @@ func (m *TracingMiddleware) HandleRequest(next RequestHandler) RequestHandler {
 	}
 }
 
-func (m *TracingMiddleware) HandleStreamingRequest(next StreamingRequestHandler) StreamingRequestHandler {
+func (m *Tracing) HandleStreamingRequest(next gateway.StreamingRequestHandler) gateway.StreamingRequestHandler {
 	return func(ctx context.Context, providerName llm.ProviderName, key string, r *llm.Request) (*llm.StreamingResponse, error) {
 		ctx, span := startLLMSpan(ctx, providerName, r, true)
 

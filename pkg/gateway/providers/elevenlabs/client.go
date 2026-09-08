@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
-	"errors"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -25,6 +24,9 @@ type ClientOptions struct {
 	ApiKey  string
 	Headers map[string]string
 
+	// HTTPClient allows callers to configure timeouts and transports.
+	HTTPClient *http.Client
+
 	transport *http.Client
 }
 
@@ -34,6 +36,9 @@ type Client struct {
 }
 
 func NewClient(opts *ClientOptions) *Client {
+	if opts.transport == nil {
+		opts.transport = opts.HTTPClient
+	}
 	if opts.transport == nil {
 		opts.transport = http.DefaultClient
 	}
@@ -63,7 +68,7 @@ func (c *Client) NewSpeech(ctx context.Context, in *speech2.Request) (*speech2.R
 
 	outputFormat := elevenlabs_speech.NativeResponseFormatToResponseFormat(in.ResponseFormat)
 
-	req, err := http.NewRequest(http.MethodPost, c.opts.BaseURL+"/text-to-speech/"+voiceID+"?output_format="+outputFormat, bytes.NewBuffer(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.opts.BaseURL+"/text-to-speech/"+voiceID+"?output_format="+outputFormat, bytes.NewBuffer(payload))
 	if err != nil {
 		return nil, err
 	}
@@ -78,20 +83,7 @@ func (c *Client) NewSpeech(ctx context.Context, in *speech2.Request) (*speech2.R
 	defer res.Body.Close()
 
 	if res.StatusCode != http.StatusOK {
-		var errResp map[string]any
-		err = utils.DecodeJSON(res.Body, &errResp)
-		if err != nil {
-			return nil, err
-		}
-		if detail, ok := errResp["detail"].(map[string]any); ok {
-			if message, ok := detail["message"].(string); ok {
-				return nil, errors.New(message)
-			}
-		}
-		if detail, ok := errResp["detail"].(string); ok {
-			return nil, errors.New(detail)
-		}
-		return nil, errors.New("unknown error occurred")
+		return nil, base.ParseErrorResponse(res)
 	}
 
 	// Handle gzip compressed response
@@ -133,7 +125,7 @@ func (c *Client) NewStreamingSpeech(ctx context.Context, in *speech2.Request) (c
 	outputFormat := elevenlabs_speech.NativeResponseFormatToResponseFormat(in.ResponseFormat)
 
 	// ElevenLabs streaming TTS endpoint: POST /v1/text-to-speech/{voice_id}/stream
-	req, err := http.NewRequest(http.MethodPost, c.opts.BaseURL+"/text-to-speech/"+voiceID+"/stream?output_format="+outputFormat, bytes.NewBuffer(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.opts.BaseURL+"/text-to-speech/"+voiceID+"/stream?output_format="+outputFormat, bytes.NewBuffer(payload))
 	if err != nil {
 		return nil, err
 	}
@@ -148,20 +140,7 @@ func (c *Client) NewStreamingSpeech(ctx context.Context, in *speech2.Request) (c
 
 	if res.StatusCode != http.StatusOK {
 		defer res.Body.Close()
-		var errResp map[string]any
-		err = utils.DecodeJSON(res.Body, &errResp)
-		if err != nil {
-			return nil, err
-		}
-		if detail, ok := errResp["detail"].(map[string]any); ok {
-			if message, ok := detail["message"].(string); ok {
-				return nil, errors.New(message)
-			}
-		}
-		if detail, ok := errResp["detail"].(string); ok {
-			return nil, errors.New(detail)
-		}
-		return nil, errors.New("unknown error occurred")
+		return nil, base.ParseErrorResponse(res)
 	}
 
 	out := make(chan *speech2.ResponseChunk)
@@ -183,7 +162,14 @@ func (c *Client) NewStreamingSpeech(ctx context.Context, in *speech2.Request) (c
 						Audio: string(audioCopy),
 					},
 				}
-				out <- chunk
+				// A consumer that cancels mid-stream stops reading, so an
+				// unguarded send would park this goroutine and its body for
+				// the life of the process.
+				select {
+				case out <- chunk:
+				case <-ctx.Done():
+					return
+				}
 			}
 			if err != nil {
 				return
@@ -250,7 +236,7 @@ func (c *Client) NewTranscription(ctx context.Context, in *transcription2.Reques
 	}
 
 	// ElevenLabs STT endpoint: POST /v1/speech-to-text
-	req, err := http.NewRequest(http.MethodPost, c.opts.BaseURL+"/speech-to-text", &buf)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.opts.BaseURL+"/speech-to-text", &buf)
 	if err != nil {
 		return nil, err
 	}
@@ -265,20 +251,7 @@ func (c *Client) NewTranscription(ctx context.Context, in *transcription2.Reques
 	defer res.Body.Close()
 
 	if res.StatusCode != http.StatusOK {
-		var errResp map[string]any
-		err = utils.DecodeJSON(res.Body, &errResp)
-		if err != nil {
-			return nil, err
-		}
-		if detail, ok := errResp["detail"].(map[string]any); ok {
-			if message, ok := detail["message"].(string); ok {
-				return nil, errors.New(message)
-			}
-		}
-		if detail, ok := errResp["detail"].(string); ok {
-			return nil, errors.New(detail)
-		}
-		return nil, errors.New("unknown error occurred")
+		return nil, base.ParseErrorResponse(res)
 	}
 
 	var elResponse *elevenlabs_transcription.Response
