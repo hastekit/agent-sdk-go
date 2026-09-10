@@ -32,6 +32,7 @@ func TestStreamBrokerProxy_OffersTheRunFeed(t *testing.T) {
 	require.NoError(t, err)
 
 	require.NoError(t, feed.PublishRunEvent(context.Background(), agents.RunEvent{
+		At:        streambroker.ParseFeedCursor(cursor).Add(time.Nanosecond),
 		Event:     agents.RunEventStarted,
 		Namespace: "ns",
 		ThreadID:  "thread-1",
@@ -57,6 +58,7 @@ func TestStreamBrokerProxy_ForwardsFeedReads(t *testing.T) {
 	require.NoError(t, err)
 
 	require.NoError(t, broker.PublishRunEvent(context.Background(), agents.RunEvent{
+		At:    streambroker.ParseFeedCursor(cursor).Add(time.Nanosecond),
 		Event: agents.RunEventFinished, Namespace: "ns", ThreadID: "thread-1",
 	}))
 

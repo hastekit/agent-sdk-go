@@ -12,10 +12,10 @@ type RestatePrompt struct {
 	wrappedPrompt agents.SystemPromptProvider
 }
 
-func NewRestatePrompt(restateCtx restate.WorkflowContext, instruction agents.SystemPromptProvider) agents.SystemPromptProvider {
+func NewRestatePrompt(restateCtx restate.WorkflowContext, instruction agents.SystemPromptProvider, middlewares ...agents.PromptMiddleware) agents.SystemPromptProvider {
 	return &RestatePrompt{
 		restateCtx:    restateCtx,
-		wrappedPrompt: instruction,
+		wrappedPrompt: agents.WrapPromptProvider(instruction, middlewares...),
 	}
 }
 

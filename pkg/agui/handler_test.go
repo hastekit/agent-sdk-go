@@ -32,7 +32,7 @@ type scriptedLLM struct {
 	calls int
 }
 
-func (s *scriptedLLM) NewStreamingResponses(ctx context.Context, in *responses.Request, cb func(chunk *responses.ResponseChunk)) (*responses.Response, error) {
+func (s *scriptedLLM) NewStreamingResponses(ctx context.Context, _ *agents.ModelCall, in *responses.Request, cb func(chunk *responses.ResponseChunk)) (*responses.Response, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.calls >= len(s.steps) {

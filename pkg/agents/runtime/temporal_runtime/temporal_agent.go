@@ -3,7 +3,6 @@ package temporal_runtime
 import (
 	"context"
 	"log/slog"
-	"maps"
 	"time"
 
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
@@ -30,13 +29,13 @@ func NewTemporalAgent(configs map[string]*agents.AgentOptions, options *agents.A
 func (a *TemporalAgentV2) GetActivities() map[string]interface{} {
 	activities := map[string]interface{}{}
 
-	temporalPrompt := NewTemporalPrompt(a.options.Instruction)
+	temporalPrompt := NewTemporalPrompt(a.options.Instruction, agents.PromptMiddlewaresOf(a.options.Middlewares)...)
 	activities[a.options.Name+"_GetPromptActivity"] = temporalPrompt.GetPrompt
 
-	temporalLLM := NewTemporalLLM(a.options.LLM, a.broker)
+	temporalLLM := NewTemporalLLM(a.options.LLM, a.broker, agents.ModelCallMiddlewaresOf(a.options.Middlewares)...)
 	activities[a.options.Name+"_NewStreamingResponsesActivity"] = temporalLLM.NewStreamingResponsesActivity
 
-	temporalConversationPersistence := NewTemporalConversationPersistence(a.options.History.ConversationPersistenceAdapter)
+	temporalConversationPersistence := NewTemporalConversationPersistence(a.options.History.ConversationPersistenceAdapter, agents.HistoryMiddlewaresOf(a.options.Middlewares)...)
 	activities[a.options.Name+"_LoadMessagesActivity"] = temporalConversationPersistence.LoadMessages
 	activities[a.options.Name+"_SaveMessagesActivity"] = temporalConversationPersistence.SaveMessages
 	activities[a.options.Name+"_SaveSummaryActivity"] = temporalConversationPersistence.SaveSummary
@@ -59,13 +58,13 @@ func (a *TemporalAgentV2) GetActivities() map[string]interface{} {
 	// reads them itself, and a tool with no activity registered is one the
 	// workflow cannot call.
 	for _, tool := range agents.WithSkillTool(a.options.Tools, a.options.Skills) {
-		temporalTool := NewTemporalTool(tool, a.broker)
+		temporalTool := NewTemporalTool(tool, a.broker, agents.ToolCallMiddlewaresOf(a.options.Middlewares)...)
 		activities[getToolName(a.options.Name, tool)+"_ExecuteToolActivity"] = temporalTool.Execute
 
 		// A tool that starts background tasks needs a second activity: the one
 		// the task's own workflow waits in, long after this run is over.
 		if backgroundTool, ok := tool.(agents.BackgroundTool); ok {
-			temporalBackground := NewTemporalBackgroundTask(backgroundTool, a.broker)
+			temporalBackground := NewTemporalBackgroundTask(agents.WrapBackgroundTool(a.options.Name, backgroundTool, agents.ToolCallMiddlewaresOf(a.options.Middlewares)...), a.broker)
 			activities[getToolName(a.options.Name, tool)+awaitTaskActivitySuffix] = temporalBackground.AwaitTask
 		}
 	}
@@ -76,14 +75,11 @@ func (a *TemporalAgentV2) GetActivities() map[string]interface{} {
 	activities[a.options.Name+closeTaskStreamActivityName] = temporalDelivery.CloseTaskStream
 	activities[a.options.Name+deliverTaskActivityName] = temporalDelivery.DeliverTask
 
-	// Four activities per hook, so the workflow can run each method as its own
-	// step.
-	maps.Copy(activities, hookActivities(a.options.Name, a.options.Hooks))
-
 	for _, mcpClient := range a.options.McpServers {
-		temporalMCP := NewTemporalMCPServer(mcpClient, a.broker)
-		activities[mcpClient.GetName()+"_ListMCPToolsActivity"] = temporalMCP.ListTools
-		activities[mcpClient.GetName()+"_ExecuteMCPToolActivity"] = temporalMCP.ExecuteTool
+		temporalMCP := NewTemporalMCPServer(mcpClient, a.broker, agents.ToolCallMiddlewaresOf(a.options.Middlewares)...)
+		prefix := a.options.Name + "_" + mcpClient.GetName()
+		activities[prefix+"_ListMCPToolsActivity"] = temporalMCP.ListTools
+		activities[prefix+"_ExecuteMCPToolActivity"] = temporalMCP.ExecuteTool
 	}
 
 	return activities
@@ -167,7 +163,7 @@ func (a *TemporalAgentV2) proxyAgent(ctx workflow.Context, built map[string]*age
 
 	var mcpProxies []agents.MCPToolset
 	for _, mcpClient := range a.options.McpServers {
-		mcpProxy := NewTemporalMCPProxy(ctx, mcpClient.GetName())
+		mcpProxy := &TemporalMCPProxy{workflowCtx: ctx, name: mcpClient.GetName(), prefix: a.options.Name + "_" + mcpClient.GetName()}
 		mcpProxies = append(mcpProxies, mcpProxy)
 	}
 
@@ -193,9 +189,6 @@ func (a *TemporalAgentV2) proxyAgent(ctx workflow.Context, built map[string]*age
 		Skills:       a.options.Skills,
 		McpServers:   mcpProxies,
 		ToolExecutor: NewTemporalToolExecutor(ctx),
-		// Proxies, not the hooks themselves: the executor and the loop both run
-		// in the workflow, so each hook method becomes its own activity.
-		Hooks:        hookProxies(ctx, a.options.Name, a.options.Hooks),
 		StreamBroker: NewTemporalStreamBrokerProxy(ctx, a.options.Name, a.broker),
 		DurableStep:  NewTemporalDurableStep(ctx),
 		// A task's wait outlives this run, so it goes to a workflow of its own

@@ -9,15 +9,18 @@ import (
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
 )
 
+// LLM is the loop's view of the model: one streamed call per iteration. call
+// is the ModelCall the request belongs to, for a runtime that runs the middlewares'
+// WrapModelCall on the far side of a boundary and has to hand it to them.
 type LLM interface {
-	NewStreamingResponses(ctx context.Context, in *responses.Request, cb func(chunk *responses.ResponseChunk)) (*responses.Response, error)
+	NewStreamingResponses(ctx context.Context, call *ModelCall, in *responses.Request, cb func(chunk *responses.ResponseChunk)) (*responses.Response, error)
 }
 
 type WrappedLLM struct {
 	llm llm.Provider
 }
 
-func (l *WrappedLLM) NewStreamingResponses(ctx context.Context, in *responses.Request, cb func(chunk *responses.ResponseChunk)) (*responses.Response, error) {
+func (l *WrappedLLM) NewStreamingResponses(ctx context.Context, _ *ModelCall, in *responses.Request, cb func(chunk *responses.ResponseChunk)) (*responses.Response, error) {
 	acc := Accumulator{}
 
 	stream, err := l.llm.NewStreamingResponses(ctx, in)

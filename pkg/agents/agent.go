@@ -30,24 +30,24 @@ var (
 )
 
 type Agent struct {
-	Name           string
-	output         map[string]any
-	history        *history.CommonConversationManager
-	instruction    SystemPromptProvider
-	tools          []Tool
-	mcpServers     []MCPToolset
-	llm            LLM
-	parameters     responses.Parameters
-	runtime        Runtime
-	maxLoops       int
-	streamBroker   StreamBroker
-	handoffs       []*Handoff
-	toolExecutor   ToolExecutor
-	durableStep    DurableStep
-	stickyHandoff  bool
-	singleTurn     bool
-	modelCallHooks []ModelCallHook
-	skills         SkillProvider
+	Name                 string
+	output               map[string]any
+	history              *history.CommonConversationManager
+	instruction          SystemPromptProvider
+	tools                []Tool
+	mcpServers           []MCPToolset
+	llm                  LLM
+	parameters           responses.Parameters
+	runtime              Runtime
+	maxLoops             int
+	streamBroker         StreamBroker
+	handoffs             []*Handoff
+	toolExecutor         ToolExecutor
+	durableStep          DurableStep
+	stickyHandoff        bool
+	singleTurn           bool
+	modelCallMiddlewares []ModelCallMiddleware
+	skills               SkillProvider
 
 	// background waits on the tasks this agent's tools start, and is nil where
 	// nothing can wait — see BackgroundRunner and ErrBackgroundUnsupported.
@@ -86,22 +86,12 @@ type AgentOptions struct {
 	DurableStep   DurableStep
 	StickyHandoff bool
 
-	// Hooks observe or intercept what the agent does — see Hook. Each wraps
-	// both sides, with NoopToolCallHook or NoopModelCallHook standing in for
-	// the side it does not care about:
-	//
-	//   - the tool-call side wraps every tool the agent calls: its own function
-	//     tools, its sub-agent tools, and every MCP server's. Handoffs do not
-	//     pass through it, since transfer_to_agent calls out to nothing and the
-	//     target agent's own hooks govern what it then does.
-	//   - the model-call side wraps every call to the model, one per turn of
-	//     the tool loop. A budget check belongs here.
-	//
-	// Tool hooks are handed to the ToolExecutor, which runs them (see
-	// HookAwareToolExecutor); model hooks run in the loop, where the model is
-	// called. Under Temporal and Restate both of those sit inside the workflow,
-	// so a hook's methods become journaled steps either way.
-	Hooks []Hook
+	// Middlewares wrap tool/model calls, history LoadMessages/SaveMessages,
+	// and prompt GetPrompt. Embed NoopMiddleware to override selected methods.
+	// The first registered is outermost. Each chain executes inside the same
+	// activity or run step as its underlying operation, never around a durable
+	// proxy. Middleware may run again if that execution step retries.
+	Middlewares []Middleware
 
 	// BackgroundRunner waits on the tasks this agent's tools start. A durable
 	// runtime supplies its own, since a goroutine there would end with the
@@ -168,34 +158,50 @@ func NewAgent(opts *AgentOptions) *Agent {
 
 	// Hand the executor the tool-call side, since running those around each
 	// call is its job. Only when the agent was given some: an executor built
-	// with hooks of its own keeps them rather than having them cleared.
-	if aware, ok := toolExecutor.(HookAwareToolExecutor); ok && len(opts.Hooks) > 0 {
-		toolExecutor = aware.WithToolCallHooks(ToolCallHooksOf(opts.Hooks))
+	// with middlewares of its own keeps them rather than having them cleared.
+	if aware, ok := toolExecutor.(MiddlewareAwareToolExecutor); ok && len(opts.Middlewares) > 0 {
+		toolExecutor = aware.WithToolCallMiddlewares(ToolCallMiddlewaresOf(opts.Middlewares))
+	}
+
+	modelMiddlewares := ModelCallMiddlewaresOf(opts.Middlewares)
+	if opts.DurableStep == nil {
+		// Durable adapters install stop middleware inside the provider step.
+		modelMiddlewares = append([]ModelCallMiddleware{StopMiddleware{Watcher: StopWatcherFrom(streamBroker)}}, modelMiddlewares...)
+	}
+
+	conversationHistory := opts.History
+	instruction := opts.Instruction
+	if opts.DurableStep == nil && len(opts.Middlewares) > 0 {
+		// Copy the manager so agents sharing persistence keep their own chains.
+		copy := *conversationHistory
+		copy.ConversationPersistenceAdapter = WrapHistoryPersistence(copy.ConversationPersistenceAdapter, HistoryMiddlewaresOf(opts.Middlewares)...)
+		conversationHistory = &copy
+		instruction = WrapPromptProvider(instruction, PromptMiddlewaresOf(opts.Middlewares)...)
 	}
 
 	agent := &Agent{
 		Name:        opts.Name,
 		output:      opts.Output,
-		history:     opts.History,
-		instruction: opts.Instruction,
+		history:     conversationHistory,
+		instruction: instruction,
 		// The skill source brings its own reader tool, so an agent given
 		// skills can always read them — there is no second thing to remember
 		// to pass, and no way to advertise a skill the model cannot open.
-		tools:          WithSkillTool(opts.Tools, opts.Skills),
-		skills:         opts.Skills,
-		mcpServers:     opts.McpServers,
-		llm:            &WrappedLLM{opts.LLM},
-		parameters:     opts.Parameters,
-		runtime:        opts.Runtime,
-		maxLoops:       maxLoops,
-		handoffs:       opts.Handoffs,
-		toolExecutor:   toolExecutor,
-		streamBroker:   streamBroker,
-		durableStep:    durableStep,
-		stickyHandoff:  opts.StickyHandoff,
-		singleTurn:     opts.SingleTurn,
-		modelCallHooks: ModelCallHooksOf(opts.Hooks),
-		options:        opts,
+		tools:                WithSkillTool(opts.Tools, opts.Skills),
+		skills:               opts.Skills,
+		mcpServers:           opts.McpServers,
+		llm:                  &WrappedLLM{opts.LLM},
+		parameters:           opts.Parameters,
+		runtime:              opts.Runtime,
+		maxLoops:             maxLoops,
+		handoffs:             opts.Handoffs,
+		toolExecutor:         toolExecutor,
+		streamBroker:         streamBroker,
+		durableStep:          durableStep,
+		stickyHandoff:        opts.StickyHandoff,
+		singleTurn:           opts.SingleTurn,
+		modelCallMiddlewares: modelMiddlewares,
+		options:              opts,
 	}
 
 	// A runtime that can keep a wait alive past the call that started it says
@@ -349,7 +355,7 @@ func (e *Agent) StreamBroker() StreamBroker {
 }
 
 // ToolExecutor returns the executor the agent runs tool calls through — the
-// one it was configured with, after the broker and the agent's tool call hooks
+// one it was configured with, after the broker and the agent's tool call middlewares
 // were injected into it.
 func (e *Agent) ToolExecutor() ToolExecutor {
 	return e.toolExecutor
@@ -791,11 +797,10 @@ func (e *Agent) ExecuteWithRun(ctx context.Context, in *AgentInput, run *history
 				Parameters: parameters,
 			}
 
-			// The hooks see what the call is and what the run has spent, not
-			// the prompt — see ModelCall. A hook that answers for the model
-			// (an exhausted budget, say) supplies the reply and the provider
-			// is never contacted.
-			resp, err := RunWithModelCallHooks(ctx, e.modelCallHooks, &ModelCall{
+			// A wrap sees the call and the request. One that answers for the
+			// model (an exhausted budget, say) returns the reply without
+			// calling next, and the provider is never contacted.
+			resp, err := ExecuteModelCallWithMiddleware(ctx, e.modelCallMiddlewares, &ModelCall{
 				AgentName:     e.Name,
 				Namespace:     in.Namespace,
 				ThreadID:      in.ThreadID,
@@ -807,15 +812,10 @@ func (e *Agent) ExecuteWithRun(ctx context.Context, in *AgentInput, run *history
 				LoopIteration: run.RunState.LoopIteration,
 				ContextTokens: run.ContextTokens(),
 				Usage:         run.RunState.Usage,
-			}, request, run.State, func(callCtx context.Context) (*responses.Response, error) {
-				// A stop lands mid-stream on the local runtime, where the
-				// provider's request is this process's to cancel. The durable
-				// runtimes cancel inside their own activity or step instead —
-				// from here they hold a proxy, and cancelling that would end
-				// the waiting rather than the work.
-				streamCtx, cancel := StopCancelContext(callCtx, StopWatcherFrom(e.streamBroker), in.StreamID)
-				defer cancel()
-				return e.llm.NewStreamingResponses(streamCtx, request, publish)
+				// A snapshot: a wrap reads the run's state and never writes it.
+				State: maps.Clone(run.State),
+			}, request, func(callCtx context.Context, call *ModelCall, prepared *responses.Request) (*responses.Response, error) {
+				return e.llm.NewStreamingResponses(callCtx, call, prepared, publish)
 			})
 			if errors.Is(err, ErrModelCallStopped) {
 				// Not a failure: the user stopped the run while the model was
@@ -1042,12 +1042,12 @@ func (e *Agent) ExecuteWithRun(ctx context.Context, in *AgentInput, run *history
 						toolResults[pe.Index] = toolResponse(*pe.ToolCall.FunctionCallMessage, toolCancelledDuringExec)
 
 					case IsToolCallAborted(result.Err):
-						// A hook gave up on the run rather than refusing the
+						// A middleware gave up on the run rather than refusing the
 						// call. Reporting this to the model would be the
 						// opposite of what it asked for: the run ends here,
 						// leaving the function_call unanswered the same way a
 						// cancelled context does.
-						slog.ErrorContext(ctx, "tool call aborted by hook", slog.String("tool_name", pe.ToolCall.Name), slog.Any("error", result.Err))
+						slog.ErrorContext(ctx, "tool call aborted by middleware", slog.String("tool_name", pe.ToolCall.Name), slog.Any("error", result.Err))
 						return &AgentOutput{Status: agentstate.RunStatusError, RunID: runId}, result.Err
 
 					case result.Err != nil:

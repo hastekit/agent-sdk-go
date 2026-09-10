@@ -10,6 +10,7 @@ import (
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/history"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/messages"
+	"github.com/hastekit/agent-sdk-go/pkg/attachments"
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/constants"
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
 )
@@ -22,10 +23,25 @@ type Registry interface {
 }
 
 type options struct {
-	namespace   string
-	senderID    string
-	fullHistory bool
-	keepalive   time.Duration
+	attachmentStore    attachments.UploadStore
+	attachmentMaxBytes int64
+	namespace          string
+	senderID           string
+	fullHistory        bool
+	keepalive          time.Duration
+}
+
+// WithAttachmentStore enables upload/download endpoints and owned file references.
+// Give the same store to the agent's middleware.NewAttachmentMiddleware, which resolves
+// the references on their way to the model. Files live under the handler's
+// namespace (see WithNamespace), the same one its runs read them under.
+func WithAttachmentStore(store attachments.UploadStore) Option {
+	return func(o *options) { o.attachmentStore = store }
+}
+
+// WithAttachmentUploadLimit bounds each HTTP upload (default 20 MiB).
+func WithAttachmentUploadLimit(n int64) Option {
+	return func(o *options) { o.attachmentMaxBytes = n }
 }
 
 // Option configures the AG-UI handler.
@@ -98,6 +114,12 @@ func buildOptions(opts []Option) options {
 func NewHandler(registry Registry, opts ...Option) http.Handler {
 	o := buildOptions(opts)
 	mux := http.NewServeMux()
+	if o.attachmentStore != nil {
+		// Uploads and downloads live under this handler's namespace, the same
+		// one every run it starts stores and reads attachments under.
+		mux.Handle("/attachments/", attachments.NewHTTPHandler(o.attachmentStore, o.attachmentMaxBytes,
+			func(*http.Request) (string, error) { return o.namespace, nil }))
+	}
 
 	mux.HandleFunc("GET /agents", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -110,6 +132,7 @@ func NewHandler(registry Registry, opts ...Option) http.Handler {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"agents":       registry.AgentNames(),
 			"full_history": o.fullHistory,
+			"attachments":  o.attachmentStore != nil,
 		})
 	})
 
@@ -448,6 +471,11 @@ func serveRun(w http.ResponseWriter, r *http.Request, agent *agents.Agent, o opt
 	}
 	if err := input.Validate(); err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	if err := validateMessageAttachments(r.Context(), o.namespace, input.Messages, o.attachmentStore); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid or inaccessible message attachments")
 		return
 	}
 

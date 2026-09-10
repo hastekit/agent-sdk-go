@@ -10,10 +10,12 @@ import {
 import {
   CopilotKitProvider,
   CopilotChat,
-  CopilotChatInput,
   useDefaultRenderTool,
   useInterrupt,
 } from "@copilotkit/react-core/v2";
+import { AttachmentMessageView } from "./attachment-message";
+import { AttachmentInput } from "./attachment-input";
+import type { InputContent } from "@ag-ui/core";
 import { StoppableHttpAgent } from "./stoppable-agent";
 import type { Message as AGUIMessage } from "@ag-ui/core";
 import {
@@ -149,11 +151,13 @@ export default function App() {
   // Likewise the agent: useMemo replaces it whenever the thread changes, and
   // the feed loop must not be torn down and restarted each time.
   const agentRef = useRef<StoppableHttpAgent | null>(null);
+ const [attachmentsEnabled, setAttachmentsEnabled] = useState(false);
 
   // Load the agent list once.
   useEffect(() => {
     fetchAgents()
-      .then(({ agents: names, fullHistory }) => {
+      .then(({ agents: names, fullHistory, attachmentsEnabled }) => {
+ setAttachmentsEnabled(attachmentsEnabled);
         setAgents(names);
         setFullHistory(fullHistory);
         if (!names.length) {
@@ -432,13 +436,13 @@ export default function App() {
   // Steering: a turn typed while the agent is working folds into the run
   // in flight (see StoppableHttpAgent.steer). Memoised so the composer
   // isn't remounted on every render.
-  const steer = useCallback((text: string) => void agent?.steer(text), [agent]);
+  const steer = useCallback((text: string, parts: InputContent[] = []) => agent?.steer(text, parts), [agent]);
   // Cast: the slot type expects CopilotChatInput's own static sub-slots on
   // whatever it is handed. This wrapper only changes behaviour and renders
   // the real composer, so it has none of them and needs none.
   const inputSlot = useMemo(
-    () => ((p: any) => <SteerableInput {...p} onSteer={steer} />) as any,
-    [steer]
+    () => ((p: any) => <SteerableInput {...p} onSteer={steer} attachmentsEnabled={attachmentsEnabled} />) as any,
+    [steer, attachmentsEnabled]
   );
 
   const openThread = useCallback(
@@ -556,6 +560,7 @@ export default function App() {
                       "The agent can make mistakes. Check important info.",
                   }}
                   input={inputSlot}
+                  messageView={AttachmentMessageView as any}
                 />
               </div>
             </TrayContext.Provider>
@@ -568,41 +573,11 @@ export default function App() {
 
 // ── Composer ───────────────────────────────────────────────
 
-// SteerableInput is the composer with one change: while a run is in
-// flight, typing turns Send back into Send — the text folds into the
-// running turn instead of stopping it. With an empty box the button stays
-// Stop, so nothing is taken away.
-//
-// Done by telling CopilotChatInput the run isn't in flight rather than by
-// intercepting the click: `isProcessing` is what makes it draw the square
-// AND what routes both the button and the Enter key to onStop, so flipping
-// it fixes the icon and the keyboard in one move. onSubmitMessage then
-// routes the text to the run that is actually running.
+// Keep the task/approval tray above the attachment-aware composer.
 function SteerableInput(props: any) {
-  // onSteer is ours; CopilotChatInput spreads what it doesn't recognise
-  // onto its DOM node.
-  const { onSteer, ...inputProps } = props;
   const tray = useContext(TrayContext);
+  return <><ComposerTray tray={tray} /><AttachmentInput {...props} /></>;
 
-  const hasText = ((props.value ?? "") as string).trim().length > 0;
-  const steering = !!props.isRunning && !!onSteer && hasText;
-
-  return (
-    <>
-      <ComposerTray tray={tray} />
-      <CopilotChatInput
-        {...inputProps}
-        isRunning={props.isRunning && !steering}
-        onSubmitMessage={(text: string) => {
-          if (props.isRunning && onSteer && text.trim()) {
-            onSteer(text);
-            return;
-          }
-          props.onSubmitMessage?.(text);
-        }}
-      />
-    </>
-  );
 }
 
 // ComposerTray is the one place the chat says what it is waiting on — a tool

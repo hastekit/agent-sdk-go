@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/hastekit/agent-sdk-go/pkg/agents"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/history"
 	restate "github.com/restatedev/sdk-go"
 )
@@ -13,10 +14,10 @@ type RestateHistory struct {
 	wrappedPersistence history.ConversationPersistenceAdapter
 }
 
-func NewRestateConversationPersistence(restateCtx restate.WorkflowContext, wrappedPersistence history.ConversationPersistenceAdapter) *RestateHistory {
+func NewRestateConversationPersistence(restateCtx restate.WorkflowContext, wrappedPersistence history.ConversationPersistenceAdapter, middlewares ...agents.HistoryMiddleware) *RestateHistory {
 	return &RestateHistory{
 		restateCtx:         restateCtx,
-		wrappedPersistence: wrappedPersistence,
+		wrappedPersistence: agents.WrapHistoryPersistence(wrappedPersistence, middlewares...),
 	}
 }
 

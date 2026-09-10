@@ -327,13 +327,9 @@ func (in *RunAgentInput) toSDKMessages(msgs []Message) []responses.InputMessageU
 		case RoleUser, RoleSystem, RoleDeveloper:
 			out = append(out, responses.InputMessageUnion{
 				OfInputMessage: &responses.InputMessage{
-					ID:   normalizeMessageID(m.ID),
-					Role: constants.Role(m.Role),
-					Content: responses.InputContent{
-						{OfInputText: &responses.InputTextContent{
-							Text: m.Content,
-						}},
-					},
+					ID:      normalizeMessageID(m.ID),
+					Role:    constants.Role(m.Role),
+					Content: messageContent(m),
 				},
 			})
 

@@ -26,24 +26,25 @@ func injectProgressReporter(ctx context.Context, broker agents.StreamBroker, par
 }
 
 type TemporalTool struct {
+	middlewares []agents.ToolCallMiddleware
 	wrappedTool agents.Tool
 	broker      agents.StreamBroker
 }
 
-func NewTemporalTool(wrappedTool agents.Tool, broker agents.StreamBroker) *TemporalTool {
+func NewTemporalTool(wrappedTool agents.Tool, broker agents.StreamBroker, middlewares ...agents.ToolCallMiddleware) *TemporalTool {
 	return &TemporalTool{
 		wrappedTool: wrappedTool,
 		broker:      broker,
+		middlewares: append([]agents.ToolCallMiddleware{agents.StopMiddleware{Watcher: agents.StopWatcherFrom(broker)}}, middlewares...),
 	}
 }
 
 func (t *TemporalTool) Execute(ctx context.Context, params *agents.ToolCall) (*agents.ToolCallResponse, error) {
 	injectProgressReporter(ctx, t.broker, params)
 
-	resp, err := agents.RunStoppableTool(ctx, agents.StopWatcherFrom(t.broker), 0, params,
-		func(callCtx context.Context, p *agents.ToolCall) (*agents.ToolCallResponse, error) {
-			return agents.ExecuteWithTrace(callCtx, t.wrappedTool, p, t.wrappedTool.Execute)
-		})
+	resp, err := agents.ExecuteWithTrace(ctx, t.wrappedTool, params, func(ctx context.Context, call *agents.ToolCall) (*agents.ToolCallResponse, error) {
+		return agents.ExecuteToolCallWithMiddleware(ctx, t.middlewares, t.wrappedTool.GetToolDescriptor(), call, t.wrappedTool.Execute)
+	})
 
 	return resp, cancellationError(err)
 }
@@ -80,9 +81,9 @@ func (t *TemporalToolProxy) Execute(ctx context.Context, params *agents.ToolCall
 
 // GetToolDescriptor reports the wrapped tool's own identity, not this
 // wrapper's: the wrapper is a way of running the tool, not a different tool,
-// and it is what the loop reads and what a hook is shown.
+// and it is what the loop reads and what a middleware is shown.
 func (t *TemporalToolProxy) GetToolDescriptor() *agents.BaseTool {
-	// Nil-safe because this one is asked on every tool call, by the hook runner,
+	// Nil-safe because this one is asked on every tool call, by the middleware runner,
 	// where losing the tool's identity is a far better outcome than a panic.
 	if t.wrappedTool == nil {
 		return &agents.BaseTool{}

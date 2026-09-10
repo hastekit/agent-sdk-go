@@ -9,16 +9,18 @@ import (
 )
 
 type RestateMCPServer struct {
+	middlewares      []agents.ToolCallMiddleware
 	restateCtx       restate.WorkflowContext
 	wrappedMcpServer agents.MCPToolset
 	broker           agents.StreamBroker
 }
 
-func NewRestateMCPServer(restateCtx restate.WorkflowContext, wrappedMcpServer agents.MCPToolset, broker agents.StreamBroker) *RestateMCPServer {
+func NewRestateMCPServer(restateCtx restate.WorkflowContext, wrappedMcpServer agents.MCPToolset, broker agents.StreamBroker, middlewares ...agents.ToolCallMiddleware) *RestateMCPServer {
 	return &RestateMCPServer{
 		restateCtx:       restateCtx,
 		wrappedMcpServer: wrappedMcpServer,
 		broker:           broker,
+		middlewares:      middlewares,
 	}
 }
 
@@ -37,7 +39,7 @@ func (t *RestateMCPServer) ListTools(ctx context.Context, runContext map[string]
 		// GetToolDescriptor rather than a field-by-field copy: this is the only
 		// crossing a tool makes into the workflow, and anything left out here
 		// is gone for good on the far side — the tool's own name and its meta
-		// included, which is exactly what a hook over there is looking at.
+		// included, which is exactly what a middleware over there is looking at.
 		var tools []agents.BaseTool
 		for _, tool := range mcpTools {
 			if encoded := tool.GetToolDescriptor(); encoded != nil {
@@ -53,26 +55,26 @@ func (t *RestateMCPServer) ListTools(ctx context.Context, runContext map[string]
 
 	var tools []agents.Tool
 	for _, tool := range toolDefs {
-		tools = append(tools, NewRestateMCPTool(t.restateCtx, t.wrappedMcpServer, runContext, tool, t.broker))
+		tools = append(tools, NewRestateMCPTool(t.restateCtx, t.wrappedMcpServer, runContext, tool, t.broker, t.middlewares...))
 	}
 
 	return tools, nil
 }
 
 type RestateMCPTool struct {
+	middlewares      []agents.ToolCallMiddleware
 	restateCtx       restate.WorkflowContext
 	runContext       map[string]any
 	wrappedMcpServer agents.MCPToolset
-	broker           agents.StreamBroker
 	*agents.BaseTool
 }
 
-func NewRestateMCPTool(restateCtx restate.WorkflowContext, wrappedMcpServer agents.MCPToolset, runContext map[string]any, baseTool agents.BaseTool, broker agents.StreamBroker) *RestateMCPTool {
+func NewRestateMCPTool(restateCtx restate.WorkflowContext, wrappedMcpServer agents.MCPToolset, runContext map[string]any, baseTool agents.BaseTool, broker agents.StreamBroker, middlewares ...agents.ToolCallMiddleware) *RestateMCPTool {
 	return &RestateMCPTool{
 		restateCtx:       restateCtx,
 		runContext:       runContext,
 		wrappedMcpServer: wrappedMcpServer,
-		broker:           broker,
+		middlewares:      append([]agents.ToolCallMiddleware{agents.StopMiddleware{Watcher: agents.StopWatcherFrom(broker)}}, middlewares...),
 		BaseTool:         &baseTool,
 	}
 }
@@ -83,12 +85,16 @@ func NewRestateMCPTool(restateCtx restate.WorkflowContext, wrappedMcpServer agen
 // never on replay. callTool does the work via the connection pool.
 func (t *RestateMCPTool) Execute(ctx context.Context, params *agents.ToolCall) (*agents.ToolCallResponse, error) {
 	return restate.Run(t.restateCtx, func(runCtx restate.RunContext) (*agents.ToolCallResponse, error) {
-		resp, err := agents.RunStoppableTool(runCtx, agents.StopWatcherFrom(t.broker), 0, params,
-			func(callCtx context.Context, p *agents.ToolCall) (*agents.ToolCallResponse, error) {
-				return agents.ExecuteWithTrace(callCtx, t, p, t.callTool)
-			})
-		return resp, cancellationError(err)
+		return t.execute(runCtx, params)
 	}, restate.WithName("MCPToolCall"))
+}
+
+func (t *RestateMCPTool) execute(ctx context.Context, params *agents.ToolCall) (*agents.ToolCallResponse, error) {
+	resp, err := agents.ExecuteWithTrace(ctx, t, params, func(ctx context.Context, call *agents.ToolCall) (*agents.ToolCallResponse, error) {
+		return agents.ExecuteToolCallWithMiddleware(ctx, t.middlewares, t.BaseTool, call, t.callTool)
+	})
+
+	return resp, cancellationError(err)
 }
 
 // callTool invokes the MCP tool on the wrapped toolset.

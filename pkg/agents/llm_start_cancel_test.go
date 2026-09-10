@@ -28,7 +28,7 @@ func TestWrappedLLMStopBeforeStreamStarts(t *testing.T) {
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		_, err := llm.NewStreamingResponses(ctx, &responses.Request{}, func(*responses.ResponseChunk) {})
+		_, err := llm.NewStreamingResponses(ctx, &ModelCall{}, &responses.Request{}, func(*responses.ResponseChunk) {})
 		done <- err
 	}()
 	select {

@@ -9,36 +9,36 @@ import (
 )
 
 type RestateTool struct {
+	middlewares []agents.ToolCallMiddleware
 	restateCtx  restate.WorkflowContext
 	wrappedTool agents.Tool
-
-	// broker is how the run step learns the run was stopped — the raw
-	// broker, not the workflow-side proxy, since the watch runs inside
-	// the step.
-	broker agents.StreamBroker
 }
 
-func NewRestateTool(restateCtx restate.WorkflowContext, wrappedTool agents.Tool, broker agents.StreamBroker) *RestateTool {
+func NewRestateTool(restateCtx restate.WorkflowContext, wrappedTool agents.Tool, broker agents.StreamBroker, middlewares ...agents.ToolCallMiddleware) *RestateTool {
 	return &RestateTool{
 		restateCtx:  restateCtx,
 		wrappedTool: wrappedTool,
-		broker:      broker,
+		middlewares: append([]agents.ToolCallMiddleware{agents.StopMiddleware{Watcher: agents.StopWatcherFrom(broker)}}, middlewares...),
 	}
 }
 
 func (t *RestateTool) Execute(ctx context.Context, params *agents.ToolCall) (*agents.ToolCallResponse, error) {
 	return restate.Run(t.restateCtx, func(runCtx restate.RunContext) (*agents.ToolCallResponse, error) {
-		resp, err := agents.RunStoppableTool(runCtx, agents.StopWatcherFrom(t.broker), 0, params,
-			func(callCtx context.Context, p *agents.ToolCall) (*agents.ToolCallResponse, error) {
-				return agents.ExecuteWithTrace(callCtx, t.wrappedTool, p, t.wrappedTool.Execute)
-			})
-		return resp, cancellationError(err)
+		return t.execute(runCtx, params)
 	}, restate.WithName(params.Name+"_ToolCall"))
+}
+
+func (t *RestateTool) execute(ctx context.Context, params *agents.ToolCall) (*agents.ToolCallResponse, error) {
+	resp, err := agents.ExecuteWithTrace(ctx, t.wrappedTool, params, func(ctx context.Context, call *agents.ToolCall) (*agents.ToolCallResponse, error) {
+		return agents.ExecuteToolCallWithMiddleware(ctx, t.middlewares, t.wrappedTool.GetToolDescriptor(), call, t.wrappedTool.Execute)
+	})
+
+	return resp, cancellationError(err)
 }
 
 // GetToolDescriptor reports the wrapped tool's own identity, not this
 // wrapper's: the wrapper is a way of running the tool, not a different tool,
-// and it is what the loop reads and what a hook is shown.
+// and it is what the loop reads and what a middleware is shown.
 func (t *RestateTool) GetToolDescriptor() *agents.BaseTool {
 	return t.wrappedTool.GetToolDescriptor()
 }
@@ -52,6 +52,7 @@ func (t *RestateTool) GetToolDescriptor() *agents.BaseTool {
 // service, on the real tool, in an invocation that outlives this run; this
 // exists so the loop recognises the capability.
 type RestateBackgroundTool struct {
+	key string
 	*RestateTool
 }
 
@@ -64,10 +65,10 @@ func (t *RestateBackgroundTool) AwaitTask(context.Context, agents.BackgroundTask
 
 // newRestateTool wraps a tool for the workflow, keeping whichever capabilities
 // the loop will ask it about.
-func newRestateTool(restateCtx restate.WorkflowContext, wrappedTool agents.Tool, broker agents.StreamBroker) agents.Tool {
-	tool := NewRestateTool(restateCtx, wrappedTool, broker)
+func newRestateTool(restateCtx restate.WorkflowContext, agentName string, wrappedTool agents.Tool, broker agents.StreamBroker, middlewares ...agents.ToolCallMiddleware) agents.Tool {
+	tool := NewRestateTool(restateCtx, wrappedTool, broker, middlewares...)
 	if _, ok := wrappedTool.(agents.BackgroundTool); ok {
-		return &RestateBackgroundTool{RestateTool: tool}
+		return &RestateBackgroundTool{RestateTool: tool, key: backgroundToolKey(agentName, backgroundToolName(wrappedTool))}
 	}
 	return tool
 }

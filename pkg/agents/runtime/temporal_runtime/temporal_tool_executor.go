@@ -3,6 +3,7 @@ package temporal_runtime
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
 	"go.temporal.io/sdk/temporal"
@@ -18,6 +19,9 @@ const ToolCancelledErrorType = "ToolCancelled"
 // default of unlimited attempts applies: a retryable error would re-run
 // the tool the user just stopped. Other errors pass through untouched.
 func cancellationError(err error) error {
+	if agents.IsToolCallAborted(err) {
+		return abortError(err)
+	}
 	if err == nil || !stoppedWork(err) {
 		return err
 	}
@@ -55,25 +59,15 @@ func WasStopped(err error) bool {
 // outcome, and stops the round on a cancelled call since the rest would
 // only start and cancel themselves. That comes from a journaled activity
 // result, so a replay decides the same way.
+//
+// It holds no middlewares: the middlewares' wraps run inside the tool's activity, on the
+// worker, and what comes back is already what the chain made of the call.
 type TemporalToolExecutor struct {
 	workflowCtx workflow.Context
-
-	// hooks run here, in the workflow, so each of their methods is its own
-	// activity — see TemporalToolCallHookProxy.
-	hooks []agents.ToolCallHook
 }
 
 func NewTemporalToolExecutor(workflowCtx workflow.Context) *TemporalToolExecutor {
 	return &TemporalToolExecutor{workflowCtx: workflowCtx}
-}
-
-var _ agents.HookAwareToolExecutor = (*TemporalToolExecutor)(nil)
-
-// WithToolCallHooks implements agents.HookAwareToolExecutor.
-func (e *TemporalToolExecutor) WithToolCallHooks(hooks []agents.ToolCallHook) agents.ToolExecutor {
-	bound := *e
-	bound.hooks = hooks
-	return &bound
 }
 
 func (e *TemporalToolExecutor) ExecuteAll(ctx context.Context, executions []agents.ExecutableToolCall) []agents.ToolExecutionResult {
@@ -86,7 +80,10 @@ func (e *TemporalToolExecutor) ExecuteAll(ctx context.Context, executions []agen
 			continue
 		}
 
-		resp, err := agents.RunWithToolCallHooks(ctx, e.hooks, exec, exec.Tool.Execute)
+		resp, err := agents.ExecuteToolWithMiddleware(ctx, nil, exec, exec.Tool.Execute)
+		if WasAborted(err) {
+			err = fmt.Errorf("%w: %w", agents.ErrToolCallAborted, err)
+		}
 		results[i] = agents.ToolExecutionResult{
 			Response:  resp,
 			Err:       err,

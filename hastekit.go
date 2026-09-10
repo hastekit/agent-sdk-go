@@ -19,15 +19,18 @@ var (
 type Agent = agents.Agent
 type ModelParameters = responses.Parameters
 
-// Hook is anything an agent can be given to observe or intercept what it does
-// — see agents.Hook. Implement ToolCallHook, ModelCallHook, or both.
-type Hook = agents.Hook
+// AgentMiddleware wraps agent operations. Embed agents.NoopMiddleware and
+// override the Wrap methods relevant to your implementation. The root
+// Middleware alias remains the gateway/provider middleware API.
+type AgentMiddleware = agents.Middleware
 
-// ToolCallHook wraps a tool call — see agents.ToolCallHook.
-type ToolCallHook = agents.ToolCallHook
+// ToolCallMiddleware wraps a tool call — see agents.ToolCallMiddleware.
+type ToolCallMiddleware = agents.ToolCallMiddleware
 
-// ModelCallHook wraps a call to the model — see agents.ModelCallHook.
-type ModelCallHook = agents.ModelCallHook
+// ModelCallMiddleware wraps a call to the model — see agents.ModelCallMiddleware.
+type ModelCallMiddleware = agents.ModelCallMiddleware
+type HistoryMiddleware = agents.HistoryMiddleware
+type PromptMiddleware = agents.PromptMiddleware
 
 type AgentConfig struct {
 	Name          string
@@ -47,10 +50,9 @@ type AgentConfig struct {
 	// and adds the reader tool to Tools itself.
 	Skills agents.SkillProvider
 
-	// Hooks observe or intercept what the agent does. A ToolCallHook wraps
-	// every tool it calls; a ModelCallHook wraps every call to the model, which
-	// is where a budget or credit check belongs. One hook may be both.
-	Hooks []agents.Hook
+	// Middlewares wrap model/tool calls, history loads/saves and prompt
+	// retrieval. Embed agents.NoopMiddleware and override selected methods.
+	Middlewares []agents.Middleware
 }
 
 func (ac *AgentConfig) toAgentOptions() *agents.AgentOptions {
@@ -67,7 +69,7 @@ func (ac *AgentConfig) toAgentOptions() *agents.AgentOptions {
 		Parameters:    ac.Parameters,
 		StickyHandoff: ac.StickyHandoff,
 		Skills:        ac.Skills,
-		Hooks:         ac.Hooks,
+		Middlewares:   ac.Middlewares,
 	}
 }
 

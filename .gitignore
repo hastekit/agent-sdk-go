@@ -1,3 +1,6 @@
 .env
 .idea
-samples
+/samples/*
+!/samples/attachments/
+/attachment-files/
+/attachment-conversations/

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/history"
@@ -22,15 +23,10 @@ type BackgroundTaskInput struct {
 	// result enters at — the one that owns the thread.
 	AgentName string `json:"agent_name"`
 
-	// ToolAgentName is the agent the tool is configured on, which after a
-	// handoff is a specialist rather than the owner. The two are looked up for
-	// different reasons and must not be conflated: restarting the specialist's
-	// workflow would strand the result on a conversation of its own, and
-	// looking for the tool on the owner would not find it.
-	ToolAgentName string `json:"tool_agent_name,omitempty"`
-
-	ToolName string                   `json:"tool_name"`
-	Ref      agents.BackgroundTaskRef `json:"ref"`
+	// ToolKey identifies the registered wait operation, including its middleware.
+	// It is supplied by the tool proxy, independently of the delivery agent.
+	ToolKey string                   `json:"tool_key"`
+	Ref     agents.BackgroundTaskRef `json:"ref"`
 
 	// ProviderConfigKey travels with the task for the same reason it travels
 	// with a run: Restate has no context propagator, so a run started by this
@@ -60,23 +56,14 @@ func NewRestateBackgroundRunner(restateCtx restate.WorkflowContext, agentName, p
 }
 
 func (r *RestateBackgroundRunner) StartTask(_ context.Context, tool agents.BackgroundTool, ref agents.BackgroundTaskRef) error {
-	toolName := backgroundToolName(tool)
-	if toolName == "" {
-		return fmt.Errorf("background tool for task %s has no name, so the service cannot find it again", ref.TaskID)
-	}
-
-	// The runner belongs to the run's owner, so r.agentName names the workflow
-	// to restart. Which agent to find the tool on comes from the ref, since
-	// after a handoff that is a different agent entirely.
-	toolAgent := ref.ToolAgentName
-	if toolAgent == "" {
-		toolAgent = r.agentName
+	proxy, ok := tool.(*RestateBackgroundTool)
+	if !ok || proxy.key == "" {
+		return fmt.Errorf("background tool for task %s is not a registered workflow proxy", ref.TaskID)
 	}
 
 	restate.ServiceSend(r.restateCtx, BackgroundTaskServiceName, "Await").Send(&BackgroundTaskInput{
 		AgentName:         r.agentName,
-		ToolAgentName:     toolAgent,
-		ToolName:          toolName,
+		ToolKey:           proxy.key,
 		Ref:               ref,
 		ProviderConfigKey: r.providerConfigKey,
 	})
@@ -85,16 +72,23 @@ func (r *RestateBackgroundRunner) StartTask(_ context.Context, tool agents.Backg
 
 // BackgroundTaskService waits for background tasks and delivers their results.
 //
-// It holds the same agent configs the workflow does, because the tool that
-// knows how to wait for a task is the agent's own — and the tool itself, not a
-// proxy of it, since this is where the waiting actually happens.
+// Tools and middleware are bound once at registration. Invocations only carry
+// the key of that operation; task delivery still uses the owner's agent name.
 type BackgroundTaskService struct {
-	agentConfigs map[string]*agents.AgentOptions
-	broker       agents.StreamBroker
+	tools  map[string]agents.BackgroundTool
+	broker agents.StreamBroker
 }
 
 func NewBackgroundTaskService(agentConfigs map[string]*agents.AgentOptions, broker agents.StreamBroker) *BackgroundTaskService {
-	return &BackgroundTaskService{agentConfigs: agentConfigs, broker: broker}
+	s := &BackgroundTaskService{tools: make(map[string]agents.BackgroundTool), broker: broker}
+	for name, options := range agentConfigs {
+		for _, tool := range agents.WithSkillTool(options.Tools, options.Skills) {
+			if background, ok := tool.(agents.BackgroundTool); ok {
+				s.tools[backgroundToolKey(name, backgroundToolName(tool))] = agents.WrapBackgroundTool(name, background, agents.ToolCallMiddlewaresOf(options.Middlewares)...)
+			}
+		}
+	}
+	return s
 }
 
 // Await waits for one task, then puts its outcome in front of the agent.
@@ -117,7 +111,7 @@ func (s *BackgroundTaskService) Await(ctx restate.Context, in *BackgroundTaskInp
 			return &awaitOutcome{Fail: err.Error()}, nil
 		}
 		return &awaitOutcome{Result: res}, nil
-	}, restate.WithName(in.ToolName+"_AwaitTask"))
+	}, restate.WithName(in.ToolKey+"_AwaitTask"))
 	if err != nil {
 		return restate.Void{}, err
 	}
@@ -182,32 +176,17 @@ type DeliverTaskOutput struct {
 	Message history.Message `json:"message"`
 }
 
-// backgroundTool finds the tool that knows how to wait for this task.
-//
-// It looks on ToolAgentName, not AgentName: after a handoff the tool belongs
-// to the specialist while the run belongs to the agent it entered at.
+// backgroundTool resolves an execution binding, not an agent's runtime policy.
 func (s *BackgroundTaskService) backgroundTool(in *BackgroundTaskInput) (agents.BackgroundTool, error) {
-	agentName := in.ToolAgentName
-	if agentName == "" {
-		agentName = in.AgentName
-	}
-
-	options, ok := s.agentConfigs[agentName]
+	tool, ok := s.tools[in.ToolKey]
 	if !ok {
-		return nil, fmt.Errorf("agent not found: %s", agentName)
+		return nil, fmt.Errorf("background tool %q is not registered", in.ToolKey)
 	}
+	return tool, nil
+}
 
-	for _, tool := range agents.WithSkillTool(options.Tools, options.Skills) {
-		if backgroundToolName(tool) != in.ToolName {
-			continue
-		}
-		if backgroundTool, ok := tool.(agents.BackgroundTool); ok {
-			return backgroundTool, nil
-		}
-		return nil, fmt.Errorf("tool %q on agent %q does not wait for background tasks", in.ToolName, agentName)
-	}
-
-	return nil, fmt.Errorf("tool %q not found on agent %q", in.ToolName, agentName)
+func backgroundToolKey(agentName, toolName string) string {
+	return url.PathEscape(agentName) + "/" + url.PathEscape(toolName)
 }
 
 // backgroundToolName reads a tool's own name, which is how the service finds

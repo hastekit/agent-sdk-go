@@ -11,9 +11,9 @@ type TemporalPrompt struct {
 	wrappedPrompt agents.SystemPromptProvider
 }
 
-func NewTemporalPrompt(wrappedPrompt agents.SystemPromptProvider) *TemporalPrompt {
+func NewTemporalPrompt(wrappedPrompt agents.SystemPromptProvider, middlewares ...agents.PromptMiddleware) *TemporalPrompt {
 	return &TemporalPrompt{
-		wrappedPrompt: wrappedPrompt,
+		wrappedPrompt: agents.WrapPromptProvider(wrappedPrompt, middlewares...),
 	}
 }
 

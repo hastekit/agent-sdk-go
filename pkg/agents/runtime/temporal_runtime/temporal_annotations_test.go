@@ -45,7 +45,7 @@ func annotatedTool(name string, annotations *agents.ToolAnnotations, requiresApp
 
 // The workflow side sees MCP tools only as the BaseTools the list activity
 // returned, so anything the loop needs to gate a call has to survive the data
-// converter. Annotations are what a permission hook reads to decide.
+// converter. Annotations are what a permission middleware reads to decide.
 func TestListMCPToolsActivity_CarriesAnnotations(t *testing.T) {
 	toolset := &annotatedToolset{tools: []agents.Tool{
 		annotatedTool("search", &agents.ToolAnnotations{ReadOnlyHint: utils.Ptr(true)}, false),

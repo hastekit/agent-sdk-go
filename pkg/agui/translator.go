@@ -220,7 +220,7 @@ func (t *Translator) Translate(chunk *responses.ResponseChunk) []Event {
 				BaseEvent: baseNow(),
 				// "on_interrupt" is CopilotKit's useInterrupt event
 				// name and the de-facto AG-UI convention; LangGraph
-				// follows it too. The hook only fires after the
+				// follows it too. The middleware only fires after the
 				// matching RUN_FINISHED (onRunFinalized), so the
 				// emission order below (event → RUN_FINISHED) is
 				// load-bearing.
@@ -228,7 +228,7 @@ func (t *Translator) Translate(chunk *responses.ResponseChunk) []Event {
 				Value: map[string]any{
 					// "kind" disambiguates our interrupt subtype for
 					// frontends that handle multiple agent types under
-					// the same useInterrupt hook. It stays "tool_approval"
+					// the same useInterrupt middleware. It stays "tool_approval"
 					// whenever every pause is an approval, so existing
 					// clients are unaffected by elicitation support.
 					"kind":             interruptKind(interrupts),
@@ -433,6 +433,9 @@ func (t *Translator) Translate(chunk *responses.ResponseChunk) []Event {
 	// assistant message that happened to be mid-flight stays mid-flight.
 	if chunk.OfInputMessage != nil {
 		im := chunk.OfInputMessage
+		if parts := historyContentParts(im.ContentParts); parts != nil {
+			return []Event{&CustomEvent{BaseEvent: baseNow(), Name: "input_message", Value: Message{ID: im.MessageID, Role: roleOrUser(im.Role), ContentParts: parts}}}
+		}
 		// The grounding context the handler appends to the user's turn is
 		// scaffolding for the model, and is stripped on rehydration for the
 		// same reason it is stripped here: the user did not write it.

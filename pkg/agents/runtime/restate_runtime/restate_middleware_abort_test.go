@@ -9,8 +9,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// A hook's error has to reach Restate as terminal. A non-terminal one makes
-// Restate retry the invocation, which replays into the same step and asks a hook
+// A middleware's error has to reach Restate as terminal. A non-terminal one makes
+// Restate retry the invocation, which replays into the same step and asks a middleware
 // that has already said no to say it again — the run would hang on the refusal
 // rather than ending on it.
 func TestAbortError_IsTerminal(t *testing.T) {
@@ -21,7 +21,7 @@ func TestAbortError_IsTerminal(t *testing.T) {
 
 	assert.EqualValues(t, ToolCallAbortedErrorCode, restate.ErrorCode(err))
 
-	// A Restate step runs in this process, so the hook's own error survives the
+	// A Restate step runs in this process, so the middleware's own error survives the
 	// terminal wrapper.
 	assert.ErrorIs(t, err, denied)
 	assert.Contains(t, err.Error(), "tenant mismatch")
@@ -32,7 +32,7 @@ func TestAbortError_PassesNilThrough(t *testing.T) {
 }
 
 // The code has to be one nothing else produces: Restate answers 500 for any
-// error carrying no code of its own, so 500 would make a hook's refusal
+// error carrying no code of its own, so 500 would make a middleware's refusal
 // indistinguishable from every other failure to anything reading it back.
 func TestAbortedErrorCode_IsDistinctFromTheDefault(t *testing.T) {
 	assert.EqualValues(t, 500, restate.ErrorCode(errors.New("no code of its own")))

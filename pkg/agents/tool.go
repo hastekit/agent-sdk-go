@@ -18,7 +18,7 @@ type ToolCall struct {
 	RunContext   map[string]any `json:"run_context"`
 
 	// State is the run's key-value scratchpad: whatever earlier tools and
-	// hooks have written, and whatever survived from earlier runs on this
+	// middlewares have written, and whatever survived from earlier runs on this
 	// thread.
 	//
 	// Write with ToolCallResponse.StateUpdates, not by assigning here. A
@@ -82,7 +82,7 @@ type Tool interface {
 	// GetToolDescriptor projects the tool onto the plain data every tool has in
 	// common — its schema, its name, and the flags the loop reads off it. That
 	// projection is the only form of the tool that can cross a durable
-	// runtime's boundary or reach a hook, and it is also what the loop itself
+	// runtime's boundary or reach a middleware, and it is also what the loop itself
 	// reads, so a tool describes itself in exactly one place. Embedding
 	// *BaseTool satisfies this.
 	//
@@ -96,7 +96,7 @@ type BaseTool struct {
 	// Name is the tool's own name, without any prefix the model-facing name
 	// carries. Only sources that have a name of their own set it — an MCP
 	// server's tools do, a locally defined function tool does not, since for it
-	// the two are the same name. A hook is always shown it filled in either way
+	// the two are the same name. A middleware is always shown it filled in either way
 	// (see serializeTool).
 	Name             string
 	ToolUnion        responses.ToolUnion

@@ -14,7 +14,7 @@ A powerful Golang SDK for building AI agents and making LLM calls across multipl
 - **👤 Human-in-the-Loop** - Integrate human feedback and approval workflows
 - **🛡️ Durable Execution** - Create fault-tolerant agents with Restate or Temporal
 - **🔧 Tool Calling** - Function calling and MCP (Model Context Protocol) tool integration
-- **🪝 Hooks** - Intercept tool calls and model calls for auth, budgets, and audit
+- **🪝 Middlewares** - Intercept tool calls and model calls for auth, budgets, and audit
 - **🏷️ Tool Annotations** - MCP-style behavioural hints on both MCP and function tools
 - **💾 Conversation History** - Maintain context across interactions with built-in persistence
 - **🧩 Sub-Agents & Handoffs** - Call a specialist as a tool, or transfer the conversation to it
@@ -41,9 +41,9 @@ A powerful Golang SDK for building AI agents and making LLM calls across multipl
   - [Tools](#tools)
     - [Background Tool Execution](#background-tool-execution)
   - [Skills](#skills)
-  - [Hooks](#hooks)
+  - [Middlewares](#middlewares)
     - [Adding a Message to a Model Call](#adding-a-message-to-a-model-call)
-    - [Hook State](#hook-state)
+    - [Middleware State](#middleware-state)
   - [Conversation History](#conversation-history)
   - [Durable Agents](#durable-agents)
 - [Documentation](#documentation)
@@ -666,11 +666,11 @@ MCP tools carry whatever their server declared; nothing extra is needed to pick 
 
 ```go
 if tool.GetToolDescriptor().Annotations.IsDestructive() {
-    // gate it — see Hooks below
+    // gate it — see Middlewares below
 }
 ```
 
-A tool call hook is handed the same descriptor, which is where a policy usually reads them.
+A tool call middleware is handed the same descriptor, which is where a policy usually reads them.
 
 Every hint is a pointer, so "nothing was said" stays distinguishable from "false was said". Prefer the `Is*` helpers over reading fields directly: they are nil-safe and apply MCP's defaults, which are deliberately conservative — an unset `DestructiveHint` reads as destructive, an unset `ReadOnlyHint` as not read-only.
 
@@ -944,7 +944,7 @@ var skillsFS embed.FS
 registry, err := hastekit.NewSkillRegistry(skillsFS)
 ```
 
-Embedding the parent folder is enough: a skill is found wherever a `SKILL.md` sits, so there is no `fs.Sub` to get right. `NewSkillRegistry` takes any `fs.FS`, so this is also the hook for skills that come from somewhere else entirely.
+Embedding the parent folder is enough: a skill is found wherever a `SKILL.md` sits, so there is no `fs.Sub` to get right. `NewSkillRegistry` takes any `fs.FS`, so this is also the middleware for skills that come from somewhere else entirely.
 
 #### Rules
 
@@ -1009,135 +1009,125 @@ hastekit.NewPrompt("You help maintain this project's releases.",
 )
 ```
 
-### Hooks
+### Middlewares
 
-A hook wraps what the agent does, so cross-cutting concerns — auth, budgets, quotas, audit, approval policy — live in one place instead of inside every tool. Hooks can observe, or answer in place of the real call.
+A middleware wraps what the agent does, middleware-style, so cross-cutting concerns — auth, budgets, quotas, audit, attachments — live in one place instead of inside every tool. A middleware can observe a call, change what goes in or what comes out, or answer in place of the real call.
 
-`ToolCallHook` wraps every tool call; `ModelCallHook` wraps every call to the model. `hastekit.Hook` is both. Implement only the half you care about by embedding the no-op other half:
+`ToolCallMiddleware` wraps every tool call; `ModelCallMiddleware` wraps every call to the model. `hastekit.Middleware` is both. Embed the no-op half you have nothing to say on:
 
 ```go
 // A budget check that has no interest in tools.
 type credits struct {
-    agents.NoopToolCallHook // supplies the tool-call half
+    agents.NoopMiddleware
 }
 
-func (c *credits) GetName() string { return "credits" }
-
-func (c *credits) BeforeModelCall(ctx context.Context, call *agents.ModelCall) (agents.ModelCallHookResult, error) {
-    if balanceFor(call.RunContext) <= 0 {
-        // Answering is kinder than failing: the run ends with a message the
-        // user can read rather than an error they cannot.
-        return agents.HandleModelCall(
-            agents.ModelCallText("You're out of credits — top up to continue."),
-        ), nil
+func (c *credits) WrapModelCall(next agents.ModelCallFunc) agents.ModelCallFunc {
+    return func(ctx context.Context, call *agents.ModelCall, req *responses.Request) (*responses.Response, error) {
+        if balanceFor(call.RunContext) <= 0 {
+            // Answering is kinder than failing: the run ends with a message the
+            // user can read rather than an error they cannot.
+            return agents.ModelCallText("You're out of credits — top up to continue."), nil
+        }
+        resp, err := next(ctx, call, req)
+        if err != nil {
+            return nil, err
+        }
+        recordSpend(call.RunContext, resp.Usage) // this one call's usage
+        return resp, nil
     }
-    return agents.ContinueModelCall(), nil
-}
-
-func (c *credits) AfterModelCall(ctx context.Context, call *agents.ModelCall, res *agents.ModelCallResult) (agents.ModelCallHookResult, error) {
-    recordSpend(call.RunContext, res.Usage) // res.Usage is this one call
-    return agents.ContinueModelCall(), nil
 }
 
 agent := hastekit.NewAgent(&hastekit.AgentConfig{
     Name:  "Assistant",
     LLM:   client.Model("OpenAI/gpt-4o-mini"),
     Tools: []hastekit.Tool{weatherTool},
-    Hooks: []agents.Hook{&credits{}},
+    Middlewares: []agents.Middleware{&credits{}},
 })
 ```
 
-The tool-call side is the same, with the tool the call is against handed over alongside it. Combined with annotations, a policy hook is a few lines:
+The tool-call side is the same, with the tool the call is against handed over alongside it. Combined with annotations, a policy middleware is a few lines:
 
 ```go
 type policy struct {
-    agents.NoopModelCallHook // model-call half; this hook only guards tools
+    agents.NoopMiddleware
 }
 
-func (p *policy) GetName() string { return "policy" }
-
-func (p *policy) BeforeToolCall(ctx context.Context, tool *agents.BaseTool, call *agents.ToolCall) (agents.ToolCallHookResult, error) {
-    if tool.Annotations.IsDestructive() && !allowed(call.RunContext, call.Name) {
-        // Short-circuit: the tool never runs, and this stands in as its output.
-        return agents.HandleToolCall(
-            agents.ToolCallResult(call, "Denied by policy."),
-        ), nil
+func (p *policy) WrapToolCall(next agents.ToolCallFunc) agents.ToolCallFunc {
+    return func(ctx context.Context, tool *agents.BaseTool, call *agents.ToolCall) (*agents.ToolCallResponse, error) {
+        if tool.Annotations.IsDestructive() && !allowed(call.RunContext, call.Name) {
+            // The tool never runs, and this stands in as its output.
+            return agents.ToolCallResult(call, "Denied by policy."), nil
+        }
+        resp, err := next(ctx, tool, call)
+        audit(call.Name, call.RunContext, err)
+        return resp, err
     }
-    return agents.ContinueToolCall(), nil
-}
-
-func (p *policy) AfterToolCall(ctx context.Context, tool *agents.BaseTool, call *agents.ToolCall, resp *agents.ToolCallResponse) (agents.ToolCallHookResult, error) {
-    audit(call.Name, call.RunContext)
-    return agents.ContinueToolCall(), nil
 }
 ```
 
 Notes:
 
-- **`Handled` is explicit.** `ContinueToolCall()` passes the call along; `HandleToolCall(resp)` says the hook answered and the real call never happens. It's a flag rather than a nil check, because "I answered, and the answer is nothing to say" differs from "carry on without me".
+- **Answering is a return, not an error.** Return a result without calling `next` and the real call never happens; the model reads what you returned. An error of your own ends the run. An error `next` hands back is the tool's or the provider's — pass it through as it came, and the loop reports it as such.
 - **Run context comes along.** `call.RunContext` is the per-run map you set on `AgentInput`, so per-tenant data (a JWT, an org id) is available without threading it through every tool.
 - **The tool arrives as plain data.** `tool` is the same `*agents.BaseTool` its `GetToolDescriptor` returns — name, schema, annotations, meta — because the real tool may be a proxy for one running in another process. It is always non-nil.
-- **`GetName()` must be unique per agent and stable across deploys.** Durable runtimes name each hook's journaled step after it, so a renamed hook is a new step on replay.
-- **Hooks run as their own durable steps.** Under Restate or Temporal each hook call is journaled, so a check that talks to a billing service is not re-run on every replay.
-- **A `BeforeModelCall` hook sees the shape of the call, not the prompt** — model, tenant, loop iteration, `ContextTokens`, and usage so far. That's what a budget check needs, and it keeps the conversation from crossing a durable boundary twice.
+- **Middlewares nest in registration order, the first outermost.** The first registered sees a request first and a result last. A middleware that answers without calling `next` skips every middleware inside it.
+- **Wraps run inside the step that makes the call, never as steps of their own.** Under Temporal and Restate that is the tool activity or run step and the LLM activity or run step; locally it is the loop. What a wrap hands `next` is what the tool or provider sees, and what it returns is what the loop keeps — so `WrapToolCall` can rewrite a result before it is journaled, which is how the attachment middleware keeps file bytes out of every journal and transcript. Because a wrap is not journaled, it may run again if its step retries: keep it idempotent, and never write to the request or result you were handed.
+- **A note for this call only.** To put something in front of the model once, hand `next` a copy of the request with a message appended. The loop keeps its own request, so the note is never stored and does not accumulate — the same treatment the loop gives its own "one turn left" reminder.
+- **State is read-only here.** `call.State` is a snapshot of the run's scratchpad, on model calls and tool calls alike. Tools write to it through `ToolCallResponse.StateUpdates`; a wrap reads what they wrote.
 
-#### Adding a Message to a Model Call
+The SDK installs `agents.StopMiddleware` outside the configured tool and model
+middleware. It watches the call's stream while the entire chain runs, including
+attachment resolution. Tools retain their cancellation grace period; model
+calls unwind through their context so streaming callbacks cannot outlive the
+step. Custom model middleware must honor context cancellation.
 
-A `BeforeModelCall` hook can put a message in front of the model for one call.
-The note is appended after the conversation and is **never stored**, so it is
-true of the call it rides on and does not accumulate in the transcript of
-every call after it — the same treatment the loop gives its own
-"you have one turn left" reminder.
+Temporal installs it inside each tool/MCP/model activity, and Restate inside
+the corresponding `restate.Run` callback. Workflow proxies do not watch live
+stop signals. The worker translates stopped calls into non-retryable Temporal
+errors or terminal Restate errors, and replay consumes that recorded outcome.
+Background waits continue independently of the parent run's stop signal.
+`RunStoppableTool` has been replaced by `StopMiddleware.WrapToolCall`; the
+generic `RunStoppable` primitive remains available for custom runtime adapters.
 
-```go
-func (p *policy) BeforeModelCall(ctx context.Context, call *agents.ModelCall) (agents.ModelCallHookResult, error) {
-    if call.ContextTokens < 100_000 {
-        return agents.ContinueModelCall(), nil
-    }
-    return agents.ContinueModelCall().WithMessages(
-        responses.UserMessage("You are close to the context limit. Summarise findings before continuing."),
-    ), nil
-}
-```
-
-Hooks append in order, after the conversation. Only `BeforeModelCall` can add
-one — by `AfterModelCall` there is no request left to add to — and nothing is
-appended when a hook answers for the model, since the provider is never
-called.
-
-This is for a note the model should act on *now*. Reshaping the history itself
-— trimming it, summarising it — belongs to the conversation summarizer, which
-already owns the whole transcript; a hook is deliberately never handed it.
-
-#### Hook State
-
-`ModelCall.State` is the run's key-value scratchpad, the same one tools read
-through `ToolCall.State`. Write to it by returning updates, exactly as a tool
-returns `StateUpdates`:
+History and prompt middleware use the same registration:
 
 ```go
-func (p *policy) BeforeModelCall(ctx context.Context, call *agents.ModelCall) (agents.ModelCallHookResult, error) {
-    if call.State["warned"] == "1" {
-        return agents.ContinueModelCall(), nil
+type promptPolicy struct { agents.NoopMiddleware }
+
+func (p *promptPolicy) WrapGetPrompt(next agents.GetPromptFunc) agents.GetPromptFunc {
+    return func(ctx context.Context, deps *agents.Dependencies) (string, error) {
+        prompt, err := next(ctx, deps)
+        if err != nil { return "", err }
+        return prompt + "\nCite sources for factual claims.", nil
     }
-    return agents.ContinueModelCall().
-        WithMessages(responses.UserMessage("Heads up: this run is nearly out of budget.")).
-        WithStateUpdates(map[string]string{"warned": "1"}), nil
 }
+
+// On agents.AgentOptions or AgentConfig:
+// Middlewares: []agents.Middleware{&promptPolicy{}},
 ```
 
-State persists with the thread, so a hook can remember something across
-invocations — that it has already warned, so it warns once rather than every
-iteration. Tools and hooks share one flat namespace: what a tool wrote, the
-next call's hooks read. A write lands as soon as it is returned, so a later
-hook in the chain reads what an earlier one just wrote; the last writer of a
-key wins, and a hook that writes only its own keys never disturbs another's.
+Implement `WrapLoadMessages(next agents.LoadMessagesFunc)` and
+`WrapSaveMessages(next agents.SaveMessagesFunc)` to wrap conversation persistence.
+Their request structs carry the namespace, thread/run IDs, and, for saves,
+messages and metadata. Return without calling `next` to serve cached history or
+skip a write. Pass copies when modifying inputs or returned messages.
+`WrapGetPrompt(next agents.GetPromptFunc)` receives the existing `Dependencies`.
+History/prompt errors follow the underlying operation's runtime retry policy.
 
-> `WithStateUpdates` is the only way to write. Assigning into `call.State`
-> changes nothing: a durable runtime rebuilds that map from a serialized
-> payload, so a write on the far side reaches nothing — and it is copied
-> locally too, so the mistake fails the same way in both places rather than
-> only once you deploy.
+Custom runtime adapters can use `ExecuteLoadMessagesWithMiddleware`,
+`ExecuteSaveMessagesWithMiddleware`, and `ExecuteGetPromptWithMiddleware` inside
+their existing steps, or bind the real providers with `WrapHistoryPersistence`
+and `WrapPromptProvider`. Middleware results are returned by that same step;
+there are no separate middleware activities. Summary writes, ID/clock generation,
+thread listing and full-transcript reads keep their existing behavior.
+
+Migration: `Hooks` is now `Middlewares`, `agents.Hook` is `agents.Middleware`,
+and `ExecuteWrappedModelCall` / `ExecuteWrappedToolCall` are now
+`ExecuteModelCallWithMiddleware` / `ExecuteToolCallWithMiddleware`. Built-in
+attachment middleware lives in `pkg/agents/middleware` as `AttachmentMiddleware`.
+Embed `agents.NoopMiddleware` for the operations you do not override. The root
+package exposes `AgentMiddleware`; its existing `Middleware` alias continues
+referring to gateway middleware.
 
 ### Conversation History
 
@@ -1350,7 +1340,7 @@ Any other OpenAI-compatible endpoint can be added the same way: point `openaicom
 ```
 agent-sdk-go/
 └── pkg/
-    ├── agents/              # Agent orchestration, hooks, tool annotations
+    ├── agents/              # Agent orchestration, middlewares, tool annotations
     │   ├── runtime/         # Durable execution runtimes
     │   │   ├── restate_runtime/
     │   │   └── temporal_runtime/
@@ -1396,3 +1386,23 @@ This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENS
 - [HasteKit Docs](https://github.com/hastekit/hastekit-docs) - Documentation and examples
 
 ---
+
+
+## Attachments backed by your own storage
+
+Images and documents can use an immutable `attachment://...` reference in `file_id` instead of storing base64 in
+conversation history. The SDK includes a private filesystem store, replaceable
+`Store`/`UploadStore` interfaces, and a shared bounded cache. One middleware,
+`middleware.NewAttachmentMiddleware`, keeps the bytes out of everything durable in both
+directions: it stores what a tool returns inline and replaces it with a
+reference, and it resolves every reference back into inline provider data inside
+the model call itself. Add the middleware to an agent to turn attachment support on
+for it; the LLM client is not involved, and sends exactly the request it is
+handed.
+
+See [owned attachments](pkg/attachments/README.md) for local setup, caching, and
+Temporal/Restate configuration.
+
+Pass `agui.WithAttachmentStore(store)` to the embedded web handler to enable
+`/attachments/` upload/download APIs and the chat file picker. The
+[sample chat](samples/attachments/main.go) demonstrates the full image/PDF flow.

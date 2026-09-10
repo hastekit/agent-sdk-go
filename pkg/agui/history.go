@@ -76,25 +76,29 @@ func HistoryToMessages(rows []history.ConversationMessage) []Message {
 				case msg.OfEasyInput != nil:
 					m := msg.OfEasyInput
 					text := stripContextBlocks(easyInputText(m.Content))
-					if text == "" {
+					parts := historyContentParts(m.Content.OfInputMessageList)
+					if text == "" && parts == nil {
 						continue
 					}
 					out = append(out, Message{
-						ID:      uniq(m.ID),
-						Role:    roleOrUser(string(m.Role)),
-						Content: text,
+						ID:           uniq(m.ID),
+						Role:         roleOrUser(string(m.Role)),
+						Content:      text,
+						ContentParts: parts,
 					})
 
 				case msg.OfInputMessage != nil:
 					m := msg.OfInputMessage
 					text := stripContextBlocks(inputContentText(m.Content))
-					if text == "" {
+					parts := historyContentParts(m.Content)
+					if text == "" && parts == nil {
 						continue
 					}
 					out = append(out, Message{
-						ID:      uniq(m.ID),
-						Role:    roleOrUser(string(m.Role)),
-						Content: text,
+						ID:           uniq(m.ID),
+						Role:         roleOrUser(string(m.Role)),
+						Content:      text,
+						ContentParts: parts,
 					})
 
 				case msg.OfOutputMessage != nil:

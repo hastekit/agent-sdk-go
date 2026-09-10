@@ -1,3 +1,4 @@
+import type { InputContent } from "@ag-ui/core";
 import {
   HttpAgent,
   randomUUID,
@@ -138,7 +139,15 @@ export class StoppableHttpAgent extends HttpAgent {
         if (missing.length === 0) return;
         return { messages: [...missing, ...messages] };
       },
-      onCustomEvent: ({ event }: any) => {
+      onCustomEvent: ({ event, messages }: any) => {
+        if (event?.name === "input_message" && event.value?.id) {
+          const incoming = event.value as Message;
+          const matches = (m: Message) => m.id === incoming.id || serverIdOf(m.id) === incoming.id;
+          this.steered = this.steered.map(m => matches(m) ? incoming : m);
+          return { messages: messages.some(matches)
+            ? messages.map((m: Message) => matches(m) ? incoming : m)
+            : [...messages, incoming] };
+        }
         if (event?.name === STREAM_ID_EVENT && event?.value?.streamId) {
           this.streamId = event.value.streamId as string;
         }
@@ -252,28 +261,36 @@ export class StoppableHttpAgent extends HttpAgent {
   // and this request landing, the server starts a fresh run and streams it
   // instead of folding. Nothing is reading that response, so we drop it and
   // pick the run up on the thread's own stream, the same way a rejoin does.
-  async steer(text: string): Promise<void> {
+  async steer(text: string, parts: InputContent[] = []): Promise<void> {
     const trimmed = text.trim();
-    if (!trimmed) return;
+    if (!trimmed && !parts.length) return;
 
     // addMessage notifies subscribers, so the chat renders the turn at
     // once; the live run doesn't see it, hence `steered` above.
     const message: Message = {
       id: randomUUID(),
       role: "user",
-      content: trimmed,
+      content: parts.length ? [...(trimmed ? [{ type: "text" as const, text: trimmed }] : []), ...parts] : trimmed,
     };
     this.steered.push(message);
     this.addMessage(message);
 
-    const input = { ...this.prepareRunAgentInput(), messages: [message] };
-    const res = await fetch(this.url, this.requestInit(input));
+    const prepared = this.prepareRunAgentInput();
+    const input = { ...prepared, messages: this.fullHistory ? prepared.messages : [message] };
+    let res: Response;
+    try { res = await fetch(this.url, this.requestInit(input)); }
+    catch (error) {
+      this.steered = this.steered.filter(m => m.id !== message.id);
+      this.setMessages(this.messages.filter(m => m.id !== message.id));
+      throw error;
+    }
     if (res.status === 204) return;
 
     void res.body?.cancel();
     if (!res.ok) {
-      console.error("steer failed", res.status);
-      return;
+      this.steered = this.steered.filter(m => m.id !== message.id);
+      this.setMessages(this.messages.filter(m => m.id !== message.id));
+      throw new Error(`Message could not be sent (${res.status}).`);
     }
     void this.connectAgent();
   }

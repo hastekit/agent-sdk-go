@@ -169,7 +169,7 @@ func WithTitle(title string) ToolOption {
 
 // WithMeta attaches metadata to the tool. It is not sent to the model and has
 // no meaning to the SDK: it rides along on the BaseTool, which is what a tool
-// call hook is shown, so a policy can key off where a tool came from or what it
+// call middleware is shown, so a policy can key off where a tool came from or what it
 // belongs to without having to recognise it by name.
 //
 // Repeated use merges rather than replaces, so several options can each

@@ -128,7 +128,7 @@ type streamingLLM struct {
 	finished bool
 }
 
-func (l *streamingLLM) NewStreamingResponses(ctx context.Context, in *responses.Request, cb func(*responses.ResponseChunk)) (*responses.Response, error) {
+func (l *streamingLLM) NewStreamingResponses(ctx context.Context, _ *agents.ModelCall, in *responses.Request, cb func(*responses.ResponseChunk)) (*responses.Response, error) {
 	stream := make(chan *responses.ResponseChunk)
 
 	go func() {

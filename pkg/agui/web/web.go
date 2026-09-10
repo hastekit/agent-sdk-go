@@ -79,7 +79,9 @@ const APIPrefix = "/api/agui"
 // APIPrefix. *hastekit.SDK satisfies agui.Registry.
 func Handler(registry agui.Registry, opts ...agui.Option) http.Handler {
 	mux := http.NewServeMux()
-	mux.Handle(APIPrefix+"/", http.StripPrefix(APIPrefix, agui.NewHandler(registry, opts...)))
+	api := agui.NewHandler(registry, opts...)
+	mux.Handle(APIPrefix+"/", http.StripPrefix(APIPrefix, api))
+	mux.Handle("/attachments/", api)
 
 	static, err := fs.Sub(staticFS, "static")
 	if err != nil {

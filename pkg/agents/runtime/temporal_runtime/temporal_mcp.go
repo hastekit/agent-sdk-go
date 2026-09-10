@@ -11,14 +11,16 @@ import (
 )
 
 type TemporalMCPServer struct {
+	middlewares      []agents.ToolCallMiddleware
 	wrappedMcpServer agents.MCPToolset
 	broker           agents.StreamBroker
 }
 
-func NewTemporalMCPServer(wrappedMcpServer agents.MCPToolset, broker agents.StreamBroker) *TemporalMCPServer {
+func NewTemporalMCPServer(wrappedMcpServer agents.MCPToolset, broker agents.StreamBroker, middlewares ...agents.ToolCallMiddleware) *TemporalMCPServer {
 	return &TemporalMCPServer{
 		wrappedMcpServer: wrappedMcpServer,
 		broker:           broker,
+		middlewares:      append([]agents.ToolCallMiddleware{agents.StopMiddleware{Watcher: agents.StopWatcherFrom(broker)}}, middlewares...),
 	}
 }
 
@@ -31,7 +33,7 @@ func (t *TemporalMCPServer) ListTools(ctx context.Context, runContext map[string
 	// GetToolDescriptor rather than a field-by-field copy: this is the only crossing a
 	// tool makes into the workflow, and anything left out here is gone for good
 	// on the far side — the tool's own name and its meta included, which is
-	// exactly what a hook over there is looking at.
+	// exactly what a middleware over there is looking at.
 	var tools []agents.BaseTool
 	for _, tool := range mcpTools {
 		if encoded := tool.GetToolDescriptor(); encoded != nil {
@@ -43,17 +45,16 @@ func (t *TemporalMCPServer) ListTools(ctx context.Context, runContext map[string
 }
 
 // ExecuteTool is the _ExecuteMCPToolActivity implementation. It runs inside a
-// Temporal activity (exactly once per real call), so the execute_tool span
-// opened here fires once and is replay-safe. callTool does the real work.
+// Temporal activity, so middleware and tracing run on each activity attempt,
+// never during workflow replay. callTool does the real work.
 func (t *TemporalMCPServer) ExecuteTool(ctx context.Context, tool *agents.BaseTool, params *agents.ToolCall, runContext map[string]any) (*agents.ToolCallResponse, error) {
 	injectProgressReporter(ctx, t.broker, params)
 
-	resp, err := agents.RunStoppableTool(ctx, agents.StopWatcherFrom(t.broker), 0, params,
-		func(callCtx context.Context, p *agents.ToolCall) (*agents.ToolCallResponse, error) {
-			return agents.ExecuteWithTrace(callCtx, nil, p, func(innerCtx context.Context, ip *agents.ToolCall) (*agents.ToolCallResponse, error) {
-				return t.callTool(innerCtx, tool, ip, runContext)
-			})
+	resp, err := agents.ExecuteWithTrace(ctx, nil, params, func(ctx context.Context, call *agents.ToolCall) (*agents.ToolCallResponse, error) {
+		return agents.ExecuteToolCallWithMiddleware(ctx, t.middlewares, tool, call, func(ctx context.Context, call *agents.ToolCall) (*agents.ToolCallResponse, error) {
+			return t.callTool(ctx, tool, call, runContext)
 		})
+	})
 
 	return resp, cancellationError(err)
 }
@@ -88,6 +89,7 @@ func (t *TemporalMCPServer) callTool(ctx context.Context, tool *agents.BaseTool,
 }
 
 type TemporalMCPProxy struct {
+	name        string
 	workflowCtx workflow.Context
 	prefix      string
 }
@@ -95,12 +97,13 @@ type TemporalMCPProxy struct {
 func NewTemporalMCPProxy(workflowCtx workflow.Context, prefix string) *TemporalMCPProxy {
 	return &TemporalMCPProxy{
 		workflowCtx: workflowCtx,
+		name:        prefix,
 		prefix:      prefix,
 	}
 }
 
 func (t *TemporalMCPProxy) GetName() string {
-	return t.prefix
+	return t.name
 }
 
 func (t *TemporalMCPProxy) ListTools(ctx context.Context, runContext map[string]any) ([]agents.Tool, error) {

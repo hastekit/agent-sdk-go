@@ -77,11 +77,11 @@ func (w *AgentWorkflow) proxyAgent(
 		return existing
 	}
 
-	promptProxy := NewRestatePrompt(restateCtx, agentOptions.Instruction)
+	promptProxy := NewRestatePrompt(restateCtx, agentOptions.Instruction, agents.PromptMiddlewaresOf(agentOptions.Middlewares)...)
 
-	llmProxy := NewRestateLLM(restateCtx, agentOptions.LLM, providerConfigKey, w.broker, streamID)
+	llmProxy := NewRestateLLM(restateCtx, agentOptions.LLM, providerConfigKey, w.broker, streamID, agents.ModelCallMiddlewaresOf(agentOptions.Middlewares)...)
 
-	conversationPersistenceProxy := NewRestateConversationPersistence(restateCtx, agentOptions.History.ConversationPersistenceAdapter)
+	conversationPersistenceProxy := NewRestateConversationPersistence(restateCtx, agentOptions.History.ConversationPersistenceAdapter, agents.HistoryMiddlewaresOf(agentOptions.Middlewares)...)
 	var options []history.ConversationManagerOptions
 	if agentOptions.History.Summarizer != nil {
 		conversationSummarizerProxy := NewRestateConversationSummarizer(restateCtx, agentOptions.History.Summarizer)
@@ -98,12 +98,12 @@ func (w *AgentWorkflow) proxyAgent(
 	// run outside the workflow's journal.
 	var restateTools []agents.Tool
 	for _, tool := range agents.WithSkillTool(agentOptions.Tools, agentOptions.Skills) {
-		restateTools = append(restateTools, newRestateTool(restateCtx, tool, w.broker))
+		restateTools = append(restateTools, newRestateTool(restateCtx, agentOptions.Name, tool, w.broker, agents.ToolCallMiddlewaresOf(agentOptions.Middlewares)...))
 	}
 
 	var mcpClients []agents.MCPToolset
 	for _, mcpClient := range agentOptions.McpServers {
-		mcpClients = append(mcpClients, NewRestateMCPServer(restateCtx, mcpClient, w.broker))
+		mcpClients = append(mcpClients, NewRestateMCPServer(restateCtx, mcpClient, w.broker, agents.ToolCallMiddlewaresOf(agentOptions.Middlewares)...))
 	}
 
 	opts := &agents.AgentOptions{
@@ -128,8 +128,6 @@ func (w *AgentWorkflow) proxyAgent(
 		Skills:       agentOptions.Skills,
 		McpServers:   mcpClients,
 		ToolExecutor: NewRestateToolExecutor(restateCtx),
-		// The real hooks, each wrapped so its methods run as their own steps.
-		Hooks:        restateHooks(restateCtx, agentOptions.Hooks),
 		StreamBroker: NewRestateStreamBroker(restateCtx, w.broker),
 		DurableStep:  NewRestateDurableStep(restateCtx),
 		// A task's wait outlives this run, so it goes to an invocation of its

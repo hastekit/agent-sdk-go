@@ -81,7 +81,7 @@ func annotationsOf(t *testing.T, tool agents.Tool) *agents.ToolAnnotations {
 	return tool.GetToolDescriptor().Annotations
 }
 
-// Meta rides along on the BaseTool, which is what a tool call hook is shown —
+// Meta rides along on the BaseTool, which is what a tool call middleware is shown —
 // so a policy can key off where a tool came from without recognising it by name.
 func TestFunctionToolMeta(t *testing.T) {
 	tool := NewTool(lookup,

@@ -28,11 +28,12 @@ export interface ThreadInfo {
 export async function fetchAgents(): Promise<{
   agents: string[];
   fullHistory: boolean;
+  attachmentsEnabled: boolean;
 }> {
   const r = await fetch(`${API}/agents`);
   if (!r.ok) throw new Error(`agents → ${r.status}`);
   const body = await r.json();
-  return { agents: body.agents ?? [], fullHistory: body.full_history === true };
+  return { agents: body.agents ?? [], fullHistory: body.full_history === true, attachmentsEnabled: body.attachments === true };
 }
 
 // fetchThreads returns supported=false when the agent's persistence
@@ -190,4 +191,20 @@ export async function watchRunFeed(
   if (!r.ok) throw new Error(`runs → ${r.status}`);
   const body = await r.json();
   return { events: body.events ?? [], cursor: body.cursor ?? cursor };
+}
+
+export interface UploadedAttachment {
+  file_id: string;
+  url: string;
+  filename: string;
+  mediaType: string;
+  size: number;
+}
+
+export async function uploadAttachment(file: File): Promise<UploadedAttachment> {
+  if (file.size > 20 * 1024 * 1024) throw new Error("Files must be 20 MiB or smaller.");
+  const body = new FormData(); body.append("file", file);
+  const response = await fetch("/attachments/", { method: "POST", body });
+  if (!response.ok) throw new Error(`Upload failed (${response.status}). Please try again.`);
+  return response.json();
 }

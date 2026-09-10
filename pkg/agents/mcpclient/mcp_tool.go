@@ -2,7 +2,6 @@ package mcpclient
 
 import (
 	"context"
-	"errors"
 	"maps"
 
 	"github.com/bytedance/sonic"
@@ -131,22 +130,7 @@ func (c *McpTool) Execute(ctx context.Context, params *agents.ToolCall) (*agents
 		return pause, nil
 	}
 
-	// Return the tool result
-	for _, r := range res.Content {
-		if tc, ok := r.(*mcp.TextContent); ok {
-			out := &responses.FunctionCallOutputMessage{
-				ID:     params.ID,
-				CallID: params.CallID,
-				Output: responses.FunctionCallOutputContentUnion{
-					OfString: utils.Ptr(tc.Text),
-				},
-			}
-			return &agents.ToolCallResponse{FunctionCallOutputMessage: out}, nil
-		}
-	}
-
-	err = errors.New("missing mcp tool result")
-	return nil, err
+	return mcpToolResult(params, res.Content)
 }
 
 // LazyMcpTool holds a cached tool schema but defers MCP connection to Execute() time.
@@ -271,22 +255,7 @@ func (c *LazyMcpTool) Execute(ctx context.Context, params *agents.ToolCall) (*ag
 		return pause, nil
 	}
 
-	// Return the tool result
-	for _, r := range res.Content {
-		if tc, ok := r.(*mcp.TextContent); ok {
-			out := &responses.FunctionCallOutputMessage{
-				ID:     params.ID,
-				CallID: params.CallID,
-				Output: responses.FunctionCallOutputContentUnion{
-					OfString: utils.Ptr(tc.Text),
-				},
-			}
-			return &agents.ToolCallResponse{FunctionCallOutputMessage: out}, nil
-		}
-	}
-
-	err = errors.New("missing mcp tool result")
-	return nil, err
+	return mcpToolResult(params, res.Content)
 }
 
 // toolOutput wraps text as this call's result, which is how a failure the
