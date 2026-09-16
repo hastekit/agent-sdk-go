@@ -3,8 +3,8 @@
 Store files once, keep `attachment://...` references in messages, and resolve them
 to inline data only inside the model call that needs them. Input images and files
 use `file_id`; generated-image output keeps the shared Responses shape and carries
-the reference in `image_generation_call.result`. The filesystem implementation is
-included; applications can implement `Store` / `UploadStore` for S3 or other storage.
+the reference in `image_generation_call.result`. Filesystem and S3 implementations are
+included; applications can implement `Store` / `UploadStore` for other storage.
 
 The shared Responses types retain their existing `file_id` fields. Use
 `attachments.FileID(ref)` to encode an immutable reference and
@@ -16,6 +16,50 @@ that a provider or browser fetches. Browser previews use `attachments.URL(ref)`.
 Existing history written with the previous `file_ref: {id, version}` extension
 must be converted to `file_id: "attachment://<id>?version=<version>"` when
 upgrading; the shared schema no longer has a `file_ref` field.
+
+## S3 setup
+
+`S3Store` implements the same `UploadStore` interface as `FileStore`. Use it with
+`NewResolver`, attachment middleware, and the existing HTTP upload/preview handler.
+No changes to message references or the embedded UI are required.
+
+```go
+import (
+    "github.com/aws/aws-sdk-go-v2/service/s3"
+    "github.com/hastekit/agent-sdk-go/pkg/attachments"
+)
+
+// awsConfig is your application's aws.Config, with region and credentials set
+// (for example, using the AWS SDK config.LoadDefaultConfig credential chain).
+client := s3.NewFromConfig(awsConfig)
+store, err := attachments.NewS3Store(client, attachments.S3StoreConfig{
+    Bucket: "my-private-attachments",
+    Prefix: "agents/attachments",
+    MaxFileBytes: 20 << 20,
+})
+if err != nil { return err }
+resolver := attachments.NewResolver(store, attachments.Config{})
+// Pass store and resolver to the same middleware setup shown below.
+```
+
+Create the bucket separately. The client needs `s3:PutObject` and `s3:GetObject`
+permissions for the configured prefix (`HeadObject` also uses `s3:GetObject`).
+Configure bucket encryption and access policy in your infrastructure. This store
+never sets a public ACL or exposes S3 URLs; previews use the SDK attachment handler.
+S3 may report a missing object as access denied when the caller lacks bucket-list
+permission; that response is preserved as `ErrDenied`.
+
+For S3-compatible services, configure `BaseEndpoint` and, where required,
+`UsePathStyle` through `s3.NewFromConfig` options. The service must support
+conditional `PutObject` (`If-None-Match: *`) and `GetObject` (`If-Match`).
+
+Objects are partitioned by hashed namespace and random attachment ID. Each object
+contains its filename and SHA-256 digest as metadata. Uploads buffer at most
+`MaxFileBytes + 1` bytes to validate size and content before sending a single atomic
+upload (default limit: 20 MiB). References use the content SHA-256 as their version;
+reads use the ETag from lookup to reject an object changed before download.
+Bucket versioning is optional. The caller owns the S3 client; the store does not
+require `Close`. As with `FileStore`, callers must supply an authorized namespace.
 
 ## Local filesystem setup
 
