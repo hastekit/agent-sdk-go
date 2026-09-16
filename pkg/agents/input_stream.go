@@ -2,6 +2,7 @@ package agents
 
 import (
 	"fmt"
+	"github.com/hastekit/agent-sdk-go/pkg/attachments"
 	"strings"
 
 	"github.com/hastekit/agent-sdk-go/pkg/agents/history"
@@ -33,7 +34,8 @@ func publishInputMessages(publish func(*responses.ResponseChunk), bundles ...his
 		}
 		for i, msg := range bundle.Messages {
 			id, role, text := inputMessageText(msg)
-			if text == "" {
+			parts := inputMessageReferences(msg)
+			if text == "" && len(parts) == 0 {
 				continue
 			}
 			if id == "" {
@@ -50,10 +52,11 @@ func publishInputMessages(publish func(*responses.ResponseChunk), bundles ...his
 			}
 			publish(&responses.ResponseChunk{
 				OfInputMessage: &responses.ChunkInputMessage[constants.ChunkTypeInputMessage]{
-					MessageID: id,
-					Role:      role,
-					Content:   text,
-					SenderID:  bundle.SenderID,
+					MessageID:    id,
+					Role:         role,
+					Content:      text,
+					ContentParts: parts,
+					SenderID:     bundle.SenderID,
 				},
 			})
 		}
@@ -89,4 +92,33 @@ func inputContentText(content responses.InputContent) string {
 		}
 	}
 	return strings.Join(parts, "\n")
+}
+
+// Announce only owned references, never inline bytes or provider URLs.
+func inputMessageReferences(msg responses.InputMessageUnion) responses.InputContent {
+	var content responses.InputContent
+	if msg.OfInputMessage != nil {
+		content = msg.OfInputMessage.Content
+	}
+	if msg.OfEasyInput != nil {
+		content = msg.OfEasyInput.Content.OfInputMessageList
+	}
+	var out responses.InputContent
+	hasRef := false
+	for _, c := range content {
+		switch {
+		case c.OfInputText != nil:
+			out = append(out, responses.InputContentUnion{OfInputText: c.OfInputText})
+		case c.OfInputImage != nil && c.OfInputImage.FileID != nil && attachments.IsFileID(*c.OfInputImage.FileID):
+			hasRef = true
+			out = append(out, responses.InputContentUnion{OfInputImage: &responses.InputImageContent{FileID: c.OfInputImage.FileID, Detail: c.OfInputImage.Detail}})
+		case c.OfInputFile != nil && c.OfInputFile.FileID != nil && attachments.IsFileID(*c.OfInputFile.FileID):
+			hasRef = true
+			out = append(out, responses.InputContentUnion{OfInputFile: &responses.InputFileContent{FileID: c.OfInputFile.FileID, FileName: c.OfInputFile.FileName}})
+		}
+	}
+	if !hasRef {
+		return nil
+	}
+	return out
 }

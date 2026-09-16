@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
+	"github.com/hastekit/agent-sdk-go/pkg/agui"
+	"github.com/hastekit/agent-sdk-go/pkg/attachments"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -93,4 +95,29 @@ func TestEmbeddedBundleCallsStopEndpoint(t *testing.T) {
 		"bundle should read the run's stream id from the CUSTOM event")
 	assert.Contains(t, string(bundle), "/stop",
 		"bundle should call the stop endpoint rather than only aborting the stream")
+}
+
+func TestHandlerForwardsNamespaceResolverToAPIAndAttachments(t *testing.T) {
+	store, err := attachments.NewFileStore(t.TempDir(), attachments.FileStoreConfig{})
+	require.NoError(t, err)
+	defer store.Close()
+	calls := 0
+	a := agents.NewAgent(&agents.AgentOptions{Name: "Helper"})
+	h := Handler(registry{"Helper": a}, agui.WithAttachmentStore(store), agui.WithNamespaceResolver(func(r *http.Request) (string, error) {
+		calls++
+		return r.Header.Get("X-Test-Tenant"), nil
+	}))
+	req := httptest.NewRequest("GET", APIPrefix+"/agents/Helper/threads/shared/stream", nil)
+	req.Header.Set("X-Test-Tenant", "tenant")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	require.Equal(t, 204, w.Code)
+	require.Equal(t, agents.StreamIDForThread("tenant", "shared"), w.Header().Get("X-Stream-Id"))
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest("GET", "/attachments/missing", nil))
+	require.Equal(t, 400, w.Code) // malformed file ID, after namespace resolution
+	require.Equal(t, 2, calls)
+	// Static assets do not need namespace resolution.
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/", nil))
+	require.Equal(t, 2, calls)
 }

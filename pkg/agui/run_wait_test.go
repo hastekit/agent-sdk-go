@@ -107,22 +107,23 @@ func TestWatchThenRejoinPicksUpABackgroundTasksRun(t *testing.T) {
 	})
 	require.Equal(t, EventRunFinished, EventType(frames[len(frames)-1].event))
 
-	// Nothing is running now, so the client watches the namespace — the one
-	// long poll, which reports every conversation rather than only this one.
-	watched := make(chan FeedResponse, 1)
-	go func() {
-		watched <- getFeed(t, server.URL+"/agents/Helper/runs?wait=20s")
-	}()
+	// Capture a cursor before releasing the task. An empty cursor starts at
+	// request arrival, so starting the HTTP request in a goroutine is not a
+	// subscription barrier: the background run may publish before it arrives.
+	start := getFeed(t, server.URL+"/agents/Helper/runs?wait=0")
+	require.NotEmpty(t, start.Cursor)
 
-	// The task finishes, which wakes the agent on its own.
 	close(tool.release)
 
-	var seen FeedResponse
+	// Deliberately let the run start before polling. The saved cursor must
+	// recover its event even when the browser was between requests. The gate
+	// holds the run open for the subsequent stream rejoin.
 	select {
-	case seen = <-watched:
-	case <-time.After(20 * time.Second):
-		t.Fatal("the feed never saw the run a background task started")
+	case <-gate.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the background task did not start its follow-up run")
 	}
+	seen := getFeed(t, server.URL+"/agents/Helper/runs?wait=0&cursor="+start.Cursor)
 
 	require.NotEmpty(t, seen.Events)
 	assert.Equal(t, agents.RunEventStarted, seen.Events[0].Event)
@@ -132,7 +133,6 @@ func TestWatchThenRejoinPicksUpABackgroundTasksRun(t *testing.T) {
 	// And the client rejoins it, which is where the answer appears. The gate
 	// is held until the rejoin has had time to attach, then released so the
 	// run finishes and the stream closes under it.
-	<-gate.entered
 	go func() {
 		time.Sleep(300 * time.Millisecond)
 		close(gate.release)

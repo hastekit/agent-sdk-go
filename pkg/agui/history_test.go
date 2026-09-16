@@ -262,11 +262,12 @@ func TestHistoryToMessagesReasoningEmptySkipped(t *testing.T) {
 }
 
 func TestHistoryToMessagesImageGeneration(t *testing.T) {
+	ref := "attachment://0123456789abcdef0123456789abcdef?version=sha256"
 	rows := []history.ConversationMessage{{
 		Messages: []history.Message{
 			messages.New("agent", []responses.InputMessageUnion{
 				{OfImageGenerationCall: &responses.ImageGenerationCallMessage{
-					ID: "ig_1", OutputFormat: "png", Result: "BBBB",
+					ID: "ig_1", OutputFormat: "png", Result: ref,
 				}},
 			}),
 		},
@@ -275,7 +276,8 @@ func TestHistoryToMessagesImageGeneration(t *testing.T) {
 	out := HistoryToMessages(rows)
 	require.Len(t, out, 1)
 	assert.Equal(t, RoleAssistant, out[0].Role)
-	assert.Equal(t, "![generated image](data:image/png;base64,BBBB)", out[0].Content)
+	assert.Equal(t, "![generated image](/attachments/0123456789abcdef0123456789abcdef?version=sha256)", out[0].Content)
+	assert.NotContains(t, out[0].Content, "attachment://", "clients receive the authorized HTTP route")
 }
 
 // A task's result is delivered as a user turn — the only shape a provider

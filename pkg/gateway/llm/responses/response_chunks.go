@@ -703,10 +703,12 @@ type ChunkBackgroundTask[T any] struct {
 // not for replaying the message into a provider — history is where the exact
 // bundle lives.
 type ChunkInputMessage[T any] struct {
-	Type      T      `json:"type"`
-	MessageID string `json:"message_id"`
-	Role      string `json:"role"`
-	Content   string `json:"content"`
+	// ContentParts carries text and owned references for multimodal user turns.
+	ContentParts InputContent `json:"content_parts,omitempty"`
+	Type         T            `json:"type"`
+	MessageID    string       `json:"message_id"`
+	Role         string       `json:"role"`
+	Content      string       `json:"content"`
 
 	// SenderID attributes the turn in a multi-participant thread; empty when
 	// the thread has only the one.

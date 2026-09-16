@@ -48,3 +48,9 @@ func (r *LocalRuntime) Run(ctx context.Context, agent *agents.Agent, in *agents.
 		return nil, ctx.Err()
 	}
 }
+
+// StreamBroker returns the broker configured for this runtime.
+func (r *LocalRuntime) StreamBroker() agents.StreamBroker { return r.broker }
+
+// RegisterAgent is a no-op because local execution needs no worker registration.
+func (r *LocalRuntime) RegisterAgent(options *agents.AgentOptions) error { return nil }

@@ -14,6 +14,12 @@ import (
 )
 
 func main() {
+	fileHistory, err := hastekit.OpenFileHistory("./conversations")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer fileHistory.Close()
+
 	client := hastekit.NewLLMClient([]hastekit.ProviderConfig{
 		{
 			ProviderName: hastekit.ProviderOpenAI,
@@ -28,21 +34,21 @@ func main() {
 
 	model := client.Model("OpenAI/gpt-4.1-mini")
 
-	agent1 := hastekit.NewAgent(&hastekit.AgentConfig{
+	agent1 := hastekit.MustNewAgent(&hastekit.AgentConfig{
 		Name:        "JokeAgent",
 		Instruction: hastekit.NewPrompt("You are joke teller"),
 		LLM:         model,
-		History:     hastekit.NewFileHistory("./conversations"),
+		History:     fileHistory,
 	})
 
-	agent2 := hastekit.NewAgent(&hastekit.AgentConfig{
+	agent2 := hastekit.MustNewAgent(&hastekit.AgentConfig{
 		Name:        "FactAgent",
 		Instruction: hastekit.NewPrompt("You are a fact teller"),
 		LLM:         model,
-		History:     hastekit.NewFileHistory("./conversations"),
+		History:     fileHistory,
 	})
 
-	routerAgent := hastekit.NewAgent(&hastekit.AgentConfig{
+	routerAgent := hastekit.MustNewAgent(&hastekit.AgentConfig{
 		Name:        "RouterAgent",
 		Instruction: hastekit.NewPrompt("You are router agent. You must not respond directly. Your role is only to delegate to other agents"),
 		LLM:         model,
@@ -50,7 +56,7 @@ func main() {
 			agents.NewHandoff(agent1.Name, "Use this agent to generate jokes", agent1),
 			agents.NewHandoff(agent2.Name, "Use this agent to generate facts", agent2),
 		},
-		History: hastekit.NewFileHistory("./conversations"),
+		History: fileHistory,
 	})
 
 	handle, err := routerAgent.Execute(context.Background(), &agents.AgentInput{

@@ -1,11 +1,12 @@
+import type { InputContent } from "@ag-ui/core";
 import {
   HttpAgent,
   randomUUID,
-  runHttpRequest,
   transformHttpEventStream,
 } from "@ag-ui/client";
 import type { Message, RunAgentInput } from "@ag-ui/core";
 import { stopRun, streamUrl } from "./api";
+import { resumableEvents } from "./resumable-stream";
 
 // rxjs is not a direct dependency; take the Observable type from the
 // helper's own signature rather than adding one for a type import.
@@ -95,7 +96,7 @@ export class StoppableHttpAgent extends HttpAgent {
   // pipeline then snapshots that empty list, so the first event it applies
   // replaces the transcript with just the rejoined run — the conversation
   // vanishes until reloaded. Re-seeding it below puts it back.
-  private readonly history: Message[];
+  private history: Message[];
 
   // Whether a run is going through this agent's own pipeline — one the user
   // started, or one the watch joined. The watch reads it to keep from
@@ -138,7 +139,15 @@ export class StoppableHttpAgent extends HttpAgent {
         if (missing.length === 0) return;
         return { messages: [...missing, ...messages] };
       },
-      onCustomEvent: ({ event }: any) => {
+      onCustomEvent: ({ event, messages }: any) => {
+        if (event?.name === "input_message" && event.value?.id) {
+          const incoming = event.value as Message;
+          const matches = (m: Message) => m.id === incoming.id || serverIdOf(m.id) === incoming.id;
+          this.steered = this.steered.map(m => matches(m) ? incoming : m);
+          return { messages: messages.some(matches)
+            ? messages.map((m: Message) => matches(m) ? incoming : m)
+            : [...messages, incoming] };
+        }
         if (event?.name === STREAM_ID_EVENT && event?.value?.streamId) {
           this.streamId = event.value.streamId as string;
         }
@@ -188,8 +197,9 @@ export class StoppableHttpAgent extends HttpAgent {
         const missing = this.steered.filter(
           (m) => !messages.some((seen) => seen.id === m.id)
         );
-        if (missing.length === 0) return;
-        return { messages: [...messages, ...missing] };
+        const older = this.history.filter(m => !messages.some(seen => seen.id === m.id));
+        if (missing.length === 0 && older.length === 0) return;
+        return { messages: [...older, ...messages, ...missing] };
       },
       // The id belongs to one run: a later stop must not reach back to a
       // finished one. The steered turns are likewise done — the next run
@@ -231,6 +241,14 @@ export class StoppableHttpAgent extends HttpAgent {
     return super.requestInit({ ...input, messages: newTurnOf(input.messages) });
   }
 
+  // Preserve fetched pages in both the visible list and future stream snapshots.
+  prependHistory(messages: Message[]): void {
+    const stored = new Set(this.history.map(m => m.id));
+    this.history = [...messages.filter(m => !stored.has(m.id)), ...this.history];
+    const visible = new Set(this.messages.map(m => m.id));
+    this.setMessages([...messages.filter(m => !visible.has(m.id)), ...this.messages]);
+  }
+
   // ── steer ──────────────────────────────────────────────────────────
   //
   // Sends a follow-up into the run that is already going: the server folds
@@ -252,28 +270,36 @@ export class StoppableHttpAgent extends HttpAgent {
   // and this request landing, the server starts a fresh run and streams it
   // instead of folding. Nothing is reading that response, so we drop it and
   // pick the run up on the thread's own stream, the same way a rejoin does.
-  async steer(text: string): Promise<void> {
+  async steer(text: string, parts: InputContent[] = []): Promise<void> {
     const trimmed = text.trim();
-    if (!trimmed) return;
+    if (!trimmed && !parts.length) return;
 
     // addMessage notifies subscribers, so the chat renders the turn at
     // once; the live run doesn't see it, hence `steered` above.
     const message: Message = {
       id: randomUUID(),
       role: "user",
-      content: trimmed,
+      content: parts.length ? [...(trimmed ? [{ type: "text" as const, text: trimmed }] : []), ...parts] : trimmed,
     };
     this.steered.push(message);
     this.addMessage(message);
 
-    const input = { ...this.prepareRunAgentInput(), messages: [message] };
-    const res = await fetch(this.url, this.requestInit(input));
+    const prepared = this.prepareRunAgentInput();
+    const input = { ...prepared, messages: this.fullHistory ? prepared.messages : [message] };
+    let res: Response;
+    try { res = await fetch(this.url, this.requestInit(input)); }
+    catch (error) {
+      this.steered = this.steered.filter(m => m.id !== message.id);
+      this.setMessages(this.messages.filter(m => m.id !== message.id));
+      throw error;
+    }
     if (res.status === 204) return;
 
     void res.body?.cancel();
     if (!res.ok) {
-      console.error("steer failed", res.status);
-      return;
+      this.steered = this.steered.filter(m => m.id !== message.id);
+      this.setMessages(this.messages.filter(m => m.id !== message.id));
+      throw new Error(`Message could not be sent (${res.status}).`);
     }
     void this.connectAgent();
   }
@@ -321,13 +347,14 @@ export class StoppableHttpAgent extends HttpAgent {
   // stream endpoint, which replays the run so far and then follows it
   // live. connectAgent() feeds the result through the same pipeline a
   // normal run uses, so messages land in the chat as they would have.
+  run(input: RunAgentInput): EventStream {
+    return resumableEvents(this.url, this.requestInit(input), streamUrl(this.agentName, this.threadId, 20));
+  }
+
   protected connect(_input: RunAgentInput): EventStream {
-    return transformHttpEventStream(
-      runHttpRequest(streamUrl(this.agentName, this.threadId), {
-        method: "GET",
-        headers: { Accept: "text/event-stream" },
-      })
-    );
+    return resumableEvents(streamUrl(this.agentName, this.threadId), {
+      method: "GET", headers: this.headers,
+    }, streamUrl(this.agentName, this.threadId, 20));
   }
 
   // ── joining a run nobody here started ──────────────────────────────
@@ -362,7 +389,7 @@ export class StoppableHttpAgent extends HttpAgent {
     }
     // Not awaited: the button responds now; the outcome shows up on the
     // run's own stream.
-    void stopRun(this.agentName, streamId).catch((e) => {
+    void stopRun(this.agentName, this.threadId, streamId).catch((e) => {
       console.error("stop request failed; aborting the stream instead", e);
       super.abortRun();
     });

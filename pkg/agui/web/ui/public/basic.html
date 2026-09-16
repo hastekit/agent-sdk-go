@@ -235,6 +235,17 @@
       threadId = t.thread_id;
       threadIsNew = false;
       history = data.messages || [];
+      // This minimal fallback renders the complete transcript. Follow pages
+      // explicitly so long conversations are not silently truncated.
+      let cursor = data.nextCursor;
+      while (cursor) {
+        const older = await fetch(API + "/agents/" + encodeURIComponent(agentSel.value) +
+          "/threads/" + encodeURIComponent(t.thread_id) + "/messages?cursor=" + encodeURIComponent(cursor));
+        if (!older.ok) throw new Error("HTTP " + older.status);
+        const page = await older.json();
+        history = [...(page.messages || []), ...history];
+        cursor = page.nextCursor;
+      }
       renderHistory(history);
       renderThreads();
     } catch (err) {

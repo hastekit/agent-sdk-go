@@ -47,8 +47,8 @@ func (t *ordinaryTool) Execute(_ context.Context, params *agents.ToolCall) (*age
 func TestRestateTool_KeepsTheBackgroundCapability(t *testing.T) {
 	broker := streambroker.NewMemoryStreamBroker()
 
-	background := newRestateTool(nil, newBgTool("index"), broker)
-	plain := newRestateTool(nil, &ordinaryTool{BaseTool: newBgTool("plain").BaseTool}, broker)
+	background := newRestateTool(nil, "main", newBgTool("index"), broker)
+	plain := newRestateTool(nil, "main", &ordinaryTool{BaseTool: newBgTool("plain").BaseTool}, broker)
 
 	_, isBackground := background.(agents.BackgroundTool)
 	assert.True(t, isBackground, "a tool that starts tasks stays one through the wrapper")
@@ -65,7 +65,7 @@ func TestRestateTool_KeepsTheBackgroundCapability(t *testing.T) {
 // thing this whole path exists to avoid.
 func TestRestateBackgroundTool_RefusesToWaitInTheRun(t *testing.T) {
 	broker := streambroker.NewMemoryStreamBroker()
-	wrapper := newRestateTool(nil, newBgTool("index"), broker).(agents.BackgroundTool)
+	wrapper := newRestateTool(nil, "main", newBgTool("index"), broker).(agents.BackgroundTool)
 
 	_, err := wrapper.AwaitTask(context.Background(), agents.BackgroundTaskRef{}, nil)
 	require.Error(t, err)
@@ -89,7 +89,7 @@ func backgroundService() *BackgroundTaskService {
 }
 
 func TestBackgroundTaskService_FindsTheTool(t *testing.T) {
-	tool, err := backgroundService().backgroundTool(&BackgroundTaskInput{AgentName: "main", ToolName: "index"})
+	tool, err := backgroundService().backgroundTool(&BackgroundTaskInput{AgentName: "main", ToolKey: "main/index"})
 
 	require.NoError(t, err)
 	require.NotNil(t, tool)
@@ -109,9 +109,9 @@ func TestBackgroundTaskService_ReportsWhatItCannotFind(t *testing.T) {
 		in    *BackgroundTaskInput
 		wants string
 	}{
-		{"unknown agent", &BackgroundTaskInput{AgentName: "other", ToolName: "index"}, "agent not found"},
-		{"unknown tool", &BackgroundTaskInput{AgentName: "main", ToolName: "missing"}, "not found on agent"},
-		{"tool cannot wait", &BackgroundTaskInput{AgentName: "main", ToolName: "plain"}, "does not wait for background tasks"},
+		{"unknown agent", &BackgroundTaskInput{AgentName: "main", ToolKey: "other/index"}, "not registered"},
+		{"unknown tool", &BackgroundTaskInput{AgentName: "main", ToolKey: "main/missing"}, "not registered"},
+		{"tool cannot wait", &BackgroundTaskInput{AgentName: "main", ToolKey: "main/plain"}, "not registered"},
 	}
 
 	for _, tc := range cases {
@@ -145,21 +145,8 @@ func TestBackgroundToolName(t *testing.T) {
 // for the tool on the owner would not find it.
 func TestBackgroundTaskService_FindsTheToolOnTheAgentThatOwnsIt(t *testing.T) {
 	tool, err := backgroundService().backgroundTool(&BackgroundTaskInput{
-		AgentName:     "main",
-		ToolAgentName: "specialist",
-		ToolName:      "render",
-	})
-
-	require.NoError(t, err)
-	require.NotNil(t, tool)
-}
-
-// Without a handoff there is only one agent, and older inputs carry no
-// ToolAgentName at all.
-func TestBackgroundTaskService_FallsBackToTheRunsAgent(t *testing.T) {
-	tool, err := backgroundService().backgroundTool(&BackgroundTaskInput{
 		AgentName: "main",
-		ToolName:  "index",
+		ToolKey:   "specialist/render",
 	})
 
 	require.NoError(t, err)

@@ -45,3 +45,10 @@ func (r *TemporalRuntime) Run(ctx context.Context, agent *agents.Agent, in *agen
 
 	return &result, nil
 }
+
+// StreamBroker returns the broker configured for this runtime.
+func (r *TemporalRuntime) StreamBroker() agents.StreamBroker { return r.broker }
+
+// RegisterAgent is a no-op for this invocation-only runtime. Worker configurations
+// are registered separately; the top-level SDK runtime manages that registration.
+func (r *TemporalRuntime) RegisterAgent(options *agents.AgentOptions) error { return nil }

@@ -36,7 +36,7 @@ func main() {
 		HttpClient: http.DefaultClient,
 	}
 
-	agent := hastekit.NewAgent(&hastekit.AgentConfig{
+	agent := hastekit.MustNewAgent(&hastekit.AgentConfig{
 		Name:        "Hello world agent",
 		Instruction: hastekit.NewPrompt("You are helpful assistant."),
 		LLM:         model,

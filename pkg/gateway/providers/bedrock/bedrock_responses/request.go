@@ -585,9 +585,11 @@ func undeliverable(kind, reason string) ContentBlock {
 }
 
 // documentFormat is Converse's own vocabulary, which is a bare word rather
-// than a media type. pdf is the fallback because it is what these are.
+// than a media type. Preserve unknown extensions for the provider to handle;
+// only files with no extension retain the legacy PDF default.
 func documentFormat(filename string) string {
-	switch strings.ToLower(strings.TrimPrefix(filepath.Ext(filename), ".")) {
+	extension := strings.ToLower(strings.TrimPrefix(filepath.Ext(filename), "."))
+	switch extension {
 	case "csv":
 		return "csv"
 	case "doc":
@@ -605,6 +607,9 @@ func documentFormat(filename string) string {
 	case "xlsx":
 		return "xlsx"
 	default:
+		if extension != "" {
+			return extension
+		}
 		return "pdf"
 	}
 }

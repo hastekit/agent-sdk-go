@@ -200,7 +200,7 @@ type scriptedLLM struct {
 	requests []*responses.Request
 }
 
-func (s *scriptedLLM) NewStreamingResponses(_ context.Context, in *responses.Request, _ func(*responses.ResponseChunk)) (*responses.Response, error) {
+func (s *scriptedLLM) NewStreamingResponses(_ context.Context, _ *agents.ModelCall, in *responses.Request, _ func(*responses.ResponseChunk)) (*responses.Response, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.requests = append(s.requests, in)
@@ -263,7 +263,7 @@ func TestNewBackgroundTool_DeliversItsResultToTheAgent(t *testing.T) {
 	release := make(chan struct{})
 	tool, _, _ := indexTool(t, release, nil)
 
-	agent := hastekit.NewAgent(&hastekit.AgentConfig{
+	agent := agents.NewAgent(&agents.AgentOptions{
 		Name:  "main",
 		Tools: []hastekit.Tool{tool},
 	}).WithLLM(llm)

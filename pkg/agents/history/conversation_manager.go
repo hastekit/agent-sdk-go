@@ -124,6 +124,7 @@ type ConversationRunManager struct {
 	namespace      string
 	conversationId string
 	runId          string
+	requestedRunID string
 	previousRunId  string
 	msgIdToRunId   map[string]string
 	threadId       string
@@ -235,9 +236,13 @@ func NewRun(ctx context.Context, cm *CommonConversationManager, namespace string
 	// Store the run id
 	cr.runId = runID
 
-	// Run the options
+	// Apply options after restoring pending state, so a new execution ID can
+	// continue an approval without losing the tool state it is resuming.
 	for _, o := range options {
 		o(cr)
+	}
+	if cr.requestedRunID != "" {
+		cr.runId = cr.requestedRunID
 	}
 
 	if cr.conversationId == "" {
@@ -248,6 +253,12 @@ func NewRun(ctx context.Context, cm *CommonConversationManager, namespace string
 }
 
 type RunOption func(manager *ConversationRunManager)
+
+// WithRunID selects a caller-provided execution ID. It must be new in this
+// namespace. Omit it to retain generated IDs and legacy paused-run continuation.
+func WithRunID(id string) RunOption {
+	return func(cr *ConversationRunManager) { cr.requestedRunID = id }
+}
 
 func WithConversationID(cid string) RunOption {
 	return func(cm *ConversationRunManager) {
@@ -814,4 +825,13 @@ func (cm *ConversationRunManager) nextRunID(ctx context.Context) string {
 		return uuid.NewString()
 	}
 	return cm.ConversationPersistenceAdapter.NewRunID(ctx)
+}
+
+// Close releases the persistence adapter if it owns resources. Call only after
+// all users of this manager have stopped. Shared adapters must have one owner.
+func (cm *CommonConversationManager) Close() error {
+	if closer, ok := cm.ConversationPersistenceAdapter.(interface{ Close() error }); ok {
+		return closer.Close()
+	}
+	return nil
 }

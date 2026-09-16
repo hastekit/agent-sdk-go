@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/hastekit/agent-sdk-go/pkg/agents"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/history"
 	"go.temporal.io/sdk/workflow"
 )
@@ -13,9 +14,9 @@ type TemporalHistory struct {
 	wrappedPersistence history.ConversationPersistenceAdapter
 }
 
-func NewTemporalConversationPersistence(wrappedPersistence history.ConversationPersistenceAdapter) *TemporalHistory {
+func NewTemporalConversationPersistence(wrappedPersistence history.ConversationPersistenceAdapter, middlewares ...agents.HistoryMiddleware) *TemporalHistory {
 	return &TemporalHistory{
-		wrappedPersistence: wrappedPersistence,
+		wrappedPersistence: agents.WrapHistoryPersistence(wrappedPersistence, middlewares...),
 	}
 }
 

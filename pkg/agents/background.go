@@ -38,12 +38,6 @@ type BackgroundTaskRef struct {
 	// After a handoff that is not the agent whose loop called the tool.
 	AgentName string `json:"agent_name"`
 
-	// ToolAgentName is the agent the tool itself is configured on, which after
-	// a handoff is the specialist rather than the owner. A runtime that has to
-	// find the tool again — Restate looks it up by agent — needs this one, not
-	// AgentName.
-	ToolAgentName string `json:"tool_agent_name,omitempty"`
-
 	Namespace string `json:"namespace"`
 	ThreadID  string `json:"thread_id"`
 
@@ -291,16 +285,21 @@ func newBackgroundSupervisor(agent *Agent) *backgroundSupervisor {
 
 var _ BackgroundRunner = (*backgroundSupervisor)(nil)
 
-// StartTask implements BackgroundRunner by holding the wait in a goroutine.
+// StartTask holds the wait in a goroutine. The tool already carries its
+// execution middleware; the supervisor only owns task lifecycle and delivery.
 func (s *backgroundSupervisor) StartTask(_ context.Context, tool BackgroundTool, ref BackgroundTaskRef) error {
-	s.startFor(s.agent, tool, ref)
+	if s == nil || s.agent == nil {
+		return nil
+	}
+	s.startTask(tool, ref)
 	return nil
 }
 
-// startFor begins waiting on a task, unless it is already being waited on — a
+// startTask begins waiting on a task, unless it is already being waited on — a
 // tool that answers with the same task id twice gets one wait, not two.
-func (s *backgroundSupervisor) startFor(agent *Agent, tool BackgroundTool, ref BackgroundTaskRef) {
-	if s == nil || agent == nil || tool == nil || ref.TaskID == "" {
+func (s *backgroundSupervisor) startTask(tool BackgroundTool, ref BackgroundTaskRef) {
+	agent := s.agent
+	if tool == nil || ref.TaskID == "" {
 		return
 	}
 
@@ -467,7 +466,6 @@ func (e *Agent) startBackgroundTask(ctx context.Context, in *AgentInput, runID s
 		CallID:         pe.ToolCall.CallID,
 		ToolName:       pe.ToolName,
 		AgentName:      owner.Name,
-		ToolAgentName:  e.Name,
 		Namespace:      in.Namespace,
 		ThreadID:       in.ThreadID,
 		TaskStreamID:   StreamIDForTask(in.Namespace, in.ThreadID, taskID),
@@ -485,6 +483,12 @@ func (e *Agent) startBackgroundTask(ctx context.Context, in *AgentInput, runID s
 		StartedAt: time.Now().UTC(),
 	})
 
+	// Bind while the producing agent and tool are already in hand, including
+	// tools discovered through MCP. Durable agents have no workflow-side middlewares:
+	// their real tools are bound on the worker, and their proxies pass through.
+	if len(e.options.Middlewares) > 0 {
+		tool = WrapBackgroundTool(e.Name, tool, ToolCallMiddlewaresOf(e.options.Middlewares)...)
+	}
 	if err := owner.background.StartTask(ctx, tool, ref); err != nil {
 		return err
 	}

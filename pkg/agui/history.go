@@ -2,6 +2,7 @@ package agui
 
 import (
 	"encoding/json"
+	"fmt"
 	"regexp"
 	"strings"
 
@@ -52,15 +53,20 @@ func HistoryToMessages(rows []history.ConversationMessage) []Message {
 	// emitting both verbatim would collide and the chat would drop one
 	// (the tool call/result wouldn't render). Regenerate on collision.
 	seen := map[string]bool{}
+	var runID string
+	var ordinal int
 	uniq := func(id string) string {
+		ordinal++
 		if id == "" || seen[id] {
-			id = "m_" + uuid.NewString()
+			id = "m_" + uuid.NewSHA1(uuid.NameSpaceOID, []byte(fmt.Sprintf("%s:%d:%s", runID, ordinal, id))).String()
 		}
 		seen[id] = true
 		return id
 	}
 
 	for _, row := range rows {
+		runID, ordinal = row.RunID, 0
+		rowStart := len(out)
 		for _, bundle := range row.Messages {
 			// A task's result arrives as a user turn because that is the only
 			// shape a provider will take it in — the call that started the
@@ -76,25 +82,29 @@ func HistoryToMessages(rows []history.ConversationMessage) []Message {
 				case msg.OfEasyInput != nil:
 					m := msg.OfEasyInput
 					text := stripContextBlocks(easyInputText(m.Content))
-					if text == "" {
+					parts := historyContentParts(m.Content.OfInputMessageList)
+					if text == "" && parts == nil {
 						continue
 					}
 					out = append(out, Message{
-						ID:      uniq(m.ID),
-						Role:    roleOrUser(string(m.Role)),
-						Content: text,
+						ID:           uniq(m.ID),
+						Role:         roleOrUser(string(m.Role)),
+						Content:      text,
+						ContentParts: parts,
 					})
 
 				case msg.OfInputMessage != nil:
 					m := msg.OfInputMessage
 					text := stripContextBlocks(inputContentText(m.Content))
-					if text == "" {
+					parts := historyContentParts(m.Content)
+					if text == "" && parts == nil {
 						continue
 					}
 					out = append(out, Message{
-						ID:      uniq(m.ID),
-						Role:    roleOrUser(string(m.Role)),
-						Content: text,
+						ID:           uniq(m.ID),
+						Role:         roleOrUser(string(m.Role)),
+						Content:      text,
+						ContentParts: parts,
 					})
 
 				case msg.OfOutputMessage != nil:
@@ -122,7 +132,7 @@ func HistoryToMessages(rows []history.ConversationMessage) []Message {
 					// Coalesce onto the previous assistant message when
 					// it's a tool-call-only carrier; otherwise emit a
 					// fresh one.
-					if n := len(out); n > 0 && out[n-1].Role == RoleAssistant && out[n-1].Content == "" {
+					if n := len(out); n > rowStart && out[n-1].Role == RoleAssistant && out[n-1].Content == "" {
 						out[n-1].ToolCalls = append(out[n-1].ToolCalls, tc)
 					} else {
 						out = append(out, Message{
@@ -165,18 +175,21 @@ func HistoryToMessages(rows []history.ConversationMessage) []Message {
 					})
 
 				case msg.OfImageGenerationCall != nil:
-					// A generated image is stored with its base64 result.
-					// Surface it as an assistant message carrying a
-					// markdown image (data URL) — the same shape the live
-					// stream emits — so it renders on history reload.
+					// Generated-image history stores an application-owned
+					// reference in Result. Render its authorized attachment
+					// URL; live raw chunks still render their data URL.
 					m := msg.OfImageGenerationCall
 					if m.Result == "" {
+						continue
+					}
+					markdown := imageMarkdown(m.Result, m.OutputFormat)
+					if markdown == "" {
 						continue
 					}
 					out = append(out, Message{
 						ID:      uniq(m.ID),
 						Role:    RoleAssistant,
-						Content: imageMarkdown(m.Result, m.OutputFormat),
+						Content: markdown,
 					})
 				}
 			}

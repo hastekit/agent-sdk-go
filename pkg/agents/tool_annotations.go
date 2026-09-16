@@ -62,7 +62,7 @@ func (a *ToolAnnotations) IsDestructive() bool {
 // or overwrite state, as opposed to IsDestructive's "assume the worst when
 // nothing was said".
 //
-// This is usually the one a hook gating tool calls wants: an unannotated tool
+// This is usually the one a middleware gating tool calls wants: an unannotated tool
 // has made no claim, and gating on the absence of a claim would put every tool
 // written before annotations behind a prompt.
 func (a *ToolAnnotations) IsDeclaredDestructive() bool {

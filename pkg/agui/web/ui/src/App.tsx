@@ -10,10 +10,12 @@ import {
 import {
   CopilotKitProvider,
   CopilotChat,
-  CopilotChatInput,
   useDefaultRenderTool,
   useInterrupt,
 } from "@copilotkit/react-core/v2";
+import { AttachmentMessageView } from "./attachment-message";
+import { AttachmentInput } from "./attachment-input";
+import type { InputContent } from "@ag-ui/core";
 import { StoppableHttpAgent } from "./stoppable-agent";
 import type { Message as AGUIMessage } from "@ag-ui/core";
 import {
@@ -50,6 +52,7 @@ const FEED_RETRY_MS = 2000;
 interface Active {
   threadId: string;
   initialMessages: AGUIMessage[];
+  nextCursor?: string;
   // What the thread's last run left outstanding — a decision it is waiting
   // on, tasks still working. Null for a settled thread, and for a new one.
   run: ThreadRunState | null;
@@ -149,11 +152,13 @@ export default function App() {
   // Likewise the agent: useMemo replaces it whenever the thread changes, and
   // the feed loop must not be torn down and restarted each time.
   const agentRef = useRef<StoppableHttpAgent | null>(null);
+ const [attachmentsEnabled, setAttachmentsEnabled] = useState(false);
 
   // Load the agent list once.
   useEffect(() => {
     fetchAgents()
-      .then(({ agents: names, fullHistory }) => {
+      .then(({ agents: names, fullHistory, attachmentsEnabled }) => {
+ setAttachmentsEnabled(attachmentsEnabled);
         setAgents(names);
         setFullHistory(fullHistory);
         if (!names.length) {
@@ -309,7 +314,6 @@ export default function App() {
             agentName,
             cursor,
             FEED_WAIT_SECONDS,
-            undefined,
             controller.signal
           );
           if (stopped) return;
@@ -432,25 +436,34 @@ export default function App() {
   // Steering: a turn typed while the agent is working folds into the run
   // in flight (see StoppableHttpAgent.steer). Memoised so the composer
   // isn't remounted on every render.
-  const steer = useCallback((text: string) => void agent?.steer(text), [agent]);
+  const steer = useCallback((text: string, parts: InputContent[] = []) => agent?.steer(text, parts), [agent]);
   // Cast: the slot type expects CopilotChatInput's own static sub-slots on
   // whatever it is handed. This wrapper only changes behaviour and renders
   // the real composer, so it has none of them and needs none.
   const inputSlot = useMemo(
-    () => ((p: any) => <SteerableInput {...p} onSteer={steer} />) as any,
-    [steer]
+    () => ((p: any) => <SteerableInput {...p} onSteer={steer} attachmentsEnabled={attachmentsEnabled} />) as any,
+    [steer, attachmentsEnabled]
   );
 
   const openThread = useCallback(
     async (threadId: string) => {
       try {
-        const { messages, run } = await fetchMessages(agentName, threadId);
-        setActive({ threadId, initialMessages: messages, run });
+        let { messages, run, nextCursor } = await fetchMessages(agentName, threadId);
+        // Full-history mode sends the transcript back to a stateless backend.
+        // Preserve that contract even though the history API is paginated.
+        if (fullHistory) {
+          while (nextCursor) {
+            const page = await fetchMessages(agentName, threadId, nextCursor);
+            messages = [...page.messages, ...messages];
+            nextCursor = page.nextCursor;
+          }
+        }
+        setActive({ threadId, initialMessages: messages, run, nextCursor });
       } catch (e) {
         setError(String(e));
       }
     },
-    [agentName]
+    [agentName, fullHistory]
   );
 
   const selectThread = useCallback(
@@ -546,7 +559,7 @@ export default function App() {
               </div>
             )}
             <TrayContext.Provider value={tray}>
-              <div className="chat-inner">
+              <HistoryPager key={`${agentName}:${active.threadId}`} agent={agent!} agentName={agentName} threadId={active.threadId} initialCursor={active.nextCursor ?? ""}>
                 <CopilotChat
                   agentId={agentName}
                   threadId={active.threadId}
@@ -556,8 +569,9 @@ export default function App() {
                       "The agent can make mistakes. Check important info.",
                   }}
                   input={inputSlot}
+                  messageView={AttachmentMessageView as any}
                 />
-              </div>
+              </HistoryPager>
             </TrayContext.Provider>
           </div>
         </CopilotKitProvider>
@@ -566,43 +580,60 @@ export default function App() {
   );
 }
 
+// Older pages are prepended without rebuilding the agent or disconnecting its run.
+function HistoryPager({ agent, agentName, threadId, initialCursor, children }: {
+  agent: StoppableHttpAgent; agentName: string; threadId: string;
+  initialCursor: string; children: React.ReactNode;
+}) {
+  const [cursor, setCursor] = useState(initialCursor);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const busy = useRef(false);
+  const alive = useRef(true);
+  const scrollArea = useRef<HTMLElement | null>(null);
+  useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
+  const load = async () => {
+    if (!cursor || busy.current) return;
+    busy.current = true; setLoading(true); setError("");
+    try {
+      const page = await fetchMessages(agentName, threadId, cursor);
+      if (!alive.current) return;
+      const el = scrollArea.current;
+      const height = el?.scrollHeight ?? 0;
+      const top = el?.scrollTop ?? 0;
+      agent.prependHistory(page.messages);
+      setCursor(page.nextCursor);
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        if (alive.current && el) el.scrollTop = top + el.scrollHeight - height;
+      }));
+    } catch (e) {
+      if (alive.current) setError(String(e));
+    } finally {
+      busy.current = false;
+      if (alive.current) setLoading(false);
+    }
+  };
+  return <div className="chat-inner history-pager">
+    {cursor && <div className="history-controls">
+      <button disabled={loading} onClick={() => void load()}>{loading ? "Loading older messages…" : error ? "Retry loading older messages" : "Load older messages"}</button>
+      {error && <span role="alert">{error}</span>}
+    </div>}
+    <div className="history-chat" onScrollCapture={e => {
+      const el = e.target as HTMLElement;
+      if (el.tagName === "TEXTAREA" || el.scrollHeight <= el.clientHeight) return;
+      scrollArea.current = el;
+      if (el.scrollTop < 80 && !error) void load();
+    }}>{children}</div>
+  </div>;
+}
+
 // ── Composer ───────────────────────────────────────────────
 
-// SteerableInput is the composer with one change: while a run is in
-// flight, typing turns Send back into Send — the text folds into the
-// running turn instead of stopping it. With an empty box the button stays
-// Stop, so nothing is taken away.
-//
-// Done by telling CopilotChatInput the run isn't in flight rather than by
-// intercepting the click: `isProcessing` is what makes it draw the square
-// AND what routes both the button and the Enter key to onStop, so flipping
-// it fixes the icon and the keyboard in one move. onSubmitMessage then
-// routes the text to the run that is actually running.
+// Keep the task/approval tray above the attachment-aware composer.
 function SteerableInput(props: any) {
-  // onSteer is ours; CopilotChatInput spreads what it doesn't recognise
-  // onto its DOM node.
-  const { onSteer, ...inputProps } = props;
   const tray = useContext(TrayContext);
+  return <><ComposerTray tray={tray} /><AttachmentInput {...props} /></>;
 
-  const hasText = ((props.value ?? "") as string).trim().length > 0;
-  const steering = !!props.isRunning && !!onSteer && hasText;
-
-  return (
-    <>
-      <ComposerTray tray={tray} />
-      <CopilotChatInput
-        {...inputProps}
-        isRunning={props.isRunning && !steering}
-        onSubmitMessage={(text: string) => {
-          if (props.isRunning && onSteer && text.trim()) {
-            onSteer(text);
-            return;
-          }
-          props.onSubmitMessage?.(text);
-        }}
-      />
-    </>
-  );
 }
 
 // ComposerTray is the one place the chat says what it is waiting on — a tool

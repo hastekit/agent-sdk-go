@@ -32,6 +32,12 @@ func GetUserName(ctx context.Context, in GetUserNameInput) (GetUserNameOutput, e
 }
 
 func main() {
+	fileHistory, err := hastekit.OpenFileHistory("./conversations")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer fileHistory.Close()
+
 	client := hastekit.NewLLMClient([]hastekit.ProviderConfig{
 		{
 			ProviderName: hastekit.ProviderOpenAI,
@@ -46,8 +52,8 @@ func main() {
 
 	model := client.Model("OpenAI/gpt-4.1-mini")
 
-	hist := hastekit.NewFileHistory("./conversations")
-	agent := hastekit.NewAgent(&hastekit.AgentConfig{
+	hist := fileHistory
+	agent := hastekit.MustNewAgent(&hastekit.AgentConfig{
 		Name:        "Hello world agent",
 		Instruction: hastekit.NewPrompt("You are a helpful assistant. Use the get_user_name tool to get the user's name and greet them."),
 		LLM:         model,

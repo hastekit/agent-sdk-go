@@ -45,11 +45,10 @@ func StopWatcherFrom(broker StreamBroker) StopWatcher {
 // streamID is stopped, so work already in flight can unwind rather than
 // finishing into a run nobody is waiting for.
 //
-// This is the streaming counterpart of RunStoppable. A streamed model call
-// needs no abandon-after-grace: it is read chunk by chunk in this process, and
-// the reader gives up on the context itself — there is no opaque callee to
-// outlast. Cancelling also reaches the provider's own request, which is what
-// actually stops the tokens being generated and billed.
+// This is the streaming counterpart of RunStoppable. Model calls unwind
+// cooperatively: the stream reader watches the context, and middleware must
+// honor it too. Abandoning the chain could leave streaming callbacks writing
+// after a durable step returns. Cancellation also reaches the provider request.
 //
 // With no watcher or no stream, the context is returned unchanged (with a
 // no-op cancel), so a caller can wrap unconditionally.
@@ -73,25 +72,6 @@ func StopCancelContext(ctx context.Context, watcher StopWatcher, streamID string
 		cancel()
 		release()
 	}
-}
-
-// RunStoppableTool runs one tool call so that stopping the run stops the
-// work. It is RunStoppable keyed on the call's own stream.
-func RunStoppableTool(
-	ctx context.Context,
-	watcher StopWatcher,
-	grace time.Duration,
-	params *ToolCall,
-	fn func(ctx context.Context, params *ToolCall) (*ToolCallResponse, error),
-) (*ToolCallResponse, error) {
-	streamID := ""
-	if params != nil {
-		streamID = params.StreamID
-	}
-
-	return RunStoppable(ctx, watcher, grace, streamID, func(callCtx context.Context) (*ToolCallResponse, error) {
-		return fn(callCtx, params)
-	})
 }
 
 // RunStoppable runs fn so that stopping the run stops the work: it cancels

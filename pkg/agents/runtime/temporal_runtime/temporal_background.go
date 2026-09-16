@@ -187,7 +187,8 @@ func NewTemporalBackgroundTask(tool agents.BackgroundTool, broker agents.StreamB
 // the tool reports goes straight to the broker, on the task's own stream.
 func (t *TemporalBackgroundTask) AwaitTask(ctx context.Context, ref agents.BackgroundTaskRef) (agents.BackgroundResult, error) {
 	progress := agents.NewStreamProgressReporter(t.broker, ref.TaskStreamID, ref.CallID, ref.ToolName)
-	return t.tool.AwaitTask(ctx, ref, progress)
+	result, err := t.tool.AwaitTask(ctx, ref, progress)
+	return result, cancellationError(err)
 }
 
 // TemporalBackgroundDelivery holds the broker for the two activities that

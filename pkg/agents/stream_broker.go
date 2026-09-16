@@ -207,3 +207,10 @@ func (e *Agent) publishRunEvent(ctx context.Context, event string, in *AgentInpu
 			slog.String("event", event), slog.String("thread_id", in.ThreadID), slog.Any("error", err))
 	}
 }
+
+// StreamReplayReader provides a read-only snapshot for validating SSE resume
+// cursors and replaying completed runs. Retention follows the broker's limits.
+// MemoryStreamBroker and RedisStreamBroker implement this optional capability.
+type StreamReplayReader interface {
+	Replay(ctx context.Context, channel string) ([]*responses.ResponseChunk, error)
+}

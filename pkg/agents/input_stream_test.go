@@ -53,9 +53,9 @@ type llmWithSideEffect struct {
 	before func(call int)
 }
 
-func (l *llmWithSideEffect) NewStreamingResponses(ctx context.Context, in *responses.Request, cb func(chunk *responses.ResponseChunk)) (*responses.Response, error) {
+func (l *llmWithSideEffect) NewStreamingResponses(ctx context.Context, call *agents.ModelCall, in *responses.Request, cb func(chunk *responses.ResponseChunk)) (*responses.Response, error) {
 	l.before(l.inner.callCount())
-	return l.inner.NewStreamingResponses(ctx, in, cb)
+	return l.inner.NewStreamingResponses(ctx, call, in, cb)
 }
 
 // Where a steering turn appears is the whole point.

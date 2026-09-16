@@ -116,6 +116,35 @@ func (c *LLMClient) NewStreamingResponses(ctx context.Context, in *responses.Req
 	return c.LLMGatewayAdapter.NewStreamingResponses(ctx, providerName, c.getKey(ctx, providerName), in)
 }
 
+// NewStreamingResponsesForModel explicitly routes one call through this client's
+// adapter and config store. A key bound to a different provider is never reused.
+func (c *LLMClient) NewStreamingResponsesForModel(ctx context.Context, target string, in *responses.Request) (chan *responses.ResponseChunk, error) {
+	parts := strings.SplitN(target, "/", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return nil, errors.New("model target must be Provider/model")
+	}
+	provider := llm.ProviderName(parts[0])
+	key := c.key
+	if provider != c.provider {
+		key = ""
+	}
+	if key == "" {
+		if c.configStore == nil {
+			return nil, errors.New("no provider config store for model target")
+		}
+		cfg, err := c.configStore.GetProviderConfig(ctx, provider, ProviderConfigKeyFromContext(ctx))
+		if err != nil {
+			return nil, err
+		}
+		key = SelectAPIKey(cfg)
+	}
+	prepared := *in
+	prepared.Model = parts[1]
+	prepared.Stream = utils2.Ptr(true)
+	prepared.Store = utils2.Ptr(false)
+	return c.LLMGatewayAdapter.NewStreamingResponses(ctx, provider, key, &prepared)
+}
+
 func (c *LLMClient) NewEmbedding(ctx context.Context, in *embeddings.Request) (*embeddings.Response, error) {
 	providerName, model, err := c.getProviderAndModelName(in.Model)
 	if err != nil {

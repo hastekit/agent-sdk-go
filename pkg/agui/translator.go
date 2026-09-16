@@ -2,8 +2,10 @@ package agui
 
 import (
 	"encoding/json"
+	"sort"
 	"time"
 
+	"github.com/hastekit/agent-sdk-go/pkg/attachments"
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
 )
 
@@ -66,6 +68,9 @@ type Translator struct {
 	// run.created chunks (shouldn't happen but defensive) don't
 	// re-emit.
 	runStarted bool
+
+	// An image may appear in both output_item.done and response.completed.
+	emittedImageIDs map[string]bool
 }
 
 // NewTranslator returns a fresh translator for one run.
@@ -76,6 +81,7 @@ func NewTranslator(threadID, runID string) *Translator {
 		openToolCallsByItemID: map[string]string{},
 		toolCallNamesByID:     map[string]string{},
 		openSteps:             map[string]bool{},
+		emittedImageIDs:       map[string]bool{},
 	}
 }
 
@@ -220,7 +226,7 @@ func (t *Translator) Translate(chunk *responses.ResponseChunk) []Event {
 				BaseEvent: baseNow(),
 				// "on_interrupt" is CopilotKit's useInterrupt event
 				// name and the de-facto AG-UI convention; LangGraph
-				// follows it too. The hook only fires after the
+				// follows it too. The middleware only fires after the
 				// matching RUN_FINISHED (onRunFinalized), so the
 				// emission order below (event → RUN_FINISHED) is
 				// load-bearing.
@@ -228,7 +234,7 @@ func (t *Translator) Translate(chunk *responses.ResponseChunk) []Event {
 				Value: map[string]any{
 					// "kind" disambiguates our interrupt subtype for
 					// frontends that handle multiple agent types under
-					// the same useInterrupt hook. It stays "tool_approval"
+					// the same useInterrupt middleware. It stays "tool_approval"
 					// whenever every pause is an approval, so existing
 					// clients are unaffected by elicitation support.
 					"kind":             interruptKind(interrupts),
@@ -294,10 +300,19 @@ func (t *Translator) Translate(chunk *responses.ResponseChunk) []Event {
 		return nil
 
 	case chunk.OfResponseCompleted != nil:
-		if ev := t.stepFinish("response"); ev != nil {
-			return []Event{ev}
+		var out []Event
+		for _, item := range chunk.OfResponseCompleted.Response.Output {
+			if image := item.OfImageGenerationCall; image != nil {
+				out = append(out, t.handleOutputItemDone(responses.ChunkOutputItemData{
+					Type: "image_generation_call", Id: image.ID,
+					Result: &image.Result, OutputFormat: &image.OutputFormat,
+				})...)
+			}
 		}
-		return nil
+		if ev := t.stepFinish("response"); ev != nil {
+			out = append(out, ev)
+		}
+		return out
 
 	case chunk.OfResponseInProgress != nil:
 		return nil
@@ -433,6 +448,9 @@ func (t *Translator) Translate(chunk *responses.ResponseChunk) []Event {
 	// assistant message that happened to be mid-flight stays mid-flight.
 	if chunk.OfInputMessage != nil {
 		im := chunk.OfInputMessage
+		if parts := historyContentParts(im.ContentParts); parts != nil {
+			return []Event{&CustomEvent{BaseEvent: baseNow(), Name: "input_message", Value: Message{ID: im.MessageID, Role: roleOrUser(im.Role), ContentParts: parts}}}
+		}
 		// The grounding context the handler appends to the user's turn is
 		// scaffolding for the model, and is stripped on rehydration for the
 		// same reason it is stripped here: the user did not write it.
@@ -689,7 +707,11 @@ func (t *Translator) handleOutputItemDone(item responses.ChunkOutputItemData) []
 		if ev := t.stepFinish("image_generation"); ev != nil {
 			out = append(out, ev)
 		}
-		if item.Result != nil && *item.Result != "" {
+		if item.Result != nil && *item.Result != "" && !t.emittedImageIDs[item.Id] {
+			markdown := imageMarkdown(*item.Result, derefString(item.OutputFormat, "png"))
+			if markdown == "" {
+				return out
+			}
 			// Close any open assistant text message first so the image
 			// message's START doesn't nest inside it.
 			if t.openTextMessageID != "" {
@@ -703,23 +725,32 @@ func (t *Translator) handleOutputItemDone(item responses.ChunkOutputItemData) []
 			out = append(out,
 				&TextMessageStartEvent{BaseEvent: baseNow(), MessageID: item.Id, Role: RoleAssistant},
 				&TextMessageContentEvent{BaseEvent: baseNow(), MessageID: item.Id,
-					Delta: imageMarkdown(*item.Result, derefString(item.OutputFormat, "png"))},
+					Delta: markdown},
 				&TextMessageEndEvent{BaseEvent: baseNow(), MessageID: item.Id},
 			)
+			if item.Id != "" {
+				t.emittedImageIDs[item.Id] = true
+			}
 		}
 		return out
 	}
 	return nil
 }
 
-// imageMarkdown renders a base64 image as a markdown image with a data
-// URL, the representation generated images take in the AG-UI message
-// stream and in reloaded history.
-func imageMarkdown(base64, format string) string {
+// imageMarkdown renders live provider base64 as a data URL and persisted
+// attachment references as an authorized application download URL.
+func imageMarkdown(result, format string) string {
+	if attachments.IsFileID(result) {
+		ref, err := attachments.RefFromFileID(result)
+		if err != nil {
+			return ""
+		}
+		return "![generated image](" + attachments.URL(ref) + ")"
+	}
 	if format == "" {
 		format = "png"
 	}
-	return "![generated image](data:image/" + format + ";base64," + base64 + ")"
+	return "![generated image](data:image/" + format + ";base64," + result + ")"
 }
 
 // Error closes the run with an error event. Returns the events the
@@ -770,7 +801,13 @@ func (t *Translator) closeOpenItems() []Event {
 		})
 		t.openTextMessageID = ""
 	}
-	for itemID, callID := range t.openToolCallsByItemID {
+	itemIDs := make([]string, 0, len(t.openToolCallsByItemID))
+	for itemID := range t.openToolCallsByItemID {
+		itemIDs = append(itemIDs, itemID)
+	}
+	sort.Strings(itemIDs)
+	for _, itemID := range itemIDs {
+		callID := t.openToolCallsByItemID[itemID]
 		out = append(out, &ToolCallEndEvent{
 			BaseEvent:  baseNow(),
 			ToolCallID: callID,
@@ -785,6 +822,7 @@ func (t *Translator) closeOpenItems() []Event {
 		for name := range t.openSteps {
 			names = append(names, name)
 		}
+		sort.Strings(names)
 		for _, name := range names {
 			if ev := t.stepFinish(name); ev != nil {
 				out = append(out, ev)

@@ -3,7 +3,6 @@ package sdk
 import (
 	"github.com/hastekit/agent-sdk-go/pkg/gateway"
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm"
-	"github.com/hastekit/agent-sdk-go/pkg/gateway/middleware"
 )
 
 type ProviderConfig = gateway.ProviderConfig
@@ -50,14 +49,7 @@ type LLMOption func(*llmOptions)
 //	    middleware.NewRetry(middleware.RetryConfig{}),
 //	))
 //
-// Order is yours to choose and it matters. Fallback belongs outside retry, so
-// that a provider is retried on its own before the chain gives up on it —
-// the other way round, a 503 that would have cleared on the second attempt
-// costs you a switch to a different model instead.
-//
-// Nothing is installed unless you ask for it: a call that fails is otherwise
-// reported as it happened. Tracing is the exception, added innermost on every
-// client so each attempt gets its own span.
+// Order is yours to choose and it matters.
 //
 // Middleware needing the provider configuration receives it when the chain is
 // installed, so nothing here has to be handed a config store.
@@ -72,9 +64,7 @@ func WithoutMiddleware() LLMOption {
 	return func(o *llmOptions) { o.middleware, o.middlewareSet = nil, true }
 }
 
-// newInternalGateway builds a gateway whose chain is middlewares, with
-// tracing appended innermost so it measures one attempt rather than all of
-// them.
+// newInternalGateway builds a gateway with the middleware chain
 func newInternalGateway(configs []ProviderConfig, middlewares []Middleware) *gateway.InternalLLMGateway {
 	gw := gateway.NewLLMGateway(gateway.NewInMemoryConfigStore(configs))
 
@@ -82,7 +72,6 @@ func newInternalGateway(configs []ProviderConfig, middlewares []Middleware) *gat
 	// tracing entry into the caller's own slice.
 	chain := make([]gateway.Middleware, 0, len(middlewares)+1)
 	chain = append(chain, middlewares...)
-	chain = append(chain, middleware.NewTracing())
 	gw.UseMiddleware(chain...)
 
 	return gateway.NewInternalLLMGateway(gw)

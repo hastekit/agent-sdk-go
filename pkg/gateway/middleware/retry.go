@@ -265,6 +265,12 @@ func (m *Retry) wait(ctx context.Context, attempt int, err error) error {
 	return m.sleep(ctx, m.backoff(attempt, err))
 }
 
+// Backoff returns the configured delay for a failed attempt (first attempt is 1).
+// It shares the gateway's defaults, jitter and Retry-After handling.
+func (c RetryConfig) Backoff(attempt int, err error) time.Duration {
+	return (&Retry{cfg: c.withDefaults(), jitter: fullJitter}).backoff(attempt, err)
+}
+
 // backoff is the delay after attempt. A provider that named a delay is
 // obeyed as given — it knows when its own limit resets, and jittering an
 // explicit instruction only invites a second rejection.

@@ -18,7 +18,9 @@ import (
 //	data: <event JSON>
 //	\n
 //
-// The `id` line lets clients use Last-Event-ID for resumption; the
+// AG-UI handlers use EncodeWithID with stable replay cursors. The standalone
+// Encode method uses a connection-local counter and is not resumable by itself.
+// The `id` line carries that cursor; the
 // `event` line lets dispatchers route without parsing JSON; the
 // `data` line is one line because all our event JSON serialises
 // without embedded newlines (json.Marshal escapes them). If that ever
@@ -46,15 +48,23 @@ func NewEncoder(w io.Writer) *Encoder {
 // underlying writer error so callers (the HTTP pump) can bail when
 // the client closed the connection.
 func (enc *Encoder) Encode(_ context.Context, e Event) error {
+	return enc.EncodeWithID(e, strconv.FormatUint(enc.seq.Add(1), 10))
+}
+
+// EncodeWithID writes a frame with a stable, caller-supplied SSE cursor.
+func (enc *Encoder) EncodeWithID(e Event, id string) error {
+	if strings.ContainsAny(id, "\r\n\x00") {
+		return fmt.Errorf("invalid SSE event ID")
+	}
 	body, err := e.Marshal()
 	if err != nil {
 		return fmt.Errorf("agui encode: marshal: %w", err)
 	}
 
-	id := enc.seq.Add(1)
-
-	if _, err := fmt.Fprintf(enc.w, "id: %s\n", strconv.FormatUint(id, 10)); err != nil {
-		return err
+	if id != "" {
+		if _, err := fmt.Fprintf(enc.w, "id: %s\n", id); err != nil {
+			return err
+		}
 	}
 	if _, err := fmt.Fprintf(enc.w, "event: %s\n", e.EventType()); err != nil {
 		return err

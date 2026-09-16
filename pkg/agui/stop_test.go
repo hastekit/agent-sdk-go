@@ -60,9 +60,9 @@ func startRun(t *testing.T, server *httptest.Server, agentName string, input Run
 	return res
 }
 
-func postStop(t *testing.T, server *httptest.Server, agentName, streamID string) *http.Response {
+func postStop(t *testing.T, server *httptest.Server, agentName, threadID, streamID string) *http.Response {
 	t.Helper()
-	body, err := json.Marshal(map[string]string{"streamId": streamID})
+	body, err := json.Marshal(map[string]string{"threadId": threadID, "streamId": streamID})
 	require.NoError(t, err)
 
 	res, err := http.Post(server.URL+"/agents/"+agentName+"/stop", "application/json", bytes.NewReader(body))
@@ -132,7 +132,7 @@ func TestStopEndpointEndsRunInFlight(t *testing.T) {
 		t.Fatal("tool never started")
 	}
 
-	stopRes := postStop(t, server, "Helper", streamID)
+	stopRes := postStop(t, server, "Helper", "thread-stop", streamID)
 	defer stopRes.Body.Close()
 	require.Equal(t, http.StatusAccepted, stopRes.StatusCode)
 
@@ -146,19 +146,19 @@ func TestStopEndpointEndsRunInFlight(t *testing.T) {
 
 // The endpoint records the stop without claiming to know whether a run was
 // there to receive it — across replicas it generally can't.
-func TestStopEndpointAcceptsUnknownStream(t *testing.T) {
+func TestStopEndpointAcceptsUnknownThread(t *testing.T) {
 	agent := agents.NewAgent(&agents.AgentOptions{Name: "Helper"}).
 		WithLLM(&scriptedLLM{})
 
 	server := httptest.NewServer(NewHandler(registry{"Helper": agent}))
 	defer server.Close()
 
-	res := postStop(t, server, "Helper", "no-such-stream")
+	res := postStop(t, server, "Helper", "no-such-thread", "")
 	defer res.Body.Close()
 	assert.Equal(t, http.StatusAccepted, res.StatusCode)
 }
 
-func TestStopEndpointRequiresStreamID(t *testing.T) {
+func TestStopEndpointRequiresThreadID(t *testing.T) {
 	agent := agents.NewAgent(&agents.AgentOptions{Name: "Helper"}).
 		WithLLM(&scriptedLLM{})
 
@@ -204,7 +204,7 @@ func TestStopEndpointGoesToTheNamedAgentsBroker(t *testing.T) {
 	}
 
 	// Recorded on Other's broker, which this run never reads.
-	crossRes := postStop(t, server, "Other", streamID)
+	crossRes := postStop(t, server, "Other", "thread-cross-agent", streamID)
 	defer crossRes.Body.Close()
 	require.Equal(t, http.StatusAccepted, crossRes.StatusCode)
 
@@ -215,7 +215,7 @@ func TestStopEndpointGoesToTheNamedAgentsBroker(t *testing.T) {
 	}
 
 	// Through its own agent it stops.
-	ownRes := postStop(t, server, "Helper", streamID)
+	ownRes := postStop(t, server, "Helper", "thread-cross-agent", streamID)
 	defer ownRes.Body.Close()
 	require.Equal(t, http.StatusAccepted, ownRes.StatusCode)
 
@@ -225,4 +225,40 @@ func TestStopEndpointGoesToTheNamedAgentsBroker(t *testing.T) {
 		t.Fatal("run did not stop through its own agent")
 	}
 	parseFrames(t, res)
+}
+
+func TestStopRestrictedToResolvedNamespace(t *testing.T) {
+	ownID := agents.StreamIDForThread("tenant-a", "shared")
+	otherID := agents.StreamIDForThread("tenant-b", "shared")
+	for _, tc := range []struct {
+		name, body, query string
+		status            int
+	}{
+		{"thread body", `{"threadId":"shared"}`, "", 202},
+		{"thread query", "", "?threadId=shared", 202},
+		{"matching stream", `{"threadId":"shared","streamId":"` + ownID + `"}`, "", 202},
+		{"foreign stream body", `{"threadId":"shared","streamId":"` + otherID + `"}`, "", 403},
+		{"foreign stream query", "", "?threadId=shared&streamId=" + otherID, 403},
+		{"conflicting streams", `{"threadId":"shared","streamId":"` + ownID + `"}`, "?streamId=" + otherID, 403},
+		{"raw stream only", `{"streamId":"` + otherID + `"}`, "", 400},
+		{"conflicting thread", `{"threadId":"shared"}`, "?threadId=other", 400},
+		{"invalid JSON", `{"threadId":`, "?threadId=shared", 400},
+		{"trailing JSON", `{"threadId":"shared"}{}`, "", 400},
+		{"empty thread", `{"threadId":" "}`, "", 400},
+		{"namespace field ignored", `{"threadId":"shared","namespace":"tenant-b"}`, "", 202},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			agent := agents.NewAgent(&agents.AgentOptions{Name: "Helper"})
+			handler := NewHandler(registry{"Helper": agent}, WithNamespaceResolver(func(*http.Request) (string, error) { return "tenant-a", nil }))
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, httptest.NewRequest("POST", "/agents/Helper/stop"+tc.query, strings.NewReader(tc.body)))
+			require.Equal(t, tc.status, w.Code, w.Body.String())
+			otherStopped, err := agent.StreamBroker().IsStopped(context.Background(), otherID)
+			require.NoError(t, err)
+			require.False(t, otherStopped, "must never signal another namespace")
+			ownStopped, err := agent.StreamBroker().IsStopped(context.Background(), ownID)
+			require.NoError(t, err)
+			require.Equal(t, tc.status == 202, ownStopped, "rejected requests must not reach the broker")
+		})
+	}
 }

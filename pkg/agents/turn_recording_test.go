@@ -74,7 +74,11 @@ func TestABareTurnIsIdentified(t *testing.T) {
 	require.Empty(t, in.Message.ID)
 
 	requireStatus(t, runAgent(t, agent, in), agentstate.RunStatusCompleted)
-	assert.NotEmpty(t, in.Message.ID, "Execute mints the id before dispatching")
+	assert.Empty(t, in.Message.ID, "Execute leaves the caller's input unchanged")
+	rows, err := agent.History().LoadTranscript(context.Background(), "test", "thread-bare")
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	require.NotEmpty(t, rows[0].Messages[0].ID, "Execute mints the id before dispatching")
 }
 
 // A caller that supplies its own id keeps it.

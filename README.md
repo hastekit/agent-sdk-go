@@ -14,7 +14,7 @@ A powerful Golang SDK for building AI agents and making LLM calls across multipl
 - **👤 Human-in-the-Loop** - Integrate human feedback and approval workflows
 - **🛡️ Durable Execution** - Create fault-tolerant agents with Restate or Temporal
 - **🔧 Tool Calling** - Function calling and MCP (Model Context Protocol) tool integration
-- **🪝 Hooks** - Intercept tool calls and model calls for auth, budgets, and audit
+- **🪝 Middlewares** - Intercept tool calls and model calls for auth, budgets, and audit
 - **🏷️ Tool Annotations** - MCP-style behavioural hints on both MCP and function tools
 - **💾 Conversation History** - Maintain context across interactions with built-in persistence
 - **🧩 Sub-Agents & Handoffs** - Call a specialist as a tool, or transfer the conversation to it
@@ -41,9 +41,9 @@ A powerful Golang SDK for building AI agents and making LLM calls across multipl
   - [Tools](#tools)
     - [Background Tool Execution](#background-tool-execution)
   - [Skills](#skills)
-  - [Hooks](#hooks)
+  - [Middlewares](#middlewares)
     - [Adding a Message to a Model Call](#adding-a-message-to-a-model-call)
-    - [Hook State](#hook-state)
+    - [Middleware State](#middleware-state)
   - [Conversation History](#conversation-history)
   - [Durable Agents](#durable-agents)
 - [Documentation](#documentation)
@@ -67,74 +67,110 @@ go get -u github.com/hastekit/agent-sdk-go
 package main
 
 import (
-    "context"
-    "fmt"
-    "log"
-    "os"
-
-    hastekit "github.com/hastekit/agent-sdk-go"
-    "github.com/hastekit/agent-sdk-go/pkg/agents"
-    "github.com/hastekit/agent-sdk-go/pkg/agents/history"
-    "github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
-    "github.com/hastekit/agent-sdk-go/pkg/utils"
+	"context"
+	"fmt"
+	hastekit "github.com/hastekit/agent-sdk-go"
+	"log"
+	"os"
 )
 
 func main() {
-    // Configure an LLM client and bind a model.
-    client := hastekit.NewLLMClient([]hastekit.ProviderConfig{
-        {
-            ProviderName: hastekit.ProviderOpenAI,
-            ApiKeys: []*hastekit.APIKeyConfig{
-                {Name: "default", APIKey: os.Getenv("OPENAI_API_KEY")},
-            },
-        },
-    })
+	client := hastekit.NewLLMClient([]hastekit.ProviderConfig{
+		{
+			ProviderName: hastekit.ProviderOpenAI,
+			ApiKeys: []*hastekit.APIKeyConfig{
+				{
+					Name:   "Key 1",
+					APIKey: os.Getenv("OPENAI_API_KEY"),
+				},
+			},
+		},
+	})
 
-    // Create agent
-    agent := hastekit.NewAgent(&hastekit.AgentConfig{
-        Name:        "Assistant",
-        Instruction: hastekit.NewPrompt("You are a helpful assistant."),
-        LLM:         client.Model("OpenAI/gpt-4o-mini"),
-        Parameters: responses.Parameters{
-            Temperature: utils.Ptr(0.7),
-        },
-    })
+	model := client.Model("OpenAI/gpt-4.1-mini")
 
-    // Execute agent — returns a handle for streaming chunks + result.
-    handle, err := agent.Execute(context.Background(), &agents.AgentInput{
-        Message: history.Message{
-            Messages: []responses.InputMessageUnion{
-                responses.UserMessage("Hello! Tell me a joke."),
-            },
-        },
-    })
-    if err != nil {
-        log.Fatal(err)
-    }
-
-    // Result() drains the chunk stream and returns the aggregated output.
-    // For live streaming, range over handle.Chunks then call handle.Wait().
-    out, err := handle.Result()
-    if err != nil {
-        log.Fatal(err)
-    }
-
-    fmt.Println(out.Output[0].OfOutputMessage.Content[0].OfOutputText.Text)
+	agent, err := hastekit.NewAgent(&hastekit.AgentConfig{
+		Name: "Assistant", LLM: model, Instruction: hastekit.NewPrompt("You are a helpful assistant."),
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	result, err := agent.Run(context.Background(), &hastekit.Input{
+		Message: hastekit.UserTurn("Hello!"),
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println(result.Text())
 }
 ```
 
-`agent.Execute` is non-blocking and returns an `*AgentHandle`:
+Use `Run(ctx, *Input)` for a blocking result. Its context controls execution,
+including cooperative cancellation of remote work. Use `Execute(ctx, *Input)`
+for a detached execution with events:
 
 ```go
-type AgentHandle struct {
-    StreamID string                          // Broker channel id for this run
-    Chunks   <-chan *responses.ResponseChunk // Live chunks; channel closes when run ends
+handle, err := agent.Execute(ctx, &hastekit.Input{
+    Message: hastekit.UserTurn("Research this topic"),
+})
+if err != nil { return err }
+for event := range handle.Chunks {
+    // Render event.
+    _ = event
 }
-
-func (h *AgentHandle) Stop(ctx context.Context) error    // graceful cancel at next iteration
-func (h *AgentHandle) Wait() (*AgentOutput, error)       // pair with manual Chunks draining
-func (h *AgentHandle) Result() (*AgentOutput, error)     // drain Chunks + return output
+result, err := handle.Wait(waitCtx)
+// To stop execution: handle.Stop(ctx).
 ```
+
+Canceling Execute's context disconnects its subscription; execution continues.
+Canceling Wait's context stops only the wait. Local detached runs last only as
+long as the process; use a durable runtime to survive process exit.
+
+Handles buffer up to 256 pending events. If a consumer falls behind, Wait reports
+`ErrStreamOverflow` alongside the execution result. Waiting without reading events
+never blocks execution, but may report overflow; use Run when only the result is
+needed. The legacy Result and Cancel methods remain aliases for Wait and Stop.
+
+`Input` aliases `agents.AgentInput`: the same type supports ordinary messages,
+attachments, sender attribution, and conversation identifiers. Optional `RunID`
+selects the actual execution ID; omit it for generated IDs. Supplied IDs must be
+unique within the namespace. AGUI passes its client's runId through to history
+and stream events, so initial delivery and reconnects use the same identity.
+
+Run-ID uniqueness is the persistence backend's responsibility. The SDK does not
+read history to check for duplicates or add a creation flag to save metadata.
+A database backend should enforce uniqueness when inserting new runs and handle
+incremental saves as updates. The built-in memory and file stores retain their
+append-on-save behavior for an existing run in the same thread.
+
+### Migrating existing applications
+
+- `NewAgent` now returns `(*Agent, error)` and validates configuration. Use
+  `LLM` for the model provider and `Instruction` for the prompt provider.
+  Use `NewPrompt("...")` for a static prompt.
+- `NewFileHistory` and `OpenFileHistory` return `(*History, error)`. Call
+  `Close()` once all agents sharing that history have stopped.
+- HTTP routing uses an explicit registry. Create `NewRegistry()`, explicitly
+  `Register(agent)`, and pass it to `NewHTTPHandler(registry)` or the AG-UI handler.
+  Duplicate names in one registry return `ErrAgentAlreadyRegistered`.
+- Each agent gets its own default memory broker. To share one, pass it explicitly
+  through `WithRuntime(local_runtime.NewLocalRuntime(broker))`; the global `DefaultStreamBroker` was removed.
+- Create durable agents with `NewAgent(config, WithRuntime(rt))`; their
+  configurations register with that runtime instance. Replace
+  `rt.Start()` with blocking `rt.Serve(ctx)` (Temporal) or
+  `rt.Serve(ctx, listenAddress)` (Restate). Defer `rt.Close()`; the runtime closes
+  its own client/server, while the caller owns supplied brokers and histories.
+  `NewAgent` registers the configuration; `Serve` starts the worker.
+- `MustNewAgent` and `MustNewFileHistory` explicitly panic on setup errors. Some
+  shorter configuration examples below use `MustNewAgent`; prefer the checked
+  constructors when handling application setup errors.
+
+Custom implementations of `agents.Runtime` must expose `StreamBroker() agents.StreamBroker`
+and `RegisterAgent(*agents.AgentOptions) error`. `NewAgent` calls `RegisterAgent`
+with the validated, resolved configuration; runtimes without registration needs
+can return nil. Registration errors are returned to the caller.
+
+These constructor and registration changes are breaking API changes.
 
 ## Usage
 
@@ -346,7 +382,7 @@ weatherTool := hastekit.NewTool(getWeather,
 )
 
 // Use the tool
-agent := hastekit.NewAgent(&hastekit.AgentConfig{
+agent := hastekit.MustNewAgent(&hastekit.AgentConfig{
     Name:        "Weather Assistant",
     Instruction: hastekit.NewPrompt("You help users check the weather."),
     LLM:         client.Model("OpenAI/gpt-4o-mini"),
@@ -398,13 +434,13 @@ answer back as a tool result:
 ```go
 import "github.com/hastekit/agent-sdk-go/pkg/agents/tools"
 
-researcher := hastekit.NewAgent(&hastekit.AgentConfig{
+researcher := hastekit.MustNewAgent(&hastekit.AgentConfig{
     Name:        "Researcher",
     Instruction: hastekit.NewPrompt("You research topics thoroughly."),
     LLM:         model,
 })
 
-agent := hastekit.NewAgent(&hastekit.AgentConfig{
+agent := hastekit.MustNewAgent(&hastekit.AgentConfig{
     Name:        "Assistant",
     Instruction: hastekit.NewPrompt("You are a helpful assistant."),
     LLM:         model,
@@ -435,7 +471,7 @@ A handoff transfers the conversation instead of borrowing an answer: the target
 agent takes over the thread and replies to the user directly.
 
 ```go
-agent := hastekit.NewAgent(&hastekit.AgentConfig{
+agent := hastekit.MustNewAgent(&hastekit.AgentConfig{
     Name:        "Triage",
     Instruction: hastekit.NewPrompt("Route the user to the right specialist."),
     LLM:         model,
@@ -520,20 +556,20 @@ Agents are served to the browser over the [AG-UI protocol](https://github.com/ag
 ```go
 import "github.com/hastekit/agent-sdk-go/pkg/agui"
 
-// Agents register into a package-global registry when created.
-hastekit.NewAgent(&hastekit.AgentConfig{
+// Construct an agent, then register it explicitly.
+agent := hastekit.MustNewAgent(&hastekit.AgentConfig{
     Name: "Assistant",
     // ...
 })
 
-// AgentRegistry exposes the registered agents to the AG-UI handler.
-registry := &hastekit.AgentRegistry{}
+registry := hastekit.NewRegistry()
+if err := registry.Register(agent); err != nil { log.Fatal(err) }
 
 // Exposes:
 //   GET  /agents                                   → registered agent names
 //   POST /agents/{agent}/run                       → AG-UI run endpoint (SSE)
 //   GET  /agents/{agent}/threads/{thread}/stream   → rejoin the run in flight (SSE)
-//   GET  /agents/{agent}/runs                      → long poll: runs across namespaces
+//   GET  /agents/{agent}/runs                      → long poll: runs in the resolved namespace
 //   GET  /agents/{agent}/threads                   → stored conversation threads, newest first
 //   GET  /agents/{agent}/threads/{thread}/messages → thread history as AG-UI messages
 http.ListenAndServe(":8080", agui.NewHandler(registry))
@@ -549,28 +585,115 @@ import "github.com/hastekit/agent-sdk-go/pkg/agui/web"
 
 // Serves the embedded CopilotKit chat UI at / and the AG-UI protocol
 // endpoints under /api/agui/*.
-if err := web.Serve(":8080", &hastekit.AgentRegistry{}); err != nil {
+if err := web.Serve(":8080", registry); err != nil {
     log.Fatal(err)
 }
 ```
 
 The embedded UI lists registered agents, shows a sidebar of prior conversations (select one to resume it on the same thread), streams assistant text, reasoning, and tool calls live, and renders CopilotKit's `useInterrupt` approval cards inline when a run pauses for human-in-the-loop tool approval.
 
+The messages endpoint is paginated:
+
+```text
+GET /agents/{agent}/threads/{thread}/messages?limit=50
+GET /agents/{agent}/threads/{thread}/messages?limit=50&cursor=<nextCursor>
+```
+
+The default page contains the latest 50 stored turns (`limit`: 1–200). A turn
+can contain several AG-UI messages; paging preserves complete turns rather than
+splitting their tool calls and results. Messages within each page are chronological.
+The response includes `nextCursor` and `hasMore`; prepend each older page to the
+messages already loaded. Invalid, expired, or wrong-namespace/thread cursors
+return 400. The `run` field always reflects the latest stored turn, including
+when requesting older messages.
+
+The embedded chat loads older pages when scrolling up, with a load/retry button.
+Full-history mode and the minimal `/basic.html` fallback fetch all pages to retain
+their existing behavior. SSE replay cursors remain separate from history cursors.
+
+For efficient database queries, implement `history.TranscriptPageReader`.
+`TranscriptPageOptions.BeforeRunID` is an exclusive boundary in insertion order,
+not lexical run-ID order. Return chronological `Rows`, `NextBeforeRunID` when
+older rows remain, and `Latest` for current thread state. The built-in memory/file
+stores support this interface. Legacy adapters remain compatible through a
+full-transcript fallback, which bounds the HTTP response but not storage reads.
+
 Conversation listing works when the agent's persistence adapter implements `history.ThreadLister` — the SDK's built-in in-memory and file adapters both do. For adapters that can't enumerate threads, the listing endpoint answers `501` and the UI hides the picker.
 
 The CopilotKit UI is a Vite/React app under [`pkg/agui/web/ui`](pkg/agui/web/ui); its build output is committed to `pkg/agui/web/static`, so `go build` never needs Node. Rebuild only when changing the UI source (`cd pkg/agui/web/ui && pnpm install && pnpm build`). CopilotKit v2 can't be loaded from a public ESM CDN (its dependency graph breaks esm.sh/jsDelivr), so it's bundled. To keep the embedded weight down to ~1MB (from ~17MB), the build aliases out CopilotKit's heaviest optional dependencies — the markdown renderer's Shiki/Mermaid/Cytoscape stack (swapped for a lightweight `react-markdown` shim), KaTeX's math fonts, and the dev-console web-inspector — none of which the chat needs. An offline, framework-free fallback UI is embedded at `/basic.html`.
 
-Options (shared by `agui.NewHandler`, `agui.AgentHandler`, and `web.Serve`):
+Options (shared by `agui.NewHandler`, `agui.AgentHandler`, `web.Handler`, and `web.Serve`):
 
 ```go
 web.Serve(":8080", client,
-    agui.WithNamespace("user-123"), // conversation namespace (default "default")
+    agui.WithNamespaceResolver(func(r *http.Request) (string, error) {
+        // Resolve from identity supplied by your authentication middleware.
+        return "user-123", nil
+    }),
     agui.WithSenderID("alice"),     // sender attribution (default "user")
     agui.WithFullHistory(),         // forward the client's full message list
                                     // (only for agents without persistence)
     agui.WithKeepalive(10*time.Second), // SSE keep-alive interval (default 15s)
 )
 ```
+
+`WithNamespace` has been replaced by `WithNamespaceResolver`. The resolver runs
+once per API request after route matching, so request context and `PathValue`
+are available. Its namespace is used for runs, history, thread listing, stream
+rejoining, attachments, and the default run-feed scope. A nil resolver or an
+empty/whitespace-only result uses `"default"`. Resolver errors return HTTP 403
+without exposing the error text or falling back to another namespace.
+
+The embedded UI has no namespace selector and sends no namespace overrides,
+including on run-feed requests. With no resolver configured, it uses `"default"`
+for every endpoint. A configured resolver can still derive identity from the
+same-origin session on the server.
+
+Run feeds always use the resolved namespace. The old `?namespaces=` parameter
+is rejected with HTTP 400; additional namespace selection is not supported.
+
+Stop requests now require `threadId` in the JSON body or query. The server derives
+the stream ID from that thread and the resolved namespace. An optional `streamId`
+must match or the request returns HTTP 403. Raw stream-ID-only requests return
+HTTP 400. This is a breaking change for custom stop clients; the embedded UI has
+been updated.
+
+```http
+POST /agents/Assistant/stop
+Content-Type: application/json
+
+{"threadId":"conversation-123"}
+```
+
+Rejoining streams supports SSE resume cursors. Each initial and replayed event
+has an opaque `id:`. After a connection drops, send the last **complete** event
+ID to receive only the events after it:
+
+```http
+GET /agents/Assistant/threads/conversation-123/stream
+Last-Event-ID: <last-received-event-id>
+```
+
+For clients that cannot set headers, `?lastEventId=<URL-encoded-event-id>` is
+also supported. Supplying conflicting header/query values returns HTTP 400.
+Without either value, the endpoint replays all retained events for the latest
+run on that thread. This also works after the run finishes. Older conversation
+history is available through the thread's `/messages` endpoint; stream replay
+is bounded by the broker's retention window.
+
+Cursors are scoped to the resolved namespace, thread, and run. Malformed or
+wrong-stream cursors return HTTP 400. An expired, trimmed, replaced, or unknown
+event cursor returns HTTP 410 instead of silently skipping data: reload thread
+history and reconnect without a cursor. Custom brokers must implement
+`agents.StreamReplayReader` to support cursor validation and completed replay;
+the built-in memory and Redis brokers implement it. Unsupported cursor requests
+return HTTP 501. A thread with neither a live run nor retained events returns 204.
+
+The embedded UI reconnects after network errors, premature EOF, or a 45-second
+idle timeout. It retains the last complete event ID only within the current
+stream subscription and reconnects using GET, never repeating the POST that
+started the run. A full page reload sends no cursor. Expired replay is surfaced
+as an error so the user can reload history.
 
 Human-in-the-loop: when a run pauses for tool approval, the stream emits a `CUSTOM` event named `on_interrupt` (CopilotKit's `useInterrupt` convention) followed by `RUN_FINISHED` with `result.status: "paused"`. The client resumes by POSTing decisions back on the same thread under `forwardedProps.command.resume.decisions[]` (`{toolCallId, approved}`).
 
@@ -599,7 +722,7 @@ if err != nil {
 }
 
 // Create agent with MCP tools
-agent := hastekit.NewAgent(&hastekit.AgentConfig{
+agent := hastekit.MustNewAgent(&hastekit.AgentConfig{
     Name:        "MCP Agent",
     Instruction: hastekit.NewPrompt("You are a helpful assistant."),
     LLM:         model,
@@ -666,11 +789,11 @@ MCP tools carry whatever their server declared; nothing extra is needed to pick 
 
 ```go
 if tool.GetToolDescriptor().Annotations.IsDestructive() {
-    // gate it — see Hooks below
+    // gate it — see Middlewares below
 }
 ```
 
-A tool call hook is handed the same descriptor, which is where a policy usually reads them.
+A tool call middleware is handed the same descriptor, which is where a policy usually reads them.
 
 Every hint is a pointer, so "nothing was said" stays distinguishable from "false was said". Prefer the `Is*` helpers over reading fields directly: they are nil-safe and apply MCP's defaults, which are deliberately conservative — an unset `DestructiveHint` reads as destructive, an unset `ReadOnlyHint` as not read-only.
 
@@ -910,7 +1033,7 @@ if err != nil {
     log.Fatal(err)
 }
 
-agent := hastekit.NewAgent(&hastekit.AgentConfig{
+agent := hastekit.MustNewAgent(&hastekit.AgentConfig{
     Name: "Release_Agent",
     Instruction: hastekit.NewPrompt(
         "You help maintain this project's releases.",
@@ -944,7 +1067,7 @@ var skillsFS embed.FS
 registry, err := hastekit.NewSkillRegistry(skillsFS)
 ```
 
-Embedding the parent folder is enough: a skill is found wherever a `SKILL.md` sits, so there is no `fs.Sub` to get right. `NewSkillRegistry` takes any `fs.FS`, so this is also the hook for skills that come from somewhere else entirely.
+Embedding the parent folder is enough: a skill is found wherever a `SKILL.md` sits, so there is no `fs.Sub` to get right. `NewSkillRegistry` takes any `fs.FS`, so this is also the middleware for skills that come from somewhere else entirely.
 
 #### Rules
 
@@ -1009,135 +1132,163 @@ hastekit.NewPrompt("You help maintain this project's releases.",
 )
 ```
 
-### Hooks
+### Middlewares
 
-A hook wraps what the agent does, so cross-cutting concerns — auth, budgets, quotas, audit, approval policy — live in one place instead of inside every tool. Hooks can observe, or answer in place of the real call.
+A middleware wraps what the agent does, middleware-style, so cross-cutting concerns — auth, budgets, quotas, audit, attachments — live in one place instead of inside every tool. A middleware can observe a call, change what goes in or what comes out, or answer in place of the real call.
 
-`ToolCallHook` wraps every tool call; `ModelCallHook` wraps every call to the model. `hastekit.Hook` is both. Implement only the half you care about by embedding the no-op other half:
+`ToolCallMiddleware` wraps every tool call; `ModelCallMiddleware` wraps every call to the model. `hastekit.Middleware` is both. Embed the no-op half you have nothing to say on:
 
 ```go
 // A budget check that has no interest in tools.
 type credits struct {
-    agents.NoopToolCallHook // supplies the tool-call half
+    agents.NoopMiddleware
 }
 
-func (c *credits) GetName() string { return "credits" }
-
-func (c *credits) BeforeModelCall(ctx context.Context, call *agents.ModelCall) (agents.ModelCallHookResult, error) {
-    if balanceFor(call.RunContext) <= 0 {
-        // Answering is kinder than failing: the run ends with a message the
-        // user can read rather than an error they cannot.
-        return agents.HandleModelCall(
-            agents.ModelCallText("You're out of credits — top up to continue."),
-        ), nil
+func (c *credits) WrapModelCall(next agents.ModelCallFunc) agents.ModelCallFunc {
+    return func(ctx context.Context, call *agents.ModelCall, req *responses.Request) (*responses.Response, error) {
+        if balanceFor(call.RunContext) <= 0 {
+            // Answering is kinder than failing: the run ends with a message the
+            // user can read rather than an error they cannot.
+            return agents.ModelCallText("You're out of credits — top up to continue."), nil
+        }
+        resp, err := next(ctx, call, req)
+        if err != nil {
+            return nil, err
+        }
+        recordSpend(call.RunContext, resp.Usage) // this one call's usage
+        return resp, nil
     }
-    return agents.ContinueModelCall(), nil
 }
 
-func (c *credits) AfterModelCall(ctx context.Context, call *agents.ModelCall, res *agents.ModelCallResult) (agents.ModelCallHookResult, error) {
-    recordSpend(call.RunContext, res.Usage) // res.Usage is this one call
-    return agents.ContinueModelCall(), nil
-}
-
-agent := hastekit.NewAgent(&hastekit.AgentConfig{
+agent := hastekit.MustNewAgent(&hastekit.AgentConfig{
     Name:  "Assistant",
     LLM:   client.Model("OpenAI/gpt-4o-mini"),
     Tools: []hastekit.Tool{weatherTool},
-    Hooks: []agents.Hook{&credits{}},
+    Middlewares: []agents.Middleware{&credits{}},
 })
 ```
 
-The tool-call side is the same, with the tool the call is against handed over alongside it. Combined with annotations, a policy hook is a few lines:
+The tool-call side is the same, with the tool the call is against handed over alongside it. Combined with annotations, a policy middleware is a few lines:
 
 ```go
 type policy struct {
-    agents.NoopModelCallHook // model-call half; this hook only guards tools
+    agents.NoopMiddleware
 }
 
-func (p *policy) GetName() string { return "policy" }
-
-func (p *policy) BeforeToolCall(ctx context.Context, tool *agents.BaseTool, call *agents.ToolCall) (agents.ToolCallHookResult, error) {
-    if tool.Annotations.IsDestructive() && !allowed(call.RunContext, call.Name) {
-        // Short-circuit: the tool never runs, and this stands in as its output.
-        return agents.HandleToolCall(
-            agents.ToolCallResult(call, "Denied by policy."),
-        ), nil
+func (p *policy) WrapToolCall(next agents.ToolCallFunc) agents.ToolCallFunc {
+    return func(ctx context.Context, tool *agents.BaseTool, call *agents.ToolCall) (*agents.ToolCallResponse, error) {
+        if tool.Annotations.IsDestructive() && !allowed(call.RunContext, call.Name) {
+            // The tool never runs, and this stands in as its output.
+            return agents.ToolCallResult(call, "Denied by policy."), nil
+        }
+        resp, err := next(ctx, tool, call)
+        audit(call.Name, call.RunContext, err)
+        return resp, err
     }
-    return agents.ContinueToolCall(), nil
-}
-
-func (p *policy) AfterToolCall(ctx context.Context, tool *agents.BaseTool, call *agents.ToolCall, resp *agents.ToolCallResponse) (agents.ToolCallHookResult, error) {
-    audit(call.Name, call.RunContext)
-    return agents.ContinueToolCall(), nil
 }
 ```
 
 Notes:
 
-- **`Handled` is explicit.** `ContinueToolCall()` passes the call along; `HandleToolCall(resp)` says the hook answered and the real call never happens. It's a flag rather than a nil check, because "I answered, and the answer is nothing to say" differs from "carry on without me".
+- **Answering is a return, not an error.** Return a result without calling `next` and the real call never happens; the model reads what you returned. An error of your own ends the run, and under Temporal or Restate it is not retried — what you refused once you would refuse again (`agents.IsToolCallAborted`, `agents.IsModelCallAborted`). An error `next` hands back is the tool's or the provider's — pass it through as it came, wrapped or not, and it keeps the classification the runtime gives that kind of failure.
 - **Run context comes along.** `call.RunContext` is the per-run map you set on `AgentInput`, so per-tenant data (a JWT, an org id) is available without threading it through every tool.
 - **The tool arrives as plain data.** `tool` is the same `*agents.BaseTool` its `GetToolDescriptor` returns — name, schema, annotations, meta — because the real tool may be a proxy for one running in another process. It is always non-nil.
-- **`GetName()` must be unique per agent and stable across deploys.** Durable runtimes name each hook's journaled step after it, so a renamed hook is a new step on replay.
-- **Hooks run as their own durable steps.** Under Restate or Temporal each hook call is journaled, so a check that talks to a billing service is not re-run on every replay.
-- **A `BeforeModelCall` hook sees the shape of the call, not the prompt** — model, tenant, loop iteration, `ContextTokens`, and usage so far. That's what a budget check needs, and it keeps the conversation from crossing a durable boundary twice.
+- **Middlewares nest in registration order, the first outermost.** The first registered sees a request first and a result last. A middleware that answers without calling `next` skips every middleware inside it.
+- **Wraps run inside the step that makes the call, never as steps of their own.** Under Temporal and Restate that is the tool activity or run step and the LLM activity or run step; locally it is the loop. What a wrap hands `next` is what the tool or provider sees, and what it returns is what the loop keeps — so `WrapToolCall` can rewrite a result before it is journaled, which is how the attachment middleware keeps file bytes out of every journal and transcript. Because a wrap is not journaled, it may run again if its step retries: keep it idempotent, and never write to the request or result you were handed.
+- **A note for this call only.** To put something in front of the model once, hand `next` a copy of the request with a message appended. The loop keeps its own request, so the note is never stored and does not accumulate — the same treatment the loop gives its own "one turn left" reminder.
+- **State is read-only here.** `call.State` is a snapshot of the run's scratchpad, on model calls and tool calls alike. Tools write to it through `ToolCallResponse.StateUpdates`; a wrap reads what they wrote.
 
-#### Adding a Message to a Model Call
+The SDK installs `agents.StopMiddleware` outside the configured tool and model
+middleware. It watches the call's stream while the entire chain runs, including
+attachment resolution. Tools retain their cancellation grace period; model
+calls unwind through their context so streaming callbacks cannot outlive the
+step. Custom model middleware must honor context cancellation.
 
-A `BeforeModelCall` hook can put a message in front of the model for one call.
-The note is appended after the conversation and is **never stored**, so it is
-true of the call it rides on and does not accumulate in the transcript of
-every call after it — the same treatment the loop gives its own
-"you have one turn left" reminder.
+Temporal installs it inside each tool/MCP/model activity, and Restate inside
+the corresponding `restate.Run` callback. Workflow proxies do not watch live
+stop signals. The worker translates stopped calls into non-retryable Temporal
+errors or terminal Restate errors, and replay consumes that recorded outcome.
+Background waits continue independently of the parent run's stop signal.
+`RunStoppableTool` has been replaced by `StopMiddleware.WrapToolCall`; the
+generic `RunStoppable` primitive remains available for custom runtime adapters.
 
-```go
-func (p *policy) BeforeModelCall(ctx context.Context, call *agents.ModelCall) (agents.ModelCallHookResult, error) {
-    if call.ContextTokens < 100_000 {
-        return agents.ContinueModelCall(), nil
-    }
-    return agents.ContinueModelCall().WithMessages(
-        responses.UserMessage("You are close to the context limit. Summarise findings before continuing."),
-    ), nil
-}
-```
-
-Hooks append in order, after the conversation. Only `BeforeModelCall` can add
-one — by `AfterModelCall` there is no request left to add to — and nothing is
-appended when a hook answers for the model, since the provider is never
-called.
-
-This is for a note the model should act on *now*. Reshaping the history itself
-— trimming it, summarising it — belongs to the conversation summarizer, which
-already owns the whole transcript; a hook is deliberately never handed it.
-
-#### Hook State
-
-`ModelCall.State` is the run's key-value scratchpad, the same one tools read
-through `ToolCall.State`. Write to it by returning updates, exactly as a tool
-returns `StateUpdates`:
+History and prompt middleware use the same registration:
 
 ```go
-func (p *policy) BeforeModelCall(ctx context.Context, call *agents.ModelCall) (agents.ModelCallHookResult, error) {
-    if call.State["warned"] == "1" {
-        return agents.ContinueModelCall(), nil
+type promptPolicy struct { agents.NoopMiddleware }
+
+func (p *promptPolicy) WrapGetPrompt(next agents.GetPromptFunc) agents.GetPromptFunc {
+    return func(ctx context.Context, deps *agents.Dependencies) (string, error) {
+        prompt, err := next(ctx, deps)
+        if err != nil { return "", err }
+        return prompt + "\nCite sources for factual claims.", nil
     }
-    return agents.ContinueModelCall().
-        WithMessages(responses.UserMessage("Heads up: this run is nearly out of budget.")).
-        WithStateUpdates(map[string]string{"warned": "1"}), nil
 }
+
+// On agents.AgentOptions or AgentConfig:
+// Middlewares: []agents.Middleware{&promptPolicy{}},
 ```
 
-State persists with the thread, so a hook can remember something across
-invocations — that it has already warned, so it warns once rather than every
-iteration. Tools and hooks share one flat namespace: what a tool wrote, the
-next call's hooks read. A write lands as soon as it is returned, so a later
-hook in the chain reads what an earlier one just wrote; the last writer of a
-key wins, and a hook that writes only its own keys never disturbs another's.
+Implement `WrapLoadMessages(next agents.LoadMessagesFunc)` and
+`WrapSaveMessages(next agents.SaveMessagesFunc)` to wrap conversation persistence.
+Their request structs carry the namespace, thread/run IDs, and, for saves,
+messages and metadata. Return without calling `next` to serve cached history or
+skip a write. Pass copies when modifying inputs or returned messages.
+`WrapGetPrompt(next agents.GetPromptFunc)` receives the existing `Dependencies`.
+History/prompt errors follow the underlying operation's runtime retry policy.
 
-> `WithStateUpdates` is the only way to write. Assigning into `call.State`
-> changes nothing: a durable runtime rebuilds that map from a serialized
-> payload, so a write on the far side reaches nothing — and it is copied
-> locally too, so the mistake fails the same way in both places rather than
-> only once you deploy.
+Custom runtime adapters can use `ExecuteLoadMessagesWithMiddleware`,
+`ExecuteSaveMessagesWithMiddleware`, and `ExecuteGetPromptWithMiddleware` inside
+their existing steps, or bind the real providers with `WrapHistoryPersistence`
+and `WrapPromptProvider`. Middleware results are returned by that same step;
+there are no separate middleware activities. Summary writes, ID/clock generation,
+thread listing and full-transcript reads keep their existing behavior.
+
+Agent retry and fallback policies can be configured alongside other middleware:
+
+```go
+import agentmiddleware "github.com/hastekit/agent-sdk-go/pkg/agents/middleware"
+
+// In agents.AgentOptions:
+Middlewares: []agents.Middleware{
+    agentmiddleware.NewFallbackModels("Anthropic/claude-sonnet-4-5"),
+    agentmiddleware.NewRetry(agentmiddleware.RetryConfig{MaxAttempts: 3}),
+    // Attempt tracing and attachment middleware go inside these policies.
+},
+```
+
+Fallback is outermost so each model gets its own retry budget. Targets use
+`Provider/model`; the model client's existing provider configuration supplies
+credentials. The SDK's gateway-backed model client supports explicit targets;
+custom providers can implement `agents.ModelTargetProvider`. Changing targets
+never changes the agent's bound model or the request stored in history. Retry
+uses the gateway's transient-error classification, jittered backoff, and
+`Retry-After` handling. Context cancellation and agent stop always end the chain.
+
+Retries and fallback stop after the first published chunk, including stream
+metadata. A failure after publication, or a policy's final failure, becomes a
+terminal model error in Temporal and Restate so runtime error retries do not
+restart the entire policy. All attempts execute inside the same model activity
+or run step; short backoff waits occupy that execution. Individual attempts are
+not separately journaled: worker loss or activity timeout can still restart the
+step, and external stream delivery is not exactly-once. Budget activity timeouts
+for the whole chain. Avoid also installing gateway retry/fallback middleware
+under an agent policy, which would multiply attempts.
+
+Each attempt gets a fresh top-level request and call-metadata copy. As with all
+agent middleware, nested content is read-only: copy any nested values before
+modifying them. Middleware inside retry can execute more than once; accounting
+and tracing should distinguish attempts from the overall call. Model-specific
+options and provider-owned file IDs must be compatible with fallback targets;
+application attachment references can be resolved by attachment middleware.
+
+Migration: `Hooks` is now `Middlewares`, `agents.Hook` is `agents.Middleware`,
+and `ExecuteWrappedModelCall` / `ExecuteWrappedToolCall` are now
+`ExecuteModelCallWithMiddleware` / `ExecuteToolCallWithMiddleware`. Built-in
+attachment middleware lives in `pkg/agents/middleware` as `AttachmentMiddleware`.
+Embed `agents.NoopMiddleware` for the operations you do not override. The root
+package exposes `AgentMiddleware`; its existing `Middleware` alias continues
+referring to gateway middleware.
 
 ### Conversation History
 
@@ -1145,9 +1296,11 @@ Enable conversation memory across interactions:
 
 ```go
 // Create a file-backed conversation manager
-memory := hastekit.NewFileHistory("./conversations")
+memory, err := hastekit.OpenFileHistory("./conversations")
+if err != nil { log.Fatal(err) }
+defer memory.Close()
 
-agent := hastekit.NewAgent(&hastekit.AgentConfig{
+agent := hastekit.MustNewAgent(&hastekit.AgentConfig{
     Name:        "Memory Agent",
     Instruction: hastekit.NewPrompt("You are a helpful assistant."),
     LLM:         model,
@@ -1212,81 +1365,46 @@ Adapters implement `history.TranscriptReader` to support this; the built-in in-m
 
 Create fault-tolerant agents that survive crashes and failures:
 
-A durable agent is a regular agent with a durable `Runtime` attached via
-`hastekit.WithRuntime`. Create the runtime, build the agent, then start the
-runtime; invoke agents over HTTP with `hastekit.NewHTTPHandler()`.
-
-#### Using Restate
-
-```go
-client := hastekit.NewLLMClient([]hastekit.ProviderConfig{
-    {
-        ProviderName: hastekit.ProviderOpenAI,
-        ApiKeys: []*hastekit.APIKeyConfig{
-            {Name: "default", APIKey: os.Getenv("OPENAI_API_KEY")},
-        },
-    },
-})
-
-// Restate service bind address + Redis for streaming
-rt, err := hastekit.NewRestateRuntime("0.0.0.0:9081", "localhost:6379")
-if err != nil {
-    log.Fatal(err)
-}
-broker, err := hastekit.NewRedisStreamBroker("localhost:6379")
-if err != nil {
-    log.Fatal(err)
-}
-
-// Create durable agent
-agent := hastekit.NewAgent(&hastekit.AgentConfig{
-    Name:        "DurableAgent",
-    Instruction: hastekit.NewPrompt("You are a helpful assistant."),
-    LLM:         client.Model("OpenAI/gpt-4o-mini"),
-    History:     hastekit.NewFileHistory("./conversations"),
-}, hastekit.WithRuntime(rt, broker))
-
-// Start Restate service, then serve the invoke endpoint
-rt.Start()
-http.ListenAndServe(":8070", hastekit.NewHTTPHandler())
-
-// Register deployment with Restate server
-// restate deployments register http://localhost:9081
-```
-
-#### Using Temporal
+Register worker agents with a runtime instance. Registrations are isolated by
+instance and must finish before `Serve` starts. Register specialists as well as
+entry agents when they execute through that runtime. Do not mutate handoffs or
+configuration while the worker is serving.
 
 ```go
-client := hastekit.NewLLMClient([]hastekit.ProviderConfig{
-    {
-        ProviderName: hastekit.ProviderOpenAI,
-        ApiKeys: []*hastekit.APIKeyConfig{
-            {Name: "default", APIKey: os.Getenv("OPENAI_API_KEY")},
-        },
-    },
-})
+broker, err := hastekit.NewRedisStreamBroker("localhost:6379", "", 0)
+if err != nil { log.Fatal(err) }
 
-// Temporal server endpoint + Redis for streaming
-rt, err := hastekit.NewTemporalRuntime("localhost:7233", "localhost:6379")
-if err != nil {
-    log.Fatal(err)
-}
-broker, err := hastekit.NewRedisStreamBroker("localhost:6379")
-if err != nil {
-    log.Fatal(err)
-}
+rt, err := hastekit.NewTemporalRuntime("localhost:7233", broker)
+if err != nil { log.Fatal(err) }
+defer rt.Close()
 
-// Create Temporal agent
-agent := hastekit.NewAgent(&hastekit.AgentConfig{
-    Name:        "TemporalAgent",
+agent, err := hastekit.NewAgent(&hastekit.AgentConfig{
+    Name: "DurableAgent", LLM: model,
     Instruction: hastekit.NewPrompt("You are a helpful assistant."),
-    LLM:         client.Model("OpenAI/gpt-4o-mini"),
-}, hastekit.WithRuntime(rt, broker))
+}, hastekit.WithRuntime(rt))
+if err != nil { log.Fatal(err) }
 
-// Start the Temporal worker, then serve the invoke endpoint
-rt.Start()
-http.ListenAndServe(":8070", hastekit.NewHTTPHandler())
+registry := hastekit.NewRegistry()
+if err := registry.Register(agent); err != nil { log.Fatal(err) }
+// The invoking application's HTTP server uses hastekit.NewHTTPHandler(registry).
+// The worker process blocks here until ctx is canceled:
+if err := rt.Serve(ctx); err != nil { log.Fatal(err) }
 ```
+
+Both runtime constructors require a non-nil broker; there is no in-memory
+fallback. Use Redis or another shared broker across processes. An explicitly
+supplied in-memory broker is suitable only when callers and workers share the
+same instance in one process. `WithRuntime(rt)` gets the broker from the runtime; ordinary local agents still default to an in-memory broker.
+
+For Restate, create `NewRestateRuntime("http://localhost:8080", broker)` with the
+Restate ingress URL. Construct agents with `NewAgent` and `WithRuntime` in the same way, then run
+`rt.Serve(ctx, "localhost:9081")`. Register that local service address as a
+Restate deployment. The ingress URL and the service listen address are separate.
+`Serve` waits for shutdown; `Close` stops serving and releases owned resources.
+
+See the [Temporal example](examples/agents/9_temporal_agent/main.go) and
+[Restate example](examples/agents/8_restate_agent/main.go) for worker and HTTP
+serving in one process with signal-driven shutdown.
 
 ## Documentation
 
@@ -1350,7 +1468,7 @@ Any other OpenAI-compatible endpoint can be added the same way: point `openaicom
 ```
 agent-sdk-go/
 └── pkg/
-    ├── agents/              # Agent orchestration, hooks, tool annotations
+    ├── agents/              # Agent orchestration, middlewares, tool annotations
     │   ├── runtime/         # Durable execution runtimes
     │   │   ├── restate_runtime/
     │   │   └── temporal_runtime/
@@ -1396,3 +1514,33 @@ This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENS
 - [HasteKit Docs](https://github.com/hastekit/hastekit-docs) - Documentation and examples
 
 ---
+
+
+## Attachments backed by your own storage
+
+Images and documents can use an immutable `attachment://...` reference in `file_id` instead of storing base64 in
+conversation history. The SDK includes a private filesystem store, replaceable
+`Store`/`UploadStore` interfaces, and a shared bounded cache. One middleware,
+`middleware.NewAttachmentMiddleware`, keeps the bytes out of everything durable in both
+directions: it stores what a tool returns inline and replaces it with a
+reference, externalizes complete model-generated images before the response
+leaves the model call, and resolves every reference back into inline provider
+data inside a later model call. Generated-image items keep the shared Responses
+shape by carrying the reference in `image_generation_call.result`. Complete live
+image events carry that reference too, while binary partial-image previews are
+suppressed; other streaming remains unchanged. Without the middleware, native
+provider streaming still passes through as before. Add the middleware to an
+agent to turn attachment support on for it; the LLM client is not involved, and
+sends exactly the request it is handed.
+
+See [owned attachments](pkg/attachments/README.md) for local setup, caching, and
+Temporal/Restate configuration.
+
+Pass `agui.WithAttachmentStore(store)` to the embedded web handler to enable
+`/attachments/` upload/download APIs and the chat file picker. The
+[sample chat](samples/attachments/main.go) demonstrates the full attachment flow. Uploads accept original files including
+DOCX, CSV, TXT and audio. Images use image inputs; other files use native file
+inputs. The middleware resolves file references to base64 data with the stored
+MIME type and filename; it does not extract text, transcribe, or convert formats.
+The selected provider decides whether it supports a file's type. Non-image
+files are served as downloads, and upload/dispatch size limits still apply.

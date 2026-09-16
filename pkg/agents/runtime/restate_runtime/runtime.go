@@ -15,6 +15,7 @@ import (
 
 // WorkflowInput is the input structure for the Restate workflow.
 type WorkflowInput struct {
+	RunID     string
 	AgentName string `json:"agent_name"`
 
 	Namespace     string
@@ -37,15 +38,15 @@ type WorkflowInput struct {
 }
 
 // RestateRuntime executes agents via Restate workflows for durability.
-// It registers the agent in the global registry and invokes a Restate workflow
-// that reconstructs the agent with RestateExecutor for crash recovery.
+// It invokes a workflow whose service reconstructs the agent from its
+// explicitly registered configuration for crash recovery.
 type RestateRuntime struct {
 	client *ingress.Client
 	broker agents.StreamBroker
 }
 
 // NewRestateRuntime creates a new Restate runtime.
-// The agentName is used to look up the agent config inside the workflow.
+// The agent name is used to look up configuration registered by the service.
 func NewRestateRuntime(endpoint string, broker agents.StreamBroker) *RestateRuntime {
 	client := ingress.NewClient(endpoint, restate.WithHttpClient(&http.Client{Transport: otelhttp.NewTransport(http.DefaultTransport)}))
 	return &RestateRuntime{
@@ -54,7 +55,7 @@ func NewRestateRuntime(endpoint string, broker agents.StreamBroker) *RestateRunt
 	}
 }
 
-// Run registers the agent in the global registry and invokes the Restate workflow.
+// Run invokes a workflow for an agent already registered with the service.
 func (r *RestateRuntime) Run(ctx context.Context, agent *agents.Agent, in *agents.AgentInput) (*agents.AgentOutput, error) {
 	if in.StreamID == "" {
 		in.StreamID = uuid.NewString()
@@ -63,6 +64,7 @@ func (r *RestateRuntime) Run(ctx context.Context, agent *agents.Agent, in *agent
 
 	input := &WorkflowInput{
 		AgentName:         agent.Name,
+		RunID:             in.RunID,
 		Namespace:         in.Namespace,
 		ThreadID:          in.ThreadID,
 		PreviousRunID:     in.PreviousRunID,
@@ -79,3 +81,10 @@ func (r *RestateRuntime) Run(ctx context.Context, agent *agents.Agent, in *agent
 		"Run",
 	).Request(ctx, input)
 }
+
+// StreamBroker returns the broker configured for this runtime.
+func (r *RestateRuntime) StreamBroker() agents.StreamBroker { return r.broker }
+
+// RegisterAgent is a no-op for this invocation-only runtime. Worker configurations
+// are registered separately; the top-level SDK runtime manages that registration.
+func (r *RestateRuntime) RegisterAgent(options *agents.AgentOptions) error { return nil }

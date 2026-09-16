@@ -2,6 +2,7 @@ package history
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 	"sync"
 	"time"
@@ -208,6 +209,9 @@ func (p *InMemoryConversationPersistence) SaveMessages(ctx context.Context, name
 	// the earlier messages, often the user turn that opened the run) and
 	// don't re-index the run in its thread.
 	if existing, ok := p.messages[historyKey(namespace, runId)]; ok {
+		if existing.ThreadID != threadId {
+			return fmt.Errorf("run ID %q already belongs to another thread", runId)
+		}
 		existing.Messages = append(existing.Messages, messages...)
 		if meta != nil {
 			existing.Meta = meta

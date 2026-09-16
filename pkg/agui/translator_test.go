@@ -306,6 +306,54 @@ func TestImageGenerationEmitsOneMarkdownMessage(t *testing.T) {
 	for _, e := range events {
 		assert.NotEqual(t, EventCustom, e.EventType())
 	}
+
+	// Replayed/internal completed chunks may already carry the durable
+	// reference; expose the same authorized route history uses.
+	refEvents := NewTranslator("thread-1", "run-2").Translate(imageDone(
+		"ig_2", "png", "attachment://0123456789abcdef0123456789abcdef?version=sha256",
+	))
+	require.Len(t, refEvents, 3)
+	assert.Equal(t,
+		"![generated image](/attachments/0123456789abcdef0123456789abcdef?version=sha256)",
+		refEvents[1].(*TextMessageContentEvent).Delta,
+	)
+}
+
+func TestCompletedResponseRendersMissingImages(t *testing.T) {
+	for _, doneResult := range []string{"", "BBBB"} {
+		t.Run("done result="+doneResult, func(t *testing.T) {
+			tr := NewTranslator("thread-1", "run-1")
+			tr.Start()
+			tr.Translate(&responses.ResponseChunk{
+				OfResponseCreated: &responses.ChunkResponse[constants.ChunkTypeResponseCreated]{},
+			})
+			// An empty done result must not prevent the final image from rendering.
+			doneEvents := tr.Translate(imageDone("ig_1", "png", doneResult))
+			completed := &responses.ResponseChunk{
+				OfResponseCompleted: &responses.ChunkResponse[constants.ChunkTypeResponseCompleted]{
+					Response: responses.ChunkResponseData{Output: []responses.OutputMessageUnion{
+						{OfImageGenerationCall: &responses.ImageGenerationCallMessage{ID: "ig_1", OutputFormat: "png", Result: "BBBB"}},
+						{OfImageGenerationCall: &responses.ImageGenerationCallMessage{ID: "ig_2", OutputFormat: "png", Result: "CCCC"}},
+					}},
+				},
+			}
+			completedEvents := tr.Translate(completed)
+			require.Equal(t, EventStepFinished, completedEvents[len(completedEvents)-1].EventType())
+			var images []*TextMessageContentEvent
+			for _, event := range append(doneEvents, completedEvents...) {
+				if content, ok := event.(*TextMessageContentEvent); ok {
+					images = append(images, content)
+				}
+			}
+			require.Len(t, images, 2)
+			assert.Equal(t, "ig_1", images[0].MessageID)
+			assert.Equal(t, "![generated image](data:image/png;base64,BBBB)", images[0].Delta)
+			assert.Equal(t, "ig_2", images[1].MessageID)
+			assert.Equal(t, "![generated image](data:image/png;base64,CCCC)", images[1].Delta)
+			assert.Empty(t, tr.Translate(completed), "repeated completed events must not duplicate images")
+			assert.Empty(t, tr.Translate(imageDone("ig_2", "png", "CCCC")))
+		})
+	}
 }
 
 func runPausedWith(interrupts ...responses.Interrupt) *responses.ResponseChunk {

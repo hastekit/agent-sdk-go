@@ -628,7 +628,6 @@ func TestBackgroundTask_AfterHandoffStreamsOnTheThreadsChannels(t *testing.T) {
 	refs := tool.awaited()
 	require.Len(t, refs, 1)
 	assert.Equal(t, "root", refs[0].AgentName, "the run's owner")
-	assert.Equal(t, "specialist", refs[0].ToolAgentName, "but the tool is the specialist's")
 	assert.Equal(t, agents.StreamIDForTask("test", "thread-handoff-stream", "task-1"), refs[0].TaskStreamID)
 
 	chunks, err := root.StreamBroker().Subscribe(context.Background(), refs[0].TaskStreamID)

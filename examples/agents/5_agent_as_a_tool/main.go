@@ -32,7 +32,7 @@ func main() {
 	agentTool := tools.NewAgentTool(
 		"get_user_name",
 		"Returns the user's name",
-		hastekit.NewAgent(&hastekit.AgentConfig{
+		hastekit.MustNewAgent(&hastekit.AgentConfig{
 			Name:        "Hello world agent",
 			Instruction: hastekit.NewPrompt("You are helpful assistant."),
 			LLM:         model,
@@ -40,7 +40,7 @@ func main() {
 		tools.SubAgentContextModeNone,
 	)
 
-	agent := hastekit.NewAgent(&hastekit.AgentConfig{
+	agent := hastekit.MustNewAgent(&hastekit.AgentConfig{
 		Name:        "Hello world agent",
 		Instruction: hastekit.NewPrompt("You are helpful assistant."),
 		LLM:         model,

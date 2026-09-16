@@ -150,42 +150,15 @@ func TestRunFeedWithoutACursorStartsFromNow(t *testing.T) {
 	assert.NotEmpty(t, out.Cursor)
 }
 
-// --- namespaces -------------------------------------------------------------
-
-func TestFeedNamespaces(t *testing.T) {
-	// Built through url.Values so a value with a space in it is encoded
-	// rather than breaking the request line httptest parses.
-	namespacesOf := func(namespaces string) []string {
-		target := "/runs"
-		if namespaces != "" {
-			target += "?" + url.Values{"namespaces": {namespaces}}.Encode()
-		}
-		return feedNamespaces(httptest.NewRequest(http.MethodGet, target, nil), "default")
+// Even a client-supplied list containing its own namespace is unsupported.
+func TestRunFeedRejectsNamespaceOverrides(t *testing.T) {
+	agent := agents.NewAgent(&agents.AgentOptions{Name: "Helper"})
+	handler := NewHandler(registry{"Helper": agent})
+	for _, raw := range []string{"", "other", "default,other", "default", "a,b"} {
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, httptest.NewRequest("GET", "/agents/Helper/runs?namespaces="+url.QueryEscape(raw)+"&wait=0", nil))
+		require.Equal(t, http.StatusBadRequest, w.Code)
 	}
-
-	assert.Equal(t, []string{"default"}, namespacesOf(""), "the handler's own, for an ordinary UI")
-	assert.Equal(t, []string{"a", "b"}, namespacesOf("a,b"))
-	assert.Equal(t, []string{"a", "b"}, namespacesOf("a, b ,"), "trimmed, blanks dropped")
-	assert.Equal(t, []string{"a"}, namespacesOf("a,a"), "deduped: one subscription each")
-}
-
-// A run in a namespace the client did not ask about is not its business.
-func TestRunFeedIgnoresOtherNamespaces(t *testing.T) {
-	llm := &scriptedLLM{steps: []scriptedStep{{response: assistantTextResponse("hi")}}}
-	agent := agents.NewAgent(&agents.AgentOptions{Name: "Helper"}).WithLLM(llm)
-
-	server := httptest.NewServer(NewHandler(registry{"Helper": agent}))
-	defer server.Close()
-
-	start := getFeed(t, server.URL+"/agents/Helper/runs?wait=0&namespaces=other")
-
-	postRun(t, server, "Helper", RunAgentInput{
-		ThreadID: "conversation-e",
-		Messages: []Message{{ID: "u1", Role: RoleUser, Content: "hi"}},
-	})
-
-	out := getFeed(t, server.URL+"/agents/Helper/runs?wait=0&namespaces=other&cursor="+start.Cursor)
-	assert.Empty(t, out.Events)
 }
 
 // The note the UI shows while a job runs is driven by these two events, on

@@ -415,12 +415,14 @@ func (e *MessagesSnapshotEvent) Marshal() ([]byte, error) {
 // role/content/name plus optional toolCalls array on assistant
 // messages, plus toolCallId on tool messages.
 type Message struct {
-	ID         string     `json:"id"`
-	Role       Role       `json:"role"`
-	Content    string     `json:"content,omitempty"`
-	Name       string     `json:"name,omitempty"`
-	ToolCalls  []ToolCall `json:"toolCalls,omitempty"`
-	ToolCallID string     `json:"toolCallId,omitempty"`
+	// ContentParts is the AG-UI multipart user content alternative to Content.
+	ContentParts []ContentPart `json:"-"`
+	ID           string        `json:"id"`
+	Role         Role          `json:"role"`
+	Content      string        `json:"content,omitempty"`
+	Name         string        `json:"name,omitempty"`
+	ToolCalls    []ToolCall    `json:"toolCalls,omitempty"`
+	ToolCallID   string        `json:"toolCallId,omitempty"`
 	// EncryptedValue carries provider-encrypted reasoning on a
 	// role="reasoning" message, per the AG-UI reasoning message shape.
 	// Empty (and omitted) on every other role.
@@ -476,10 +478,10 @@ func (e *CustomEvent) Marshal() ([]byte, error) {
 
 // Custom event names. AG-UI 0.0.53 has no native INTERRUPT event
 // type; the de-facto standard (used by CopilotKit's useInterrupt
-// hook and LangGraph's interrupt protocol) is a CUSTOM event named
+// middleware and LangGraph's interrupt protocol) is a CUSTOM event named
 // "on_interrupt" carrying an application-defined value payload,
 // with the run terminated via RUN_FINISHED immediately after so the
-// onRunFinalized hook fires. The resume contract uses
+// onRunFinalized middleware fires. The resume contract uses
 // forwardedProps.command.resume on the next POST.
 //
 // Everything else stays under the "hastekit.*" namespace so AG-UI-

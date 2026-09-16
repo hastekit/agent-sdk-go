@@ -31,7 +31,7 @@ type SkillsWithHint = agents.SkillsWithHint
 //
 //	registry, err := hastekit.NewSkillRegistryFromDir("./skills")
 //
-//	agent := hastekit.NewAgent(&hastekit.AgentConfig{
+//	agent := hastekit.MustNewAgent(&hastekit.AgentConfig{
 //		Instruction: hastekit.NewPrompt("..."),
 //		Skills:      registry,
 //	})
