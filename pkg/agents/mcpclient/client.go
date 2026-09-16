@@ -150,6 +150,8 @@ func WithEnv(env map[string]string) McpServerOption {
 	}
 }
 
+// WithCacheTTL caps a positive server TTL and supplies the TTL when the server
+// returns zero or omits it. If neither TTL is positive, schemas are not cached.
 func WithCacheTTL(ttl time.Duration) McpServerOption {
 	return func(srv *MCPClient) {
 		srv.CacheTTL = ttl
@@ -241,6 +243,12 @@ func (srv *MCPClient) ListTools(ctx context.Context, runContext map[string]any) 
 		return nil, err
 	}
 
+	// A non-positive server TTL may use an explicit local TTL override.
+	// Without one, bypass caching instead of storing an unbounded entry.
+	if listing.TTL <= 0 && srv.CacheTTL <= 0 {
+		return srv.buildLazyTools(listing.Tools, listing.Meta, conn), nil
+	}
+
 	key := privateKey
 	if listing.shareable() {
 		key = sharedKey
@@ -261,9 +269,9 @@ func (srv *MCPClient) ListTools(ctx context.Context, runContext map[string]any) 
 
 // cacheTTL is how long a listing may be held: what the server asked for,
 // bounded by what the caller allowed, the way a caching proxy's own max-age
-// bounds an upstream's. Zero means no expiry, which is what injecting a
-// SchemaCache has always meant and stays the behaviour when nobody says
-// otherwise.
+// bounds an upstream's. A non-positive server TTL uses the configured local
+// TTL. Responses bypass caching if neither TTL is positive, including legacy
+// responses without cache directives.
 func (srv *MCPClient) cacheTTL(listing toolListing) time.Duration {
 	if listing.TTL > 0 && srv.CacheTTL > 0 {
 		return min(listing.TTL, srv.CacheTTL)

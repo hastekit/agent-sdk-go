@@ -168,7 +168,9 @@ func echoServer(t *testing.T) (url string, namesSeen func() []string) {
 	var mu sync.Mutex
 	var seen []string
 
-	server := mcp.NewServer(&mcp.Implementation{Name: "echo-server", Version: "0.1.0"}, nil)
+	server := mcp.NewServer(&mcp.Implementation{Name: "echo-server", Version: "0.1.0"}, &mcp.ServerOptions{
+		SetCacheable: func(_ context.Context, _ mcp.Request, c *mcp.Cacheable) { c.TTLMs = 60000 },
+	})
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "echo",
 		Description: "Echoes back the name it was called under.",

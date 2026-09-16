@@ -8,7 +8,7 @@ require (
 	github.com/bytedance/sonic v1.15.0
 	github.com/google/uuid v1.6.0
 	github.com/invopop/jsonschema v0.13.0
-	github.com/modelcontextprotocol/go-sdk v1.7.0
+	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/qdrant/go-client v1.17.1
 	github.com/redis/go-redis/v9 v9.17.3
 	github.com/restatedev/sdk-go v0.23.0

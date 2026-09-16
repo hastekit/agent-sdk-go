@@ -30,8 +30,7 @@ type SchemaCache interface {
 	//
 	// A store that can expire keys itself should use ttl; one that cannot may
 	// ignore it, since the entry carries its own ExpiresAt and is checked on
-	// the way out. A ttl of zero means no expiry — nobody, server or caller,
-	// put a life on this entry.
+	// the way out. ListTools only stores entries with a positive ttl.
 	Set(ctx context.Context, key string, entry *CachedToolEntry, ttl time.Duration)
 	// Delete removes a cached entry by key.
 	Delete(ctx context.Context, key string)
