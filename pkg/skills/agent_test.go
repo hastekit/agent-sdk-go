@@ -38,3 +38,44 @@ func TestAgentBindsStoreToInputNamespace(t *testing.T) {
 	require.Len(t, prompt.skills, 1)
 	require.Equal(t, "review", prompt.skills[0].Name)
 }
+
+func TestSkillStoreIsSharedAcrossAgents(t *testing.T) {
+	ctx := context.Background()
+	store, err := skills.NewFileStore(t.TempDir())
+	require.NoError(t, err)
+	var configured []*agents.Agent
+	for _, name := range []string{"reviewer", "writer"} {
+		// Each agent can construct its own adapter over the shared store.
+		source, err := skills.NewSkillSet(name+"-library", store)
+		require.NoError(t, err)
+		configured = append(configured, agents.NewAgent(&agents.AgentOptions{Name: name, Skills: []agents.SkillSet{source}}))
+	}
+	unconfigured := agents.NewAgent(&agents.AgentOptions{Name: "without-skills"})
+	for _, agent := range configured {
+		catalog, err := agent.ListSkills(ctx, "tenant", nil, agents.SkillSelection{})
+		require.NoError(t, err)
+		require.Empty(t, catalog)
+	}
+	for _, description := range []string{"Initial instructions", "Updated instructions"} {
+		_, err := store.Put(ctx, "tenant", skills.Bundle{Files: map[string][]byte{
+			"SKILL.md": []byte("---\nname: review\ndescription: " + description + "\n---\nInstructions"),
+		}})
+		require.NoError(t, err)
+		for _, agent := range configured {
+			catalog, err := agent.ListSkills(ctx, "tenant", nil, agents.SkillSelection{Enable: []string{"review"}})
+			require.NoError(t, err)
+			require.Len(t, catalog, 1)
+			require.Equal(t, description, catalog[0].Description)
+			require.True(t, catalog[0].Enabled)
+		}
+	}
+	catalog, err := unconfigured.ListSkills(ctx, "tenant", nil, agents.SkillSelection{})
+	require.NoError(t, err)
+	require.Empty(t, catalog)
+	require.NoError(t, store.Delete(ctx, "tenant", "review"))
+	for _, agent := range configured {
+		catalog, err := agent.ListSkills(ctx, "tenant", nil, agents.SkillSelection{})
+		require.NoError(t, err)
+		require.Empty(t, catalog)
+	}
+}

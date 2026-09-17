@@ -36,7 +36,8 @@ type options struct {
 }
 
 // WithSkillStore enables namespace-scoped skill management APIs and the embedded
-// UI library. Configure an adapter over the same store in the agent's Skills.
+// UI library, shared across agents. Configure an adapter over the same store
+// in each participating agent's Skills. Agent names do not scope stored content.
 // Protect management routes with application authorization middleware.
 func WithSkillStore(store skills.Store) Option { return func(o *options) { o.skillStore = store } }
 

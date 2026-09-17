@@ -28,6 +28,29 @@ The old public `SkillRegistry`, `AsSkillSet`, `SkillTool`, `SkillHint`, and
 `AgentConfig.Skills`. The root `hastekit.NewFilesystemSkillSet` and
 `hastekit.NewFSSkillSet` convenience aliases remain supported.
 
+## Sharing a store across agents
+
+Create the store once and inject a `StoredSkillSet` backed by it into each agent
+that should have access. Storage is shared across agents within the caller's
+namespace; neither the agent name nor the skill-set name creates a storage scope.
+Agents without an injected skill set do not receive the library automatically.
+
+```go
+store, err := skills.NewFileStore("./data/skills")
+if err != nil { return err }
+library, err := skills.NewSkillSet("library", store)
+if err != nil { return err }
+
+reviewer := &hastekit.AgentConfig{Name: "Reviewer", Skills: []hastekit.SkillSet{library}}
+writer := &hastekit.AgentConfig{Name: "Writer", Skills: []hastekit.SkillSet{library}}
+// Set each agent's LLM and instruction before constructing it.
+```
+
+Separate adapters over the same store can configure different availability
+policies for each agent. Uploads, replacements, and deletions are visible on the
+next catalog listing or run; agents do not need to be reconstructed. Pass the
+same store to `agui.WithSkillStore(store)` to manage that shared library.
+
 ## Filesystem setup and embedded UI
 
 ```go
@@ -54,7 +77,8 @@ SDK as `hastekit`. `model` is your configured provider. Protect the HTTP handler
 with your application's authentication and management authorization before
 exposing it publicly; `web.Handler` can be wrapped with that middleware.
 
-The composer's **+ → Skills → Manage Skills** action uploads a skill folder or selected
+The sidebar's **Skill library** action (also available through the composer's
+**+ → Skills → Manage Skills**) uploads a skill folder or selected
 files, lists stored skills, previews SKILL.md as text, downloads resources, and deletes skills with an inline confirmation. Deletion refreshes the agent picker.
 The upload button explicitly replaces a same-named skill's entire bundle.
 Newly uploaded skills appear in the agent picker when it uses this store adapter.

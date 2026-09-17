@@ -3,7 +3,7 @@ import { deleteSkill, fetchSkills, fetchStoredSkills, skillFileUrl, uploadSkill,
 
 import { validateSkillUpload } from "./skill-upload";
 
-export function SkillLibrary({agentName, onClose, onSaved}: {agentName: string; onClose: () => void; onSaved: () => void}) {
+export function SkillLibrary({agentNames, onClose, onSaved}: {agentNames: string[]; onClose: () => void; onSaved: () => void}) {
   const dialog = useRef<HTMLDialogElement>(null);
   const [skills, setSkills] = useState<StoredSkill[]>([]);
   const [cursor, setCursor] = useState("");
@@ -29,11 +29,12 @@ export function SkillLibrary({agentName, onClose, onSaved}: {agentName: string; 
   async function save() {
     setBusy(true); setError(""); setNotice("");
     try {
-      const catalog = await fetchSkills(agentName);
+      const catalogs = await Promise.all(agentNames.map(fetchSkills));
+      const catalog = catalogs.flat();
       await validateSkillUpload(files, catalog.filter(skill => skill.global).map(skill => skill.name));
       const saved = await uploadSkill(files);
       setFiles([]); setSelected(null); previewRequest.current++;
-      setNotice(`Saved ${saved.name}. Enable it in the agent’s Skills menu if it is opt-in.`);
+      setNotice(`Saved ${saved.name}. It is available to agents using this library. Enable it in their Skills menu if it is opt-in.`);
       onSaved(); await load();
     } catch (err) { setError(String(err)); }
     finally { setBusy(false); }
@@ -60,7 +61,7 @@ export function SkillLibrary({agentName, onClose, onSaved}: {agentName: string; 
     } catch (err) { if (request === previewRequest.current) {setContent(""); setError(String(err));} }
   }
   return <dialog ref={dialog} className="skill-library" onCancel={onClose} aria-labelledby="skill-library-title">
-    <header><div><h2 id="skill-library-title">Skill library</h2><p>Manage the skills available to your agents.</p></div><button onClick={onClose} aria-label="Close skill library">Close</button></header>
+    <header><div><h2 id="skill-library-title">Skill library</h2><p>Manage the shared library for agents configured to use it.</p></div><button onClick={onClose} aria-label="Close skill library">Close</button></header>
     <details className="skill-upload" open>
       <summary>Upload a skill</summary>
       <p>Choose a folder with SKILL.md and supporting files, or select individual files. SKILL.md must include a name and description in its frontmatter.</p>
@@ -68,7 +69,7 @@ export function SkillLibrary({agentName, onClose, onSaved}: {agentName: string; 
         onChange={e => {setFiles(Array.from(e.target.files || [])); e.target.value = "";}} /></label>
       <label>Skill files<input type="file" multiple disabled={busy} onChange={e => {setFiles(Array.from(e.target.files || [])); e.target.value = "";}} /></label>
       <small>{files.length ? `${files.length} files selected` : "Up to 100 files, 10 MiB total. Folder selection preserves nested paths."}</small>
-      <p>Uploading replaces your existing skill with the same name. Names used by this agent’s global skills are reserved.</p>
+      <p>Uploading replaces the skill for every agent using this library. Names used by configured agents’ global skills are reserved.</p>
       <button disabled={busy || !files.length} onClick={() => void save()}>{busy ? "Working…" : "Upload / replace skill"}</button>
     </details>
     {error && <p role="alert" className="skill-library-error">{error}</p>}
@@ -80,7 +81,7 @@ export function SkillLibrary({agentName, onClose, onSaved}: {agentName: string; 
         <div className="skill-summary"><strong>{skill.name}</strong><p>{skill.description}</p><small>{1 + (skill.resources?.length || 0)} files</small></div>
         <div className="skill-row-actions">
           {pendingDelete === skill.name ? <div className="skill-delete-confirm" role="group" aria-label={`Confirm deletion of ${skill.name}`}>
-            <p>Delete this skill and all its files?</p>
+            <p>Delete this skill and all its files for every agent using this library?</p>
             <button disabled={busy} onClick={() => setPendingDelete(null)}>Cancel</button>
             <button className="skill-danger" disabled={busy} onClick={() => void remove(skill.name)}>Confirm delete</button>
           </div> : <>

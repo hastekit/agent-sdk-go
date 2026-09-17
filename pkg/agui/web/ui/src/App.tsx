@@ -551,13 +551,14 @@ export default function App() {
       className={"dark app" + (sidebarOpen ? "" : " sidebar-hidden")}
       data-copilotkit
     >
-      {libraryOpen && <SkillLibrary agentName={agentName} onClose={() => setLibraryOpen(false)} onSaved={() => setSkillRevision(v => v + 1)} />}
+      {libraryOpen && <SkillLibrary agentNames={agents} onClose={() => setLibraryOpen(false)} onSaved={() => setSkillRevision(v => v + 1)} />}
       <Sidebar
         threads={threads}
         activeThreadId={active.threadId}
         unseen={unseen}
         onSelect={selectThread}
         onNew={startNewChat}
+        onManageSkills={skillStoreEnabled ? () => setLibraryOpen(true) : undefined}
         onCollapse={() => setSidebarOpen(false)}
         listingSupported={listingSupported}
         error={error}
@@ -733,6 +734,7 @@ function Sidebar({
   unseen,
   onSelect,
   onNew,
+  onManageSkills,
   onCollapse,
   listingSupported,
   error,
@@ -742,6 +744,7 @@ function Sidebar({
   unseen: Set<string>;
   onSelect: (t: ThreadInfo) => void;
   onNew: () => void;
+  onManageSkills?: () => void;
   onCollapse: () => void;
   listingSupported: boolean;
   error: string | null;
@@ -763,6 +766,7 @@ function Sidebar({
           <ComposeIcon />
           New chat
         </button>
+        {onManageSkills && <button className="nav-item" onClick={onManageSkills}>Skill library</button>}
 
       </nav>
 
