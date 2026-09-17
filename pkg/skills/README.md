@@ -6,7 +6,7 @@ database or service, or use the filesystem and S3 implementations.
 
 A bundle contains `SKILL.md` and supporting files keyed by paths relative to the
 skill folder. `SKILL.md` must have YAML frontmatter with an explicit `name` and
-`description`. Policies in uploaded frontmatter are ignored. Bundles are limited
+`description`. Availability flags in uploaded frontmatter are ignored. Bundles are limited
 to 100 files and 10 MiB of decoded content; absolute and traversing paths are rejected.
 The HTTP upload limit is 20 MiB including multipart or base64 JSON overhead.
 
@@ -14,7 +14,7 @@ The HTTP upload limit is 20 MiB including multipart or base64 JSON overhead.
 
 `skills.NewFilesystemSkillSet(name, directory)` reads ordinary skill folders.
 `skills.NewFSSkillSet(name, fsys)` reads embedded or other `fs.FS` content.
-Both discover metadata on each listing and enable discovered skills by default.
+Both discover metadata on each listing and treat discovered skills as global, enabled by default.
 `skills.NewSkillSet(name, store)` reads uploaded bundles from a persistent store
 and defaults to opt-in. All implement the consumer-owned `agents.SkillSet`.
 
@@ -164,34 +164,38 @@ set, err := skills.NewSkillSet("library", store,
 )
 ```
 
-The set lists all pages from the caller's namespace and then the global namespace.
+The set lists all pages from the global namespace and then the caller's namespace.
 An empty global namespace disables this behavior; matching namespaces are listed
-only once. Caller-owned skills take precedence on duplicate names. Resolution
-checks the caller's namespace first and falls back to global only when the skill
-bundle is absent, never for a missing resource or an authorization/storage error.
-Policies apply equally to both sources.
+only once. Global skills take precedence on duplicate names. Conflicting user bundles remain
+in storage but are silently omitted from the agent catalog. Resolution checks the
+global namespace first and falls back to the caller only when the bundle is absent,
+never for a missing resource or an authorization/storage error. Required flags apply
+only to global skills; user-owned skills are always optional. The management UI
+rejects uploads whose frontmatter name conflicts with the current agent's global catalog.
 
 This setting affects only skill-set reads. UI uploads and management operations
 continue to use the authenticated user's namespace through `agui.WithNamespaceResolver`;
 request parameters cannot select the global namespace. Populate shared skills
 through trusted server-side calls to the store.
 
-The adapter defaults to `SkillOptIn`. Set a host-controlled default or per-skill
-policies when constructing it:
+The adapter defaults to optional and disabled. Configure defaults and required
+names when constructing it:
 
 ```go
 source, err := skills.NewSkillSet("library", store,
-    skills.WithDefaultPolicy(agents.SkillEnabled),
-    skills.WithPolicies(map[string]agents.SkillPolicy{
-        "safety-checklist": agents.SkillRequired,
-        "retired-process": agents.SkillBlocked,
-    }),
+    skills.WithGlobalNamespace("global"),
+    skills.WithDefaultEnabled(true),
+    skills.WithRequiredSkills("safety-checklist"),
 )
 ```
 
+`WithRequiredSkills` only affects names present in the global namespace. No flags
+are read from uploaded content. A required skill is always available to the model;
+it does not force the model to read it. Optional skills follow the user's choice,
+or `DefaultEnabled` when no choice is supplied. Choices remain browser-local.
+
 New runs refresh the catalog. An active run's enabled names and resource allowlist
-remain fixed; content reads see the latest saved bundle. Use an application-specific
-versioned store if content must remain pinned for an entire run. Deleting a skill
+remain fixed; content reads see the latest saved bundle. The store keeps only the latest bundle; there are no skill versions or aliases. Deleting a skill
 makes later reads fail; it does not erase previously read text from conversation history.
 Temporal and Restate use the existing skill-set activity/run-step wrappers.
 
@@ -223,4 +227,7 @@ uploaded HTML.
 To mount management APIs without AG-UI, use `skills.NewHandler(store, resolver)`.
 The resolver receives the authenticated request and returns the allowed namespace.
 
-Skill names have no source prefix. When names collide, the last entry in `AgentConfig.Skills` wins, replacing the description, policy, allowed files, and resolver. Within a source, the last listed entry wins. Selection policies apply after merging. Source names must still be unique for runtime registration.
+Skill names have no source prefix. Global entries always win against user entries,
+regardless of source order. Between entries of the same scope, the last entry in
+`AgentConfig.Skills` wins, replacing the metadata and resolver. Selection applies
+after merging. Source names must remain unique for runtime registration.

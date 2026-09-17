@@ -9,7 +9,7 @@ import (
 )
 
 // FilesystemSkillSet discovers SKILL.md folders and their resources on every
-// listing. All skills are enabled by default and may be disabled in AgentInput.
+// listing. All skills are global, enabled by default, and may be disabled in AgentInput.
 // Reads use a fresh catalog, so no mutable registry is shared between runs.
 // The filesystem must support concurrent reads; applications own its updates.
 type FilesystemSkillSet struct {
@@ -57,7 +57,8 @@ func (s *FilesystemSkillSet) ListSkills(ctx context.Context, _ string, _ map[str
 	}
 	skills := catalog.skillsList()
 	for i := range skills {
-		skills[i].Policy = agents.SkillEnabled
+		skills[i].DefaultEnabled = true
+		skills[i].Global = true
 	}
 	return skills, nil
 }

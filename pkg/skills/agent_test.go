@@ -28,7 +28,7 @@ func TestAgentBindsStoreToInputNamespace(t *testing.T) {
 	require.NoError(t, err)
 	_, err = store.Put(context.Background(), "tenant", skills.Bundle{Files: map[string][]byte{"SKILL.md": []byte("---\nname: review\ndescription: Review work\n---\nInstructions")}})
 	require.NoError(t, err)
-	source, err := skills.NewSkillSet("library", store, skills.WithDefaultPolicy(agents.SkillEnabled))
+	source, err := skills.NewSkillSet("library", store, skills.WithDefaultEnabled(true))
 	require.NoError(t, err)
 	prompt := &promptRecorder{}
 	agent := agents.NewAgent(&agents.AgentOptions{Name: "tester", Skills: []agents.SkillSet{source}, Instruction: prompt}).WithLLM(doneLLM{})

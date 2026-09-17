@@ -9,7 +9,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "test:stream": "node --test tests/resumable-stream.test.mjs",
-    "test:history": "node --test tests/history-pagination.test.mjs"
+    "test:history": "node --test tests/history-pagination.test.mjs",
+    "test:skills": "node --test tests/skill-upload.test.mjs"
   },
   "dependencies": {
     "@ag-ui/client": "^0.0.53",
@@ -20,7 +21,8 @@
     "react-dom": "^18.3.1",
     "react-markdown": "^9.0.1",
     "remark-gfm": "^4.0.0",
-    "rxjs": "7.8.1"
+    "rxjs": "7.8.1",
+    "yaml": "^2.8.1"
   },
   "devDependencies": {
     "@types/react": "^18.3.12",

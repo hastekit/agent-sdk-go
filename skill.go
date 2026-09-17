@@ -13,15 +13,7 @@ type Skill = agents.Skill
 type SkillSet = agents.SkillSet
 type SkillSetFuncs = agents.SkillSetFuncs
 type SkillSelection = agents.SkillSelection
-type SkillPolicy = agents.SkillPolicy
 type ListedSkill = agents.ListedSkill
-
-const (
-	SkillOptIn    = agents.SkillOptIn
-	SkillRequired = agents.SkillRequired
-	SkillEnabled  = agents.SkillEnabled
-	SkillBlocked  = agents.SkillBlocked
-)
 
 // FilesystemSkillSet discovers skills from a folder at run time.
 type FilesystemSkillSet = skills.FilesystemSkillSet

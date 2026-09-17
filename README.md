@@ -1042,9 +1042,10 @@ reads instructions and allowed resources from all sources. Include `ResolveSkill
 in the prompt resolvers to advertise the catalog.
 
 For custom storage, implement `SkillSet` (`GetName`, `ListSkills`, `ResolveSkill`)
-or use `SkillSetFuncs` callbacks. Policies are `SkillRequired` (cannot disable),
-`SkillEnabled` (enabled by default), `SkillOptIn` (disabled by default, including
-the zero value), and `SkillBlocked` (cannot enable).
+or use `SkillSetFuncs` callbacks. Set `Required: true` for skills users cannot
+disable, and `DefaultEnabled: true` for optional skills enabled by default.
+The zero value is optional and disabled by default. Global skills (`Global: true`)
+always win name conflicts with user skills. Availability flags are host-controlled.
 
 Select skills per run with `Input.Skills.Enable` and `Input.Skills.Disable`, using
 skill names. Resend selections on new turns and approval resumes. The embedded

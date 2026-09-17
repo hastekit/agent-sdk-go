@@ -37,7 +37,7 @@ export function ComposerMenu({ onAddFile, disabled }: { onAddFile?: () => void; 
               {error && <p className="composer-skills-hint" role="alert">{error}</p>}
               {!error && !skills.length && <p className="composer-skills-hint">No skills available for this agent.</p>}
               {skills.map(skill => {
-                const required = skill.policy === "required";
+                const required = !!skill.required;
                 const checked = required || (choices[skill.name] ?? skill.enabled);
                 return <Menu.CheckboxItem key={skill.name} className="composer-skill" role="switch"
                   aria-label={skill.name} checked={checked} disabled={required}

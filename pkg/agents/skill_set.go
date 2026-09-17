@@ -9,20 +9,9 @@ import (
 	"strings"
 )
 
-// SkillPolicy controls whether a skill is available to a run. The zero value
-// is opt-in: adding a remote skill never silently enables it.
-type SkillPolicy string
-
-const (
-	SkillOptIn    SkillPolicy = "opt_in"
-	SkillRequired SkillPolicy = "required"
-	SkillEnabled  SkillPolicy = "enabled"
-	SkillBlocked  SkillPolicy = "blocked"
-)
-
-// SkillSelection identifies skills by their plain names. Required skills cannot be disabled;
-// blocked skills cannot be enabled. Unknown selections are ignored so the same
-// input can pass through agents with different skill sets during handoffs.
+// SkillSelection identifies skills by their plain names. Required skills cannot
+// be disabled. Unknown selections are ignored so the same input can pass through
+// agents with different skill sets during handoffs.
 type SkillSelection struct {
 	Enable  []string `json:"enable,omitempty"`
 	Disable []string `json:"disable,omitempty"`
@@ -34,7 +23,7 @@ type SkillSelection struct {
 // Listing defines the policy and resource allowlist trusted by the agent. Never
 // derive policy from untrusted input. Resolve receives the skill name and an
 // empty file when reading instructions. Later entries in AgentConfig.Skills
-// replace earlier skills with the same name, including policy and resources.
+// replace earlier skills with the same name, except global skills always win.
 type SkillSet interface {
 	GetName() string
 	ListSkills(ctx context.Context, namespace string, runContext map[string]any) ([]Skill, error)
@@ -65,8 +54,8 @@ func (s SkillSetFuncs) ResolveSkill(ctx context.Context, namespace string, rc ma
 }
 
 // ListedSkill is a catalog entry for clients building a skill picker. Name is
-// unprefixed and can be copied directly into SkillSelection. Blocked entries
-// are omitted. Enabled describes the supplied selection, including policy.
+// unprefixed and can be copied directly into SkillSelection. Enabled describes
+// the supplied selection, including required skills and defaults.
 type ListedSkill struct {
 	Skill
 	Enabled bool `json:"enabled"`
@@ -82,19 +71,8 @@ func validSkillPart(name string) bool {
 	return name != "" && name == strings.TrimSpace(name) && !strings.ContainsAny(name, "/\\") && name != "." && name != ".."
 }
 
-func skillEnabled(policy SkillPolicy, name string, selection SkillSelection) (bool, error) {
-	switch policy {
-	case SkillRequired:
-		return true, nil
-	case SkillBlocked:
-		return false, nil
-	case SkillEnabled:
-		return !slices.Contains(selection.Disable, name), nil
-	case SkillOptIn, "":
-		return slices.Contains(selection.Enable, name) && !slices.Contains(selection.Disable, name), nil
-	default:
-		return false, fmt.Errorf("skill %q has invalid policy %q", name, policy)
-	}
+func skillEnabled(skill Skill, selection SkillSelection) bool {
+	return skill.Required || ((skill.DefaultEnabled || slices.Contains(selection.Enable, skill.Name)) && !slices.Contains(selection.Disable, skill.Name))
 }
 
 func (e *Agent) listSkillBindings(ctx context.Context, namespace string, rc map[string]any, selection SkillSelection) ([]ListedSkill, map[string]skillBinding, error) {
@@ -123,9 +101,8 @@ func (e *Agent) listSkillBindings(ctx context.Context, namespace string, rc map[
 					return nil, nil, fmt.Errorf("skill %q has invalid resource %q", skill.Name, file)
 				}
 			}
-			_, err := skillEnabled(skill.Policy, skill.Name, selection)
-			if err != nil {
-				return nil, nil, err
+			if previous, exists := merged[skill.Name]; exists && previous.skill.Global && !skill.Global {
+				continue
 			}
 			if _, exists := merged[skill.Name]; !exists {
 				names = append(names, skill.Name)
@@ -133,15 +110,12 @@ func (e *Agent) listSkillBindings(ctx context.Context, namespace string, rc map[
 			merged[skill.Name] = skillBinding{skill, skill.Name, set}
 		}
 	}
-	// Apply selection only after merging so a disabled or blocked replacement
+	// Apply selection only after merging so a disabled replacement
 	// cannot leave an earlier source's reader accessible.
 	for _, name := range names {
 		binding := merged[name]
 		skill := binding.skill
-		if skill.Policy == SkillBlocked {
-			continue
-		}
-		enabled, _ := skillEnabled(skill.Policy, name, selection) // validated above
+		enabled := skillEnabled(skill, selection)
 		catalog = append(catalog, ListedSkill{Skill: skill, Enabled: enabled})
 		if enabled {
 			bindings[name] = binding

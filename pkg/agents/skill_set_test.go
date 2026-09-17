@@ -15,14 +15,14 @@ func TestDynamicSkillsPoliciesAndReader(t *testing.T) {
 	var reads []string
 	set := SkillSetFuncs{Name: "team", List: func(context.Context, string, map[string]any) ([]Skill, error) {
 		return []Skill{
-			{Name: "required", Policy: SkillRequired}, {Name: "default", Policy: SkillEnabled},
-			{Name: "optional", Resources: []string{"refs/help.md"}}, {Name: "blocked", Policy: SkillBlocked},
+			{Name: "required", Required: true}, {Name: "default", DefaultEnabled: true},
+			{Name: "optional", Resources: []string{"refs/help.md"}},
 		}, nil
 	}, Resolve: func(_ context.Context, namespace string, _ map[string]any, name, file string) (string, error) {
 		reads = append(reads, name+":"+file)
 		return name + " content", nil
 	}}
-	agent := NewAgent(&AgentOptions{Name: "skills", Skills: []SkillSet{testSkillSet(SkillRequired), set}})
+	agent := NewAgent(&AgentOptions{Name: "skills", Skills: []SkillSet{testSkillSet(true), set}})
 	in := &AgentInput{Skills: SkillSelection{Enable: []string{"optional", "blocked"}, Disable: []string{"required", "default"}}}
 	tools, skills, _, err := agent.prepareSkills(ctx, in, agent.tools)
 	require.NoError(t, err)
@@ -80,7 +80,7 @@ func TestDynamicSkillsValidationAndRefresh(t *testing.T) {
 	calls := 0
 	set := SkillSetFuncs{Name: "team", List: func(context.Context, string, map[string]any) ([]Skill, error) {
 		calls++
-		return []Skill{{Name: fmt.Sprint(calls), Policy: SkillRequired}}, nil
+		return []Skill{{Name: fmt.Sprint(calls), Required: true}}, nil
 	}}
 	agent := NewAgent(&AgentOptions{Name: "skills", Skills: []SkillSet{set}})
 	for i := 1; i <= 2; i++ {
@@ -89,7 +89,7 @@ func TestDynamicSkillsValidationAndRefresh(t *testing.T) {
 		require.Equal(t, fmt.Sprintf("%d", i), skills[0].Name)
 	}
 	for _, skills := range [][]Skill{
-		{{Name: "x", Policy: "invalid"}}, {{Name: "x/y"}}, {{Name: "x", Resources: []string{"../secret"}}},
+		{{Name: "x/y"}}, {{Name: "x", Resources: []string{"../secret"}}},
 	} {
 		agent.skillSets = []SkillSet{SkillSetFuncs{Name: "team", List: func(context.Context, string, map[string]any) ([]Skill, error) { return skills, nil }}}
 		_, _, _, err := agent.prepareSkills(context.Background(), &AgentInput{}, nil)
@@ -107,8 +107,8 @@ func skillCall(args string) *ToolCall {
 
 func TestDynamicSkillCollisionLastSourceWins(t *testing.T) {
 	ctx := context.Background()
-	for _, policy := range []SkillPolicy{SkillRequired, SkillEnabled, SkillOptIn, SkillBlocked} {
-		t.Run(string(policy), func(t *testing.T) {
+	for _, flags := range []Skill{{Required: true}, {DefaultEnabled: true}, {}} {
+		t.Run(fmt.Sprintf("required=%t,default=%t", flags.Required, flags.DefaultEnabled), func(t *testing.T) {
 			source := func(name string, skill Skill) SkillSetFuncs {
 				return SkillSetFuncs{Name: name,
 					List: func(context.Context, string, map[string]any) ([]Skill, error) { return []Skill{skill}, nil },
@@ -118,12 +118,12 @@ func TestDynamicSkillCollisionLastSourceWins(t *testing.T) {
 					},
 				}
 			}
-			first := source("first", Skill{Name: "review", Policy: SkillRequired, Resources: []string{"old.md"}})
-			last := source("last", Skill{Name: "review", Description: "replacement", Policy: policy, Resources: []string{"new.md"}})
+			first := source("first", Skill{Name: "review", Required: true, Resources: []string{"old.md"}})
+			last := source("last", Skill{Name: "review", Description: "replacement", Required: flags.Required, DefaultEnabled: flags.DefaultEnabled, Resources: []string{"new.md"}})
 			agent := NewAgent(&AgentOptions{Name: "skills", Skills: []SkillSet{first, last}})
 			tools, metadata, _, err := agent.prepareSkills(ctx, &AgentInput{}, nil)
 			require.NoError(t, err)
-			if policy == SkillOptIn || policy == SkillBlocked {
+			if !flags.Required && !flags.DefaultEnabled {
 				require.Empty(t, tools)
 				require.Empty(t, metadata)
 			} else {
@@ -138,19 +138,15 @@ func TestDynamicSkillCollisionLastSourceWins(t *testing.T) {
 			}
 			catalog, err := agent.ListSkills(ctx, "default", nil, SkillSelection{Enable: []string{"review"}, Disable: []string{"review"}})
 			require.NoError(t, err)
-			if policy == SkillBlocked {
-				require.Empty(t, catalog)
-			} else {
-				require.Len(t, catalog, 1)
-				require.Equal(t, policy == SkillRequired, catalog[0].Enabled)
-			}
+			require.Len(t, catalog, 1)
+			require.Equal(t, flags.Required, catalog[0].Enabled)
 		})
 	}
 }
 
 func TestDynamicSkillCollisionWithinSource(t *testing.T) {
 	source := SkillSetFuncs{Name: "source", List: func(context.Context, string, map[string]any) ([]Skill, error) {
-		return []Skill{{Name: "review", Policy: SkillRequired}, {Name: "review", Description: "last", Policy: SkillEnabled}}, nil
+		return []Skill{{Name: "review", Required: true}, {Name: "review", Description: "last", DefaultEnabled: true}}, nil
 	}}
 	agent := NewAgent(&AgentOptions{Name: "skills", Skills: []SkillSet{source}})
 	catalog, err := agent.ListSkills(context.Background(), "default", nil, SkillSelection{})
@@ -171,7 +167,7 @@ func TestSkillNamespaceIsExplicitForListAndRead(t *testing.T) {
 				List: func(_ context.Context, namespace string, values map[string]any) ([]Skill, error) {
 					require.Equal(t, expected, namespace)
 					require.Equal(t, rc, values)
-					return []Skill{{Name: "review", Policy: SkillRequired}}, nil
+					return []Skill{{Name: "review", Required: true}}, nil
 				},
 				Resolve: func(_ context.Context, namespace string, values map[string]any, name, file string) (string, error) {
 					require.Equal(t, expected, namespace)
@@ -204,7 +200,7 @@ func TestSkillNamespaceNotInjectedIntoRunContext(t *testing.T) {
 func TestSkillReaderKeepsItsRunCatalog(t *testing.T) {
 	name := "first"
 	source := SkillSetFuncs{Name: "changing", List: func(context.Context, string, map[string]any) ([]Skill, error) {
-		return []Skill{{Name: name, Policy: SkillEnabled}}, nil
+		return []Skill{{Name: name, DefaultEnabled: true}}, nil
 	}, Resolve: func(_ context.Context, _ string, _ map[string]any, name, file string) (string, error) {
 		return name, nil
 	}}
@@ -220,4 +216,30 @@ func TestSkillReaderKeepsItsRunCatalog(t *testing.T) {
 	result, err := tools[0].Execute(context.Background(), skillCall(`{"name":"first"}`))
 	require.NoError(t, err)
 	require.Equal(t, "first", *result.Output.OfString)
+}
+
+func TestGlobalSkillsWinAcrossSourcesRegardlessOfOrder(t *testing.T) {
+	for _, required := range []bool{false, true} {
+		global := SkillSetFuncs{Name: "global", List: func(context.Context, string, map[string]any) ([]Skill, error) {
+			return []Skill{{Name: "review", Global: true, Required: required, Resources: []string{"global.md"}}}, nil
+		}, Resolve: func(context.Context, string, map[string]any, string, string) (string, error) { return "global", nil }}
+		user := SkillSetFuncs{Name: "user", List: func(context.Context, string, map[string]any) ([]Skill, error) {
+			return []Skill{{Name: "review", DefaultEnabled: true, Resources: []string{"user.md"}}}, nil
+		}, Resolve: func(context.Context, string, map[string]any, string, string) (string, error) { return "user", nil }}
+		for _, sources := range [][]SkillSet{{global, user}, {user, global}} {
+			agent := NewAgent(&AgentOptions{Name: "test", Skills: sources})
+			catalog, err := agent.ListSkills(t.Context(), "user", nil, SkillSelection{Disable: []string{"review"}})
+			require.NoError(t, err)
+			require.Len(t, catalog, 1)
+			require.True(t, catalog[0].Global)
+			require.Equal(t, required, catalog[0].Enabled)
+			tools, _, _, err := agent.prepareSkills(t.Context(), &AgentInput{Skills: SkillSelection{Enable: []string{"review"}}}, nil)
+			require.NoError(t, err)
+			response, err := tools[0].Execute(t.Context(), skillCall(`{"name":"review","file":"global.md"}`))
+			require.NoError(t, err)
+			require.Equal(t, "global", *response.Output.OfString)
+			_, err = tools[0].Execute(t.Context(), skillCall(`{"name":"review","file":"user.md"}`))
+			require.Error(t, err)
+		}
+	}
 }

@@ -15,7 +15,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
-	"github.com/hastekit/agent-sdk-go/pkg/agents"
 	"github.com/stretchr/testify/require"
 )
 
@@ -174,12 +173,12 @@ func TestStoredSkillSetUsesNamespaceAndHostPolicy(t *testing.T) {
 	listed, err := set.ListSkills(context.Background(), "tenant", rc)
 	require.NoError(t, err)
 	require.Len(t, listed, 1)
-	require.Equal(t, agents.SkillOptIn, listed[0].Policy)
-	required, err := NewSkillSet("library", store, WithPolicies(map[string]agents.SkillPolicy{"review": agents.SkillRequired}))
+	require.False(t, listed[0].DefaultEnabled)
+	required, err := NewSkillSet("library", store, WithGlobalNamespace("global"), WithRequiredSkills("review"))
 	require.NoError(t, err)
 	listed, err = required.ListSkills(context.Background(), "tenant", rc)
 	require.NoError(t, err)
-	require.Equal(t, agents.SkillRequired, listed[0].Policy)
+	require.False(t, listed[0].Required, "user-owned skills cannot be required")
 	content, err := set.ResolveSkill(context.Background(), "tenant", rc, "review", "refs/check.md")
 	require.NoError(t, err)
 	require.Equal(t, "check", content)

@@ -10,7 +10,7 @@ import (
 
 func readSkillTool(t *testing.T) Tool {
 	t.Helper()
-	agent := NewAgent(&AgentOptions{Name: "reader", Skills: []SkillSet{testSkillSet(SkillEnabled)}})
+	agent := NewAgent(&AgentOptions{Name: "reader", Skills: []SkillSet{testSkillSet(false)}})
 	tools, _, _, err := agent.prepareSkills(context.Background(), &AgentInput{}, nil)
 	if err != nil {
 		t.Fatal(err)

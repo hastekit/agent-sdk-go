@@ -23,12 +23,11 @@ and `ResolveSkill`; `SkillSetFuncs` provides callbacks for these methods.
 `fs.FS` sources. Both enable every skill by default and discover catalog changes
 on each run.
 
-| Policy | Default | Input override |
+| Configuration | Default | User override |
 | --- | --- | --- |
-| `SkillRequired` | Enabled | Cannot disable |
-| `SkillEnabled` | Enabled | Can disable |
-| `SkillOptIn` (also the zero value) | Disabled | Can enable |
-| `SkillBlocked` | Hidden and disabled | Cannot enable |
+| `Required: true` | Enabled | Cannot disable |
+| `DefaultEnabled: true` | Enabled | Can disable |
+| Neither flag (zero value) | Disabled | Can enable |
 
 Select skills using `Input.Skills.Enable` and `Input.Skills.Disable`, with names
 such as `release-review`. Disable wins when an optional skill appears in
@@ -42,8 +41,8 @@ the run's enabled catalog, and restricts file reads to `SKILL.md` and the declar
 `Resources`. An empty `file` reads the instructions. Use the prompt's
 `ResolveSkills` resolver (included in `DefaultResolvers`) to advertise skills.
 
-The catalog is a per-run snapshot, but content is resolved on demand. Use
-versioned storage if a run must read a fixed content revision. Callbacks must be
+The catalog is a per-run snapshot, but content is resolved on demand. The built-in store
+keeps only the latest bundle, without versions or aliases. Callbacks must be
 concurrency-safe, honor cancellation, and enforce application tenant boundaries.
 A failed listing fails the run. Selection is not persisted in conversation
 history: resend it for every new turn or approval resume. The embedded UI remembers
@@ -63,7 +62,7 @@ For custom AG-UI clients:
 
 - `GET /api/agui/agents/{agent}/skills` returns the visible catalog and default state.
 - Send `forwardedProps.skills: { enable: ["release-review"], disable: [] }` on
-  runs and approval resumes. Required and blocked policies are enforced server-side.
+  runs and approval resumes. Required skills are enforced server-side.
 - The list endpoint provides `Namespace` and `Header` in the resolver's run context;
   the run endpoint provides these plus `State`, `Context`, and `ForwardedProps`.
   Use server-controlled namespace and your authentication layer for tenant access.
@@ -71,4 +70,7 @@ For custom AG-UI clients:
 Skill policies control instruction availability. They do not grant or revoke tool
 permissions, and they cannot erase skill text already stored in conversation history.
 
-Skill names have no source prefix. When names collide, the last entry in `AgentConfig.Skills` wins, replacing the description, policy, allowed files, and resolver. Within a source, the last listed entry wins. Selection policies apply after merging. Source names must still be unique for runtime registration.
+Skill names have no source prefix. Global skills (`Global: true`) always win
+against user skills with the same name. Filesystem sources are global. Within the
+same scope, later sources win. Selection is applied after merging. Source names
+must still be unique for runtime registration.

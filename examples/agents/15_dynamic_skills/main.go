@@ -39,9 +39,8 @@ func main() {
 		Name: "team",
 		List: func(ctx context.Context, namespace string, rc map[string]any) ([]hastekit.Skill, error) {
 			return []hastekit.Skill{
-				{Name: "release-review", Description: "Review a release before shipping.", Policy: hastekit.SkillOptIn, Resources: []string{"checklist.md"}},
-				{Name: "writing", Description: "Write concise release notes.", Policy: hastekit.SkillEnabled},
-				{Name: "retired", Description: "Retired release process.", Policy: hastekit.SkillBlocked},
+				{Name: "release-review", Description: "Review a release before shipping.", Global: true, Resources: []string{"checklist.md"}},
+				{Name: "writing", Description: "Write concise release notes.", Global: true, DefaultEnabled: true},
 			}, ctx.Err()
 		},
 		Resolve: func(ctx context.Context, namespace string, rc map[string]any, name, file string) (string, error) {
@@ -82,7 +81,7 @@ func main() {
 		log.Fatal(err)
 	}
 	for _, skill := range catalog {
-		fmt.Printf("%s: enabled=%t policy=%s\n", skill.Name, skill.Enabled, skill.Policy)
+		fmt.Printf("%s: enabled=%t required=%t\n", skill.Name, skill.Enabled, skill.Required)
 	}
 	result, err := agent.Run(context.Background(), &hastekit.Input{
 		Skills: selection, Message: hastekit.UserTurn("What should we check before shipping a release?"),

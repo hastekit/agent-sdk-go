@@ -6,9 +6,9 @@ import (
 	"testing"
 )
 
-func testSkillSet(policy SkillPolicy) SkillSet {
+func testSkillSet(required bool) SkillSet {
 	return SkillSetFuncs{Name: "builtin", List: func(context.Context, string, map[string]any) ([]Skill, error) {
-		return []Skill{{Name: "pdf", Description: "Fill and read PDF forms.", Resources: []string{"references/forms.md"}, Policy: policy}}, nil
+		return []Skill{{Name: "pdf", Description: "Fill and read PDF forms.", Resources: []string{"references/forms.md"}, Required: required, DefaultEnabled: true}}, nil
 	}, Resolve: func(_ context.Context, _ string, _ map[string]any, name, file string) (string, error) {
 		if file != "" {
 			return "field syntax\n", nil
@@ -18,7 +18,7 @@ func testSkillSet(policy SkillPolicy) SkillSet {
 }
 
 func TestAgentBuildsOneSkillReaderPerRun(t *testing.T) {
-	agent := NewAgent(&AgentOptions{Name: "skilled", Skills: []SkillSet{testSkillSet(SkillEnabled)}})
+	agent := NewAgent(&AgentOptions{Name: "skilled", Skills: []SkillSet{testSkillSet(false)}})
 	tools, skills, hint, err := agent.prepareSkills(context.Background(), &AgentInput{}, agent.tools)
 	if err != nil {
 		t.Fatal(err)

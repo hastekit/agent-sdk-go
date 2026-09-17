@@ -16,7 +16,7 @@ func TestDynamicSkillRunAdvertisesAndReadsOneSnapshot(t *testing.T) {
 	lists, reads := 0, 0
 	set := agents.SkillSetFuncs{Name: "team", List: func(context.Context, string, map[string]any) ([]agents.Skill, error) {
 		lists++
-		return []agents.Skill{{Name: "review", Description: "Review releases", Resources: []string{"check.md"}}, {Name: "secret", Policy: agents.SkillBlocked}}, nil
+		return []agents.Skill{{Name: "review", Description: "Review releases", Resources: []string{"check.md"}}}, nil
 	}, Resolve: func(_ context.Context, namespace string, _ map[string]any, name, file string) (string, error) {
 		reads++
 		require.Equal(t, "review", name)

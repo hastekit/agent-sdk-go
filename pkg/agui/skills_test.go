@@ -40,7 +40,7 @@ func TestSkillsEndpointNamespaceAndPolicies(t *testing.T) {
 	set := agents.SkillSetFuncs{Name: "team", List: func(ctx context.Context, namespace string, rc map[string]any) ([]agents.Skill, error) {
 		require.Equal(t, "tenant", namespace)
 		require.NotContains(t, rc, "Namespace")
-		return []agents.Skill{{Name: "required", Policy: agents.SkillRequired}, {Name: "optional"}, {Name: "secret", Policy: agents.SkillBlocked}}, nil
+		return []agents.Skill{{Name: "required", Required: true}, {Name: "optional"}}, nil
 	}}
 	agent := agents.NewAgent(&agents.AgentOptions{Name: "helper", Skills: []agents.SkillSet{set}})
 	handler := NewHandler(skillRegistryForHTTP{agent}, WithNamespaceResolver(func(*http.Request) (string, error) { return "tenant", nil }))

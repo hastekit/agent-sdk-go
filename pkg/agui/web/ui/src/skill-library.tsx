@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from "react";
-import { deleteSkill, fetchStoredSkills, skillFileUrl, uploadSkill, type StoredSkill } from "./api";
+import { deleteSkill, fetchSkills, fetchStoredSkills, skillFileUrl, uploadSkill, type StoredSkill } from "./api";
 
-export function SkillLibrary({onClose, onSaved}: {onClose: () => void; onSaved: () => void}) {
+import { validateSkillUpload } from "./skill-upload";
+
+export function SkillLibrary({agentName, onClose, onSaved}: {agentName: string; onClose: () => void; onSaved: () => void}) {
   const dialog = useRef<HTMLDialogElement>(null);
   const [skills, setSkills] = useState<StoredSkill[]>([]);
   const [cursor, setCursor] = useState("");
@@ -27,6 +29,8 @@ export function SkillLibrary({onClose, onSaved}: {onClose: () => void; onSaved: 
   async function save() {
     setBusy(true); setError(""); setNotice("");
     try {
+      const catalog = await fetchSkills(agentName);
+      await validateSkillUpload(files, catalog.filter(skill => skill.global).map(skill => skill.name));
       const saved = await uploadSkill(files);
       setFiles([]); setSelected(null); previewRequest.current++;
       setNotice(`Saved ${saved.name}. Enable it in the agent’s Skills menu if it is opt-in.`);
@@ -64,7 +68,7 @@ export function SkillLibrary({onClose, onSaved}: {onClose: () => void; onSaved: 
         onChange={e => {setFiles(Array.from(e.target.files || [])); e.target.value = "";}} /></label>
       <label>Skill files<input type="file" multiple disabled={busy} onChange={e => {setFiles(Array.from(e.target.files || [])); e.target.value = "";}} /></label>
       <small>{files.length ? `${files.length} files selected` : "Up to 100 files, 10 MiB total. Folder selection preserves nested paths."}</small>
-      <p>Uploading replaces all files of an existing skill with the same name.</p>
+      <p>Uploading replaces your existing skill with the same name. Names used by this agent’s global skills are reserved.</p>
       <button disabled={busy || !files.length} onClick={() => void save()}>{busy ? "Working…" : "Upload / replace skill"}</button>
     </details>
     {error && <p role="alert" className="skill-library-error">{error}</p>}

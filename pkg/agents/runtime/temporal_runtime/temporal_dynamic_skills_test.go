@@ -24,7 +24,7 @@ func TestDynamicSkillsUseActivities(t *testing.T) {
 		require.NotContains(t, rc, "Namespace")
 		listed++
 		require.Equal(t, "alice", rc["user"])
-		return []agents.Skill{{Name: "review", Policy: agents.SkillRequired}}, nil
+		return []agents.Skill{{Name: "review", Required: true}}, nil
 	}, Resolve: func(ctx context.Context, namespace string, rc map[string]any, name, file string) (string, error) {
 		require.True(t, activity.IsActivity(ctx))
 		require.Equal(t, "tenant", namespace)
@@ -50,7 +50,7 @@ func TestDynamicSkillsUseActivities(t *testing.T) {
 			return "", err
 		}
 		require.Len(t, skills, 1)
-		require.Equal(t, agents.SkillRequired, skills[0].Policy)
+		require.True(t, skills[0].Required)
 		return proxy.ResolveSkillCall(context.Background(), "tenant", rc, "review", "ref.md", &agents.ToolCall{FunctionCallMessage: &responses.FunctionCallMessage{Name: "read_skill", CallID: "c1", Arguments: `{"name":"review","file":"ref.md"}`}})
 	})
 	require.NoError(t, env.GetWorkflowError())

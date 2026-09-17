@@ -9,7 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestGlobalSkillSetListsAndResolvesWithTenantPrecedence(t *testing.T) {
+func TestGlobalSkillSetListsAndResolvesWithGlobalPrecedence(t *testing.T) {
 	for name, store := range stores(t) {
 		t.Run(name, func(t *testing.T) {
 			ctx := t.Context()
@@ -25,26 +25,32 @@ func TestGlobalSkillSetListsAndResolvesWithTenantPrecedence(t *testing.T) {
 					require.NoError(t, err)
 				}
 			}
-			set, err := NewSkillSet("library", store, WithGlobalNamespace("global"), WithPolicies(map[string]agents.SkillPolicy{"shared": agents.SkillRequired}))
+			set, err := NewSkillSet("library", store, WithGlobalNamespace("global"), WithRequiredSkills("shared"))
 			require.NoError(t, err)
 			listed, err := set.ListSkills(ctx, "tenant", nil)
 			require.NoError(t, err)
 			require.Len(t, listed, 2)
-			require.Equal(t, "review", listed[0].Name)
-			require.NotContains(t, listed[0].Resources, "global-only.md")
-			require.Equal(t, "shared", listed[1].Name)
-			require.Equal(t, agents.SkillRequired, listed[1].Policy)
+			byName := map[string]agents.Skill{}
+			for _, skill := range listed {
+				byName[skill.Name] = skill
+				require.True(t, skill.Global)
+			}
+			require.Equal(t, "review", byName["review"].Name)
+			require.Contains(t, byName["review"].Resources, "global-only.md")
+			require.Equal(t, "shared", byName["shared"].Name)
+			require.True(t, byName["shared"].Required)
 			content, err := set.ResolveSkill(ctx, "tenant", nil, "review", "")
 			require.NoError(t, err)
-			require.Contains(t, content, "tenant instructions")
+			require.Contains(t, content, "global instructions")
 			content, err = set.ResolveSkill(ctx, "tenant", nil, "shared", "")
 			require.NoError(t, err)
 			require.Contains(t, content, "shared instructions")
 			content, err = set.ResolveSkill(ctx, "tenant", nil, "shared", "global-only.md")
 			require.NoError(t, err)
 			require.Equal(t, "global resource", content)
-			_, err = set.ResolveSkill(ctx, "tenant", nil, "review", "global-only.md")
-			require.ErrorIs(t, err, ErrNotFound, "resources must not mix namespaces")
+			content, err = set.ResolveSkill(ctx, "tenant", nil, "review", "global-only.md")
+			require.NoError(t, err)
+			require.Equal(t, "global resource", content)
 			_, err = set.ResolveSkill(ctx, "tenant", nil, "missing", "")
 			require.ErrorIs(t, err, ErrNotFound)
 			listed, err = set.ListSkills(ctx, "", nil)
@@ -85,7 +91,7 @@ func TestGlobalSkillSetPaginationAndMatchingNamespaces(t *testing.T) {
 			require.NoError(t, err)
 			want := []string{"tenant:", "tenant:next"}
 			if global == "global" {
-				want = append(want, "global:", "global:next")
+				want = append([]string{"global:", "global:next"}, want...)
 			}
 			require.Equal(t, want, calls)
 			require.Len(t, listed, len(want))
@@ -118,10 +124,47 @@ func TestGlobalSkillSetDoesNotHideStoreErrors(t *testing.T) {
 		require.ErrorIs(t, err, failure)
 		_, err = set.ResolveSkill(t.Context(), "tenant", nil, "review", "")
 		require.ErrorIs(t, err, failure)
-		if failNS == "tenant" {
-			require.Equal(t, []string{"tenant"}, calls)
+		if failNS == "global" {
+			require.Equal(t, []string{"global"}, calls)
 		} else {
-			require.Equal(t, []string{"tenant", "global"}, calls)
+			require.Equal(t, []string{"global", "tenant"}, calls)
 		}
+	}
+}
+
+func TestGlobalRequiredSkillCannotBeReplacedOrDisabled(t *testing.T) {
+	for backend, store := range stores(t) {
+		t.Run(backend, func(t *testing.T) {
+			ctx := t.Context()
+			global := bundle("review", "developer instructions")
+			local := bundle("review", "user instructions")
+			local.Files["user-only.md"] = []byte("user resource")
+			_, err := store.Put(ctx, "global", global)
+			require.NoError(t, err)
+			_, err = store.Put(ctx, "user", local)
+			require.NoError(t, err)
+			set, err := NewSkillSet("library", store, WithGlobalNamespace("global"), WithRequiredSkills("review"))
+			require.NoError(t, err)
+			agent := agents.NewAgent(&agents.AgentOptions{Name: "test", Skills: []agents.SkillSet{set}})
+			listed, err := agent.ListSkills(ctx, "user", nil, agents.SkillSelection{Disable: []string{"review"}})
+			require.NoError(t, err)
+			require.Len(t, listed, 1)
+			require.True(t, listed[0].Global)
+			require.True(t, listed[0].Required)
+			require.True(t, listed[0].Enabled)
+			content, err := set.ResolveSkill(ctx, "user", nil, "review", "")
+			require.NoError(t, err)
+			require.Equal(t, "developer instructions", content)
+			_, err = set.ResolveSkill(ctx, "user", nil, "review", "user-only.md")
+			require.ErrorIs(t, err, ErrNotFound)
+			// When the developer removes the global skill, the user's copy is optional.
+			require.NoError(t, store.Delete(ctx, "global", "review"))
+			listed, err = agent.ListSkills(ctx, "user", nil, agents.SkillSelection{Disable: []string{"review"}})
+			require.NoError(t, err)
+			require.Len(t, listed, 1)
+			require.False(t, listed[0].Global)
+			require.False(t, listed[0].Required)
+			require.False(t, listed[0].Enabled)
+		})
 	}
 }

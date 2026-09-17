@@ -7,11 +7,11 @@ import { pathToFileURL } from "node:url";
 import ts from "typescript";
 
 const dir = await mkdtemp(join(tmpdir(), "hastekit-history-"));
-for (const name of ["api", "resumable-stream", "stoppable-agent"]) {
+for (const name of ["skill-upload", "api", "resumable-stream", "stoppable-agent"]) {
   const source = await readFile(new URL(`../src/${name}.ts`, import.meta.url), "utf8");
   let code = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2022 } }).outputText;
-  for (const dep of ["rxjs", "@ag-ui/core", "@ag-ui/client"]) code = code.replaceAll(`"${dep}"`, JSON.stringify(import.meta.resolve(dep)));
-  for (const dep of ["api", "resumable-stream"]) code = code.replaceAll(`"./${dep}"`, `"./${dep}.mjs"`);
+  for (const dep of ["yaml", "rxjs", "@ag-ui/core", "@ag-ui/client"]) code = code.replaceAll(`"${dep}"`, JSON.stringify(import.meta.resolve(dep)));
+  for (const dep of ["skill-upload", "api", "resumable-stream"]) code = code.replaceAll(`"./${dep}"`, `"./${dep}.mjs"`);
   await writeFile(join(dir, `${name}.mjs`), code);
 }
 const { fetchMessages } = await import(pathToFileURL(join(dir, "api.mjs")));

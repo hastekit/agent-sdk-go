@@ -551,7 +551,7 @@ export default function App() {
       className={"dark app" + (sidebarOpen ? "" : " sidebar-hidden")}
       data-copilotkit
     >
-      {libraryOpen && <SkillLibrary onClose={() => setLibraryOpen(false)} onSaved={() => setSkillRevision(v => v + 1)} />}
+      {libraryOpen && <SkillLibrary agentName={agentName} onClose={() => setLibraryOpen(false)} onSaved={() => setSkillRevision(v => v + 1)} />}
       <Sidebar
         threads={threads}
         activeThreadId={active.threadId}

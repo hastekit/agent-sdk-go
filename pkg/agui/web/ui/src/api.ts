@@ -1,3 +1,4 @@
+import { skillUploadPath } from "./skill-upload";
 // Thin client for the AG-UI endpoints served by pkg/agui. Everything
 // is same-origin (the Go server serves both this UI and the API), so
 // no auth headers or base URL config is needed. The embedded UI sends no
@@ -216,7 +217,9 @@ export async function uploadAttachment(file: File, sessionId: string): Promise<U
 export interface SkillInfo {
   name: string;
   description: string;
-  policy?: "required" | "enabled" | "opt_in" | "blocked";
+  required?: boolean;
+  defaultEnabled?: boolean;
+  global?: boolean;
   enabled: boolean;
 }
 export async function fetchSkills(agent: string): Promise<SkillInfo[]> {
@@ -239,7 +242,7 @@ export async function uploadSkill(files: File[]): Promise<StoredSkill> {
   for (const file of files) {
     // A folder selection includes its enclosing directory. Store only paths
     // inside that directory, preserving nested references and scripts.
-    const path = file.webkitRelativePath ? file.webkitRelativePath.split("/").slice(1).join("/") : file.name;
+    const path = skillUploadPath(file);
     data.append("files", file, path);
   }
   const r = await fetch(`${API}/skills`, { method: "POST", body: data });

@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"maps"
+	"slices"
 	"strings"
 
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
@@ -18,18 +18,22 @@ type StoredSkillSet struct {
 	globalNamespace string
 	name            string
 	store           Store
-	policy          agents.SkillPolicy
-	policies        map[string]agents.SkillPolicy
+	defaultEnabled  bool
+	required        []string
 }
 
-func WithDefaultPolicy(policy agents.SkillPolicy) SetOption {
-	return func(s *StoredSkillSet) { s.policy = policy }
-}
-func WithPolicies(policies map[string]agents.SkillPolicy) SetOption {
-	return func(s *StoredSkillSet) { s.policies = maps.Clone(policies) }
+// WithDefaultEnabled sets availability before user choices. The default is false.
+func WithDefaultEnabled(enabled bool) SetOption {
+	return func(s *StoredSkillSet) { s.defaultEnabled = enabled }
 }
 
-// WithGlobalNamespace additionally lists skills from namespace. Caller-owned
+// WithRequiredSkills names global skills users cannot disable. User-owned skills
+// are always optional, even if their names appear here.
+func WithRequiredSkills(names ...string) SetOption {
+	return func(s *StoredSkillSet) { s.required = slices.Clone(names) }
+}
+
+// WithGlobalNamespace additionally lists skills from namespace. Global
 // skills take precedence on name collisions. Empty disables shared skills.
 // This read-only setting does not change the namespace used by upload handlers.
 func WithGlobalNamespace(namespace string) SetOption {
@@ -42,22 +46,16 @@ func NewSkillSet(name string, store Store, opts ...SetOption) (*StoredSkillSet, 
 	if !validName(name) || store == nil {
 		return nil, fmt.Errorf("%w: source name and store required", ErrInvalid)
 	}
-	s := &StoredSkillSet{name: name, store: store, policy: agents.SkillOptIn}
+	s := &StoredSkillSet{name: name, store: store}
 	for _, opt := range opts {
 		if opt == nil {
 			return nil, ErrInvalid
 		}
 		opt(s)
 	}
-	valid := func(p agents.SkillPolicy) bool {
-		return p == "" || p == agents.SkillOptIn || p == agents.SkillEnabled || p == agents.SkillRequired || p == agents.SkillBlocked
-	}
-	if !valid(s.policy) {
-		return nil, fmt.Errorf("%w: policy", ErrInvalid)
-	}
-	for name, p := range s.policies {
-		if !validName(name) || !valid(p) {
-			return nil, fmt.Errorf("%w: policy for %q", ErrInvalid, name)
+	for _, name := range s.required {
+		if !validName(name) {
+			return nil, fmt.Errorf("%w: required skill %q", ErrInvalid, name)
 		}
 	}
 	return s, nil
@@ -69,7 +67,7 @@ func (s *StoredSkillSet) ListSkills(ctx context.Context, namespace string, _ map
 	}
 	namespaces := []string{namespace}
 	if s.globalNamespace != "" && s.globalNamespace != namespace {
-		namespaces = append(namespaces, s.globalNamespace)
+		namespaces = []string{s.globalNamespace, namespace}
 	}
 	var result []agents.Skill
 	names := map[string]bool{}
@@ -86,11 +84,9 @@ func (s *StoredSkillSet) ListSkills(ctx context.Context, namespace string, _ map
 					continue
 				}
 				names[m.Name] = true
-				p := s.policy
-				if override, ok := s.policies[m.Name]; ok {
-					p = override
-				}
-				result = append(result, agents.Skill{Name: m.Name, Description: m.Description, Resources: m.Resources, Policy: p})
+				global := ns == s.globalNamespace
+				result = append(result, agents.Skill{Name: m.Name, Description: m.Description, Resources: m.Resources,
+					Global: global, Required: global && slices.Contains(s.required, m.Name), DefaultEnabled: s.defaultEnabled})
 			}
 			if page.NextCursor == "" {
 				break
@@ -109,11 +105,15 @@ func (s *StoredSkillSet) ResolveSkill(ctx context.Context, namespace string, _ m
 	if strings.TrimSpace(namespace) == "" {
 		namespace = "default"
 	}
-	b, err := s.store.Get(ctx, namespace, name)
-	// Fall back for a missing bundle only, never for a missing resource or an
-	// authorization/storage error in the caller's namespace.
-	if errors.Is(err, ErrNotFound) && s.globalNamespace != "" && s.globalNamespace != namespace {
-		b, err = s.store.Get(ctx, s.globalNamespace, name)
+	first := namespace
+	if s.globalNamespace != "" {
+		first = s.globalNamespace
+	}
+	b, err := s.store.Get(ctx, first, name)
+	// A global bundle wins in its entirety. Fall back only when it is absent,
+	// never for missing resources or storage/authorization errors.
+	if errors.Is(err, ErrNotFound) && first != namespace {
+		b, err = s.store.Get(ctx, namespace, name)
 	}
 	if err != nil {
 		return "", err

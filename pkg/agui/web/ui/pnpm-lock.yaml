@@ -35,6 +35,9 @@ importers:
       rxjs:
         specifier: 7.8.1
         version: 7.8.1
+      yaml:
+        specifier: ^2.8.1
+        version: 2.9.1
     devDependencies:
       '@types/react':
         specifier: ^18.3.12
@@ -2303,6 +2306,11 @@ packages:
 
   yallist@3.1.1:
     resolution: {integrity: sha512-a4UGQaWPH59mOXUYnAG2ewncQS4i4F43Tv3JoAM+s2VDAmS9NsK8GpDMLrCHPksFT7h3K6TOoUNn2pb7RoXx4g==}
+
+  yaml@2.9.1:
+    resolution: {integrity: sha512-3NxN8+78OdzbT7C/WjGsyfPAtJaN3FNDsWxv7Y7mcDsT/oOmgW8BpyQQFFBnvZE3j9Y2Sdz1ULFLezL7Eb2yFw==}
+    engines: {node: ">= 14.6"}
+    hasBin: true
 
   zod-to-json-schema@3.25.2:
     resolution: {integrity: sha512-O/PgfnpT1xKSDeQYSCfRI5Gy3hPf91mKVDuYLUHZJMiDFptvP41MSnWofm8dnCm0256ZNfZIM7DSzuSMAFnjHA==}
@@ -5119,6 +5127,8 @@ snapshots:
   wonka@6.3.6: {}
 
   yallist@3.1.1: {}
+
+  yaml@2.9.1: {}
 
   zod-to-json-schema@3.25.2(zod@3.25.76):
     dependencies:
