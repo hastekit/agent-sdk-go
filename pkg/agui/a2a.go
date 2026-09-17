@@ -26,6 +26,12 @@ func WithA2AHandlerOptions(factory func(agentName, namespace string) []a2asrv.Re
 	return func(o *options) { o.a2aHandlerOptions = factory }
 }
 
+// WithA2AAuthorizer supplies the host's out-of-band approval/authorization flow.
+// The handler receives the resolved namespace and thread in AgentInput.
+func WithA2AAuthorizer(authorizer agents.A2AAuthorizer) Option {
+	return func(o *options) { o.a2aAuthorizer = authorizer }
+}
+
 type a2aKey struct {
 	agent     *agents.Agent
 	namespace string
@@ -100,7 +106,7 @@ func (h *a2aRoutes) invoke(w http.ResponseWriter, r *http.Request) {
 	h.mu.Lock()
 	adapter := h.adapters[key]
 	if adapter == nil {
-		opts := []agents.A2AOption{agents.WithA2ANamespace(key.namespace)}
+		opts := []agents.A2AOption{agents.WithA2ANamespace(key.namespace), agents.WithA2AAuthorizer(h.options.a2aAuthorizer)}
 		if h.options.a2aHandlerOptions != nil {
 			opts = append(opts, agents.WithA2AHandlerOptions(h.options.a2aHandlerOptions(agent.Name, key.namespace)...))
 		}

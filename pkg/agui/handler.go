@@ -29,6 +29,7 @@ type Registry interface {
 type options struct {
 	a2aBaseURL         string
 	a2aHandlerOptions  func(agentName, namespace string) []a2asrv.RequestHandlerOption
+	a2aAuthorizer      agents.A2AAuthorizer
 	skillStore         skills.Store
 	attachmentStore    attachments.UploadStore
 	attachmentMaxBytes int64

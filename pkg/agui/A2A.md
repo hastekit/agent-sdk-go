@@ -59,35 +59,53 @@ Binary/file input parts are rejected; file transport, push notifications, and
 extended cards are not advertised by the default cards. Internal reasoning and
 tool arguments are not emitted as user-visible text artifacts.
 
-Message metadata can select skills using `"hastekit.skills":
-{"enable":["review"],"disable":["writing"]}`. Required-skill rules still apply.
-Supply the selection on each turn, including resumes. Request metadata is available
-under `RunContext.A2A.metadata`; it cannot override namespace or execution IDs.
+Skills are configured by the host. Message metadata and JSON data parts have no
+special skill-selection or interrupt-resolution semantics. Request metadata is
+available under `RunContext.A2A.metadata`; it cannot override namespace or
+execution IDs.
 The `Header` run-context field uses the same `Authorization` and `X-*` header
 conventions as AG-UI.
 
-## Input-required tasks
+## Tasks requiring input or authorization
 
-A paused run becomes `TASK_STATE_INPUT_REQUIRED`. Its status message includes a
-JSON data part with `type: "hastekit.interrupts"` and the run's `interrupts` array.
-Reply on the same task with a data part like:
+Pauses use standard A2A task states and ordinary text status messages:
 
-```json
-{
-  "messageId": "approval-1",
-  "role": "ROLE_USER",
-  "taskId": "TASK_ID",
-  "parts": [{
-    "data": {
-      "type": "hastekit.interrupt_response",
-      "resolutions": [{"call_id": "CALL_ID", "action": "approve"}]
-    }
-  }]
-}
-```
+- `TASK_STATE_INPUT_REQUIRED` requests additional information. Elicitation
+  messages and any requested JSON schema are described in the status text.
+  Send an ordinary text or JSON data message on the same `taskId`.
+- `TASK_STATE_AUTH_REQUIRED` requests approval or URL-based authorization.
+  The status text explains the required action and includes any supplied URL.
+  Approval without a URL must be handled through the host's authorization flow.
+  When both authorization and information are pending, authorization takes priority.
 
-Use `reject` to decline, or include `content` on a resolution to submit a form
-answer. The server obtains the previous run ID from stored task state.
+The adapter never treats an A2A message as tool authorization. There is no
+special approval JSON envelope, and sending "approve" does not grant approval.
+Configure `agui.WithA2AAuthorizer(authorizer)` (or
+`agents.WithA2AAuthorizer(authorizer)` when mounting manually). The host implements
+`agents.A2AAuthorizer`:
+
+- `Instructions` returns readable instructions, such as a link to its approval UI.
+- `Authorize` waits for a trusted out-of-band decision and returns internal
+  resolutions. It must honor context cancellation and authenticate and scope
+  the decision to the pending operations, namespace, and caller.
+
+The adapter keeps the A2A task active while awaiting authorization, then resumes
+the same thread and publishes the result on the same task. Clients can poll or
+subscribe; no follow-up message or private payload is needed. Canceling the task
+cancels the authorization wait. Without an authorizer, a run requiring approval
+fails with an explanatory status instead of leaving a task waiting indefinitely.
+The adapter does not create an approval portal. The upstream SDK currently
+rejects new messages while an authorization-waiting execution remains active;
+use the host's out-of-band flow for approval or rejection, or `CancelTask` to stop.
+
+Ordinary input is delivered to the configured agent runtime. Mapping an answer
+to a pending tool form is the host/runtime's responsibility; the adapter does
+not invent a standard form-submission schema or infer tool resolutions from
+arbitrary text or JSON. A2A standardizes task continuation, not tool-specific
+form or approval payloads.
+
+The A2A context ID maps to the agent thread ID; the history layer resumes
+from that thread without requiring a previous run ID or custom run-ID metadata.
 
 ## Namespace isolation and persistence
 

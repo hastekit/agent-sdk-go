@@ -25,11 +25,26 @@ type A2A struct {
 	agent            *Agent
 	namespace        string
 	handlerOptions   []a2asrv.RequestHandlerOption
+	authorizer       A2AAuthorizer
 	InvokeHandler    http.Handler
 	AgentCardHandler http.Handler
 }
 
 type A2AOption func(*A2A)
+
+// A2AAuthorizer bridges the host's trusted out-of-band authorization flow.
+// Instructions must explain how to authorize the pending actions (for example,
+// an approval URL). Authorize waits for a decision and must honor ctx cancellation.
+// Resolutions are internal SDK values; they are never requested over A2A.
+// The host must authenticate the approver and scope decisions to these interrupts.
+type A2AAuthorizer interface {
+	Instructions(ctx context.Context, input *AgentInput, interrupts []responses.Interrupt) (string, error)
+	Authorize(ctx context.Context, input *AgentInput, interrupts []responses.Interrupt) ([]responses.InterruptResolution, error)
+}
+
+func WithA2AAuthorizer(authorizer A2AAuthorizer) A2AOption {
+	return func(a *A2A) { a.authorizer = authorizer }
+}
 
 // WithA2ANamespace binds an adapter to a host-resolved namespace. Client metadata
 // and A2A tenant parameters cannot override it. Use separate adapters per namespace.
@@ -92,109 +107,171 @@ func (a *A2A) Execute(ctx context.Context, ec *a2asrv.ExecutorContext) iter.Seq2
 		if ec.StoredTask == nil && !yield(a2a.NewSubmittedTask(ec, ec.Message), nil) {
 			return
 		}
-		if !yield(a2a.NewStatusUpdateEvent(ec, a2a.TaskStateWorking, nil), nil) {
-			return
-		}
-		fail := func(err error) {
-			slog.ErrorContext(ctx, "A2A execution failed", "agent", a.agent.Name, "task_id", ec.TaskID, "error", err)
-			yield(a2a.NewStatusUpdateEvent(ec, a2a.TaskStateFailed, a2a.NewMessageForTask(a2a.MessageRoleAgent, ec, a2a.NewTextPart("Agent execution failed."))), nil)
-		}
-		handle, err := a.agent.Execute(ctx, input)
-		if err != nil {
-			fail(err)
-			return
-		}
-		// The agent handle detaches execution from HTTP subscriptions. The A2A SDK
-		// owns task lifetime; cancellation of its executor must also stop remote work.
-		stop := func() {
-			stopCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-			defer cancel()
-			if err := handle.Stop(stopCtx); err != nil {
-				slog.ErrorContext(stopCtx, "A2A stop failed", "error", err)
-			}
-		}
-		stopWatch := context.AfterFunc(ctx, stop)
-		defer stopWatch()
-		var artifactID a2a.ArtifactID
 		for {
-			select {
-			case <-ctx.Done():
-				return
-			case chunk, ok := <-handle.Chunks:
-				if !ok {
-					goto finished
-				}
-				if chunk == nil || chunk.OfOutputTextDelta == nil || chunk.OfOutputTextDelta.Delta == "" {
-					continue
-				}
-				event := a2a.NewArtifactEvent(ec, a2a.NewTextPart(chunk.OfOutputTextDelta.Delta))
-				if artifactID == "" {
-					artifactID = event.Artifact.ID
-				} else {
-					event.Artifact.ID = artifactID
-					event.Append = true
-				}
-				if !yield(event, nil) {
-					stop()
-					return
-				}
-			}
-		}
-	finished:
-		output, err := handle.Wait(ctx)
-		if err != nil {
-			if ctx.Err() == nil {
-				fail(err)
-			}
-			return
-		}
-		if output == nil {
-			fail(fmt.Errorf("agent returned no output"))
-			return
-		}
-		if output.Status == agentstate.RunStatusError {
-			fail(fmt.Errorf("agent returned error status"))
-			return
-		}
-		if text := output.Text(); text != "" || artifactID != "" {
-			part := a2a.NewTextPart(text)
-			if a.agent.output != nil && json.Valid([]byte(text)) {
-				var data any
-				if json.Unmarshal([]byte(text), &data) == nil {
-					part = a2a.NewDataPart(data)
-				}
-			}
-			event := a2a.NewArtifactEvent(ec, part)
-			if artifactID != "" {
-				event.Artifact.ID = artifactID
-			}
-			// Replace provisional deltas with the authoritative final output. This also
-			// handles runtimes that only publish their completed response.
-			event.LastChunk = true
-			if !yield(event, nil) {
+			if !yield(a2a.NewStatusUpdateEvent(ec, a2a.TaskStateWorking, nil), nil) {
 				return
 			}
-		}
-		state := a2a.TaskStateCompleted
-		var message *a2a.Message
-		if output.Status == agentstate.RunStatusPaused {
-			state = a2a.TaskStateInputRequired
-			data, err := json.Marshal(output.Interrupts)
+			fail := func(err error) {
+				slog.ErrorContext(ctx, "A2A execution failed", "agent", a.agent.Name, "task_id", ec.TaskID, "error", err)
+				yield(a2a.NewStatusUpdateEvent(ec, a2a.TaskStateFailed, a2a.NewMessageForTask(a2a.MessageRoleAgent, ec, a2a.NewTextPart("Agent execution failed."))), nil)
+			}
+			handle, err := a.agent.Execute(ctx, input)
 			if err != nil {
 				fail(err)
 				return
 			}
-			var interrupts any
-			if err := json.Unmarshal(data, &interrupts); err != nil {
-				fail(err)
+			// The agent handle detaches execution from HTTP subscriptions. The A2A SDK
+			// owns task lifetime; cancellation of its executor must also stop remote work.
+			stop := func() {
+				stopCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+				defer cancel()
+				if err := handle.Stop(stopCtx); err != nil {
+					slog.ErrorContext(stopCtx, "A2A stop failed", "error", err)
+				}
+			}
+			stopWatch := context.AfterFunc(ctx, stop)
+			defer stopWatch()
+			var artifactID a2a.ArtifactID
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case chunk, ok := <-handle.Chunks:
+					if !ok {
+						goto finished
+					}
+					if chunk == nil || chunk.OfOutputTextDelta == nil || chunk.OfOutputTextDelta.Delta == "" {
+						continue
+					}
+					event := a2a.NewArtifactEvent(ec, a2a.NewTextPart(chunk.OfOutputTextDelta.Delta))
+					if artifactID == "" {
+						artifactID = event.Artifact.ID
+					} else {
+						event.Artifact.ID = artifactID
+						event.Append = true
+					}
+					if !yield(event, nil) {
+						stop()
+						return
+					}
+				}
+			}
+		finished:
+			output, err := handle.Wait(ctx)
+			stopWatch()
+			if err != nil {
+				if ctx.Err() == nil {
+					fail(err)
+				}
 				return
 			}
-			message = a2a.NewMessageForTask(a2a.MessageRoleAgent, ec, a2a.NewDataPart(map[string]any{"type": "hastekit.interrupts", "interrupts": interrupts}))
+			if output == nil {
+				fail(fmt.Errorf("agent returned no output"))
+				return
+			}
+			if output.Status == agentstate.RunStatusError {
+				fail(fmt.Errorf("agent returned error status"))
+				return
+			}
+			if text := output.Text(); text != "" || artifactID != "" {
+				part := a2a.NewTextPart(text)
+				if a.agent.output != nil && json.Valid([]byte(text)) {
+					var data any
+					if json.Unmarshal([]byte(text), &data) == nil {
+						part = a2a.NewDataPart(data)
+					}
+				}
+				event := a2a.NewArtifactEvent(ec, part)
+				if artifactID != "" {
+					event.Artifact.ID = artifactID
+				}
+				// Replace provisional deltas with the authoritative final output. This also
+				// handles runtimes that only publish their completed response.
+				event.LastChunk = true
+				if !yield(event, nil) {
+					return
+				}
+			}
+			state := a2a.TaskStateCompleted
+			var message *a2a.Message
+			if output.Status == agentstate.RunStatusPaused {
+				var parts []*a2a.Part
+				state, parts = a2aPause(output.Interrupts)
+				message = a2a.NewMessageForTask(a2a.MessageRoleAgent, ec, parts...)
+			}
+			if state == a2a.TaskStateAuthRequired {
+				if a.authorizer == nil {
+					yield(a2a.NewStatusUpdateEvent(ec, a2a.TaskStateFailed, a2a.NewMessageForTask(a2a.MessageRoleAgent, ec, a2a.NewTextPart("Authorization is required, but the agent host has not configured an authorization handler."))), nil)
+					return
+				}
+				instructions, err := a.authorizer.Instructions(ctx, input, output.Interrupts)
+				if err != nil || strings.TrimSpace(instructions) == "" {
+					fail(fmt.Errorf("authorization instructions unavailable: %v", err))
+					return
+				}
+				message.Parts = append(message.Parts, a2a.NewTextPart(instructions))
+			}
+			if !yield(a2a.NewStatusUpdateEvent(ec, state, message), nil) || state != a2a.TaskStateAuthRequired {
+				return
+			}
+			resolutions, err := a.authorizer.Authorize(ctx, input, output.Interrupts)
+			if ctx.Err() != nil {
+				return
+			}
+			if err != nil || len(resolutions) == 0 {
+				fail(fmt.Errorf("authorization did not produce a decision: %v", err))
+				return
+			}
+			// Resume the same thread with the trusted host decision and a fresh
+			// stream. Do not replay the caller's original message.
+			next := *input
+			messageID := uuid.NewString()
+			next.StreamID = StreamIDForTask(a.namespace, input.ThreadID, string(ec.TaskID)+"\x00"+messageID)
+			next.Message = messages.NewWithID(messageID, "host", []responses.InputMessageUnion{{
+				OfFunctionCallInterruptResolution: &responses.FunctionCallInterruptResolutionMessage{ID: messageID, Resolutions: resolutions},
+			}})
+			input = &next
 		}
-		event := a2a.NewStatusUpdateEvent(ec, state, message)
-		event.Metadata = map[string]any{"hastekit.run_id": output.RunID}
-		yield(event, nil)
 	}
+}
+
+// A2A standardizes pause states, not tool-call resolution payloads. Keep the
+// internal interrupt model on the server and describe the required action in
+// ordinary message parts. Authorization must be fulfilled through the host's
+// trusted out-of-band flow; incoming A2A content never grants tool approval.
+func a2aPause(interrupts []responses.Interrupt) (a2a.TaskState, []*a2a.Part) {
+	state := a2a.TaskStateInputRequired
+	var instructions []string
+	for _, interrupt := range interrupts {
+		switch interrupt.Mode {
+		case responses.InterruptModeForm:
+			instructions = append(instructions, "Additional information is required.")
+		case responses.InterruptModeURL:
+			state = a2a.TaskStateAuthRequired
+			instructions = append(instructions, "Complete authorization at the following URL before continuing.")
+		default:
+			// Approval is also the conservative fallback for unknown modes.
+			state = a2a.TaskStateAuthRequired
+			instructions = append(instructions, fmt.Sprintf("Approval is required for %q. Contact the agent host to approve or decline this action through its authorization flow. A reply to this task does not grant approval.", interrupt.FunctionCallMessage.Name))
+		}
+		for _, elicitation := range interrupt.Elicitations {
+			if elicitation.Message != "" {
+				instructions = append(instructions, elicitation.Message)
+			}
+			if elicitation.URL != "" {
+				instructions = append(instructions, elicitation.URL)
+			}
+			if elicitation.RequestedSchema != nil {
+				if schema, err := json.Marshal(elicitation.RequestedSchema); err == nil {
+					instructions = append(instructions, "Requested information (JSON Schema): "+string(schema))
+				}
+			}
+		}
+	}
+	if len(instructions) == 0 {
+		instructions = append(instructions, "Additional input is required to continue this task.")
+	}
+	return state, []*a2a.Part{a2a.NewTextPart(strings.Join(instructions, "\n"))}
 }
 
 func (a *A2A) Cancel(ctx context.Context, ec *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
@@ -225,23 +302,6 @@ func (a *A2A) input(ec *a2asrv.ExecutorContext) (*AgentInput, error) {
 			if err != nil {
 				return nil, fmt.Errorf("invalid data part: %w", err)
 			}
-			var envelope struct {
-				Type        string                          `json:"type"`
-				Resolutions []responses.InterruptResolution `json:"resolutions"`
-			}
-			_ = json.Unmarshal(data, &envelope)
-			if envelope.Type == "hastekit.interrupt_response" {
-				if ec.StoredTask == nil || ec.StoredTask.Status.State != a2a.TaskStateInputRequired || len(envelope.Resolutions) == 0 {
-					return nil, fmt.Errorf("interrupt responses require a task awaiting input")
-				}
-				for _, resolution := range envelope.Resolutions {
-					if resolution.CallID == "" || (resolution.Action != "approve" && resolution.Action != "reject") {
-						return nil, fmt.Errorf("interrupt response requires call_id and approve/reject action")
-					}
-				}
-				input = append(input, responses.InputMessageUnion{OfFunctionCallInterruptResolution: &responses.FunctionCallInterruptResolutionMessage{ID: ec.Message.ID, Resolutions: envelope.Resolutions}})
-				continue
-			}
 			text = string(data)
 		default:
 			return nil, fmt.Errorf("only text and JSON data parts are supported")
@@ -260,20 +320,7 @@ func (a *A2A) input(ec *a2asrv.ExecutorContext) (*AgentInput, error) {
 		}
 	}
 	in.RunContext["Header"] = headers
-	if ec.StoredTask != nil {
-		if runID, ok := ec.StoredTask.Metadata["hastekit.run_id"].(string); ok {
-			in.PreviousRunID = runID
-		}
-	}
-	if raw, ok := ec.Message.Metadata["hastekit.skills"]; ok {
-		data, err := json.Marshal(raw)
-		if err != nil {
-			return nil, err
-		}
-		if err := json.Unmarshal(data, &in.Skills); err != nil {
-			return nil, fmt.Errorf("invalid hastekit.skills: %w", err)
-		}
-	}
+
 	return in, nil
 }
 

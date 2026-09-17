@@ -89,7 +89,7 @@ func TestA2ADiscoverySendAndTaskIsolation(t *testing.T) {
 	require.Equal(t, "conversation", task.ContextID)
 	input := <-inputs
 	require.Equal(t, "alice", input.Namespace)
-	require.Equal(t, []string{"review"}, input.Skills.Enable)
+	require.Empty(t, input.Skills.Enable)
 	fetched, err := client.GetTask(t.Context(), &a2a.GetTaskRequest{ID: task.ID})
 	require.NoError(t, err)
 	require.Equal(t, task.ID, fetched.ID)
@@ -196,14 +196,14 @@ func TestA2AInputRequiredAndResume(t *testing.T) {
 	var calls atomic.Int32
 	agent := agents.NewAgent(&agents.AgentOptions{Name: "Helper", Runtime: a2aRuntime(func(ctx context.Context, a *agents.Agent, in *agents.AgentInput) (*agents.AgentOutput, error) {
 		if calls.Add(1) == 1 {
-			return &agents.AgentOutput{Status: agentstate.RunStatusPaused, RunID: "paused-run", Interrupts: []responses.Interrupt{{FunctionCallMessage: responses.FunctionCallMessage{CallID: "call-1"}, Mode: responses.InterruptModeApproval}}}, nil
+			return &agents.AgentOutput{Status: agentstate.RunStatusPaused, RunID: "paused-run", Interrupts: []responses.Interrupt{{FunctionCallMessage: responses.FunctionCallMessage{CallID: "call-1"}, Mode: responses.InterruptModeForm}}}, nil
 		}
-		if in.PreviousRunID != "paused-run" {
-			return nil, errors.New("missing previous run")
+		if in.PreviousRunID != "" {
+			return nil, errors.New("continuation should use thread history")
 		}
-		resolution := in.Message.Messages[0].OfFunctionCallInterruptResolution
-		if resolution == nil || resolution.Resolutions[0].CallID != "call-1" {
-			return nil, errors.New("missing resolution")
+		message := in.Message.Messages[0].OfEasyInput
+		if message == nil || *message.Content.OfString != "Here are the requested details." {
+			return nil, errors.New("missing ordinary follow-up message")
 		}
 		return a2aOutput("approved"), nil
 	})})
@@ -215,7 +215,7 @@ func TestA2AInputRequiredAndResume(t *testing.T) {
 	task := result.(*a2a.Task)
 	require.Equal(t, a2a.TaskStateInputRequired, task.Status.State)
 	require.NotNil(t, task.Status.Message)
-	msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewDataPart(map[string]any{"type": "hastekit.interrupt_response", "resolutions": []map[string]any{{"call_id": "call-1", "action": "approve"}}}))
+	msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("Here are the requested details."))
 	msg.TaskID = task.ID
 	result, err = client.SendMessage(t.Context(), &a2a.SendMessageRequest{Message: msg})
 	require.NoError(t, err)
