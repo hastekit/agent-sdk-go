@@ -14,6 +14,7 @@ import (
 
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
 	"github.com/hastekit/agent-sdk-go/pkg/attachments"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/constants"
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
 )
 
@@ -21,16 +22,22 @@ import (
 // where inline tool output and generated model images are put, and Resolver is where
 // an attachment reference is read back from when the model needs the bytes.
 type AttachmentMiddlewareConfig struct {
+	// InlineAttachments resolves SDK attachment references into bytes for model calls.
+	// By default, references are sent as plain text without reading storage, so the
+	// model can pass them to tools without loading file contents into its context.
+	InlineAttachments bool
+
 	Store        attachments.UploadStore
 	MaxFileBytes int64 // zero: 20 MiB per decoded attachment
 
-	// Resolver reads owned references back for the model. Leave it nil to
+	// Resolver reads owned references when InlineAttachments is enabled. Leave it nil to
 	// have one built over Store with MaxFileBytes and default cache limits;
 	// set it to share one resolver — and its byte cache — across agents.
 	Resolver *attachments.Resolver
 
 	// MaxInlineBytes limits the encoded attachment content one model request
-	// may carry, counting every occurrence (zero: 32 MiB).
+	// may carry when InlineAttachments is enabled, counting every occurrence
+	// (zero: 32 MiB).
 	MaxInlineBytes int64
 }
 
@@ -45,14 +52,12 @@ type AttachmentMiddlewareConfig struct {
 // an inline result into history. Runtime adapters run it inside the step that
 // ran the tool, before that step returns.
 //
-// On the way out to the model, WrapModelCall resolves every SDK attachment ID in the
-// request — user input, tool results, generated-image history, and a middleware's
-// appended notes alike — into the inline data a provider accepts, on a copy the
-// loop never keeps. On the way back it uploads generated images and replaces their
-// base64 result with an attachment reference, also on a copy. It runs inside the
-// model call's own step, after the request has crossed into it, so raw bytes exist
-// only between this wrap and the provider. A resolution or upload failure aborts the
-// call instead of allowing bytes across the model durability boundary.
+// On the way out to the model, WrapModelCall replaces SDK attachment references
+// with plain text on a transient copy, including user input, tool results, and
+// generated-image history. InlineAttachments opts into resolving them to bytes.
+// On the way back, generated images are uploaded and replaced with references.
+// Preparation and uploads run inside the model call's own step; failures abort
+// the call before crossing the model durability boundary.
 //
 // Register it first among an agent's middlewares, so it is outermost: a result that
 // another middleware's wrap adds media to on its way back still passes through it.
@@ -71,19 +76,16 @@ func NewAttachmentMiddleware(cfg AttachmentMiddlewareConfig) *AttachmentMiddlewa
 		cfg.MaxFileBytes = 20 << 20
 	}
 	resolver := cfg.Resolver
-	if resolver == nil && cfg.Store != nil {
+	if cfg.InlineAttachments && resolver == nil && cfg.Store != nil {
 		resolver = attachments.NewResolver(cfg.Store, attachments.Config{MaxFileBytes: cfg.MaxFileBytes})
 	}
 	return &AttachmentMiddleware{cfg: cfg, resolver: resolver}
 }
 
-// WrapModelCall hands next the request with its file references resolved into
-// inline data, on a transient copy, read under the call's namespace. It then
-// externalizes generated-image results before returning the response to the
-// agent loop (or out of a durable runtime's model activity/step). A request or
-// response carrying no owned media goes through unchanged. With neither Resolver
-// nor Store configured, owned input references and raw generated output fail with
-// attachments.ErrUnresolved rather than leaking across the provider boundary.
+// WrapModelCall prepares attachment references on a transient request copy and
+// externalizes generated images before returning to the agent loop. Byte
+// resolution requires InlineAttachments and a Resolver or Store. Uploading raw
+// generated images always requires Store.
 func (h *AttachmentMiddleware) WrapModelCall(next agents.ModelCallFunc) agents.ModelCallFunc {
 	return func(ctx context.Context, call *agents.ModelCall, request *responses.Request) (*responses.Response, error) {
 		namespace := ""
@@ -91,7 +93,13 @@ func (h *AttachmentMiddleware) WrapModelCall(next agents.ModelCallFunc) agents.M
 			namespace = call.Namespace
 		}
 		if request != nil {
-			prepared, err := PrepareAttachments(ctx, namespace, request, h.resolver, h.cfg.MaxInlineBytes)
+			var prepared *responses.Request
+			var err error
+			if h.cfg.InlineAttachments {
+				prepared, err = PrepareAttachments(ctx, namespace, request, h.resolver, h.cfg.MaxInlineBytes)
+			} else {
+				prepared, err = prepareAttachmentReferences(request)
+			}
 			if err != nil {
 				return nil, err
 			}
@@ -526,6 +534,67 @@ func mapInputContent(in []responses.InputMessageUnion, fn func(responses.InputCo
 		}
 	}
 	return out, nil
+}
+
+// prepareAttachmentReferences never reads storage. References remain usable by
+// tools, while the original structured media stays intact for durable history.
+func prepareAttachmentReferences(in *responses.Request) (*responses.Request, error) {
+	changed := false
+	referenceText := func(id string) (string, error) {
+		if _, err := attachments.RefFromFileID(id); err != nil {
+			return "", err
+		}
+		return "[Attached file reference: " + id + ". File contents are not included; pass this reference to a tool that accepts attachments.]", nil
+	}
+	mapped, err := mapInputContent(in.Input.OfInputMessageList, func(content responses.InputContent) (responses.InputContent, error) {
+		out := slices.Clone(content)
+		for i, c := range content {
+			var id string
+			if img := c.OfInputImage; img != nil && img.FileID != nil && attachments.IsFileID(*img.FileID) {
+				if img.ImageURL != nil || c.OfInputFile != nil || c.OfInputText != nil || c.OfOutputText != nil {
+					return nil, attachments.ErrInvalid
+				}
+				id = *img.FileID
+			}
+			if file := c.OfInputFile; file != nil && file.FileID != nil && attachments.IsFileID(*file.FileID) {
+				if file.FileURL != nil || file.FileData != nil || c.OfInputImage != nil || c.OfInputText != nil || c.OfOutputText != nil {
+					return nil, attachments.ErrInvalid
+				}
+				id = *file.FileID
+			}
+			if id == "" {
+				continue
+			}
+			text, err := referenceText(id)
+			if err != nil {
+				return nil, err
+			}
+			out[i] = responses.InputContentUnion{OfInputText: &responses.InputTextContent{Text: text}}
+			changed = true
+		}
+		return out, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	for i, m := range mapped {
+		if image := m.OfImageGenerationCall; image != nil && attachments.IsFileID(image.Result) {
+			text, err := referenceText(image.Result)
+			if err != nil {
+				return nil, err
+			}
+			mapped[i] = responses.InputMessageUnion{OfEasyInput: &responses.EasyMessage{
+				Role: constants.RoleAssistant, Content: responses.EasyInputContentUnion{OfString: &text},
+			}}
+			changed = true
+		}
+	}
+	if !changed {
+		return in, nil
+	}
+	out := *in
+	out.Input.OfInputMessageList = mapped
+	return &out, nil
 }
 
 // PrepareAttachments produces a transient copy with every SDK attachment file_id resolved to

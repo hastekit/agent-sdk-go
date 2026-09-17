@@ -82,6 +82,15 @@ func TestAttachmentMiddlewareAgentHistoryKeepsReferences(t *testing.T) {
 	require.Contains(t, string(raw), "attachment://")
 	require.NotContains(t, string(raw), "base64")
 	require.Equal(t, 2, model.callCount())
+	// The next model call sees the tool's stored files only as text references.
+	parts := model.request(1).Input.OfInputMessageList[2].OfFunctionCallOutput.Output.OfList
+	for _, part := range parts[1:] {
+		require.NotNil(t, part.OfInputText)
+		require.Contains(t, part.OfInputText.Text, "attachment://")
+		require.Nil(t, part.OfInputImage)
+		require.Nil(t, part.OfInputFile)
+	}
+
 }
 
 // A local model reply is externalized before the loop turns it into AgentOutput
@@ -100,7 +109,7 @@ func TestAttachmentMiddlewareAgentGeneratedImageKeepsOnlyReference(t *testing.T)
 	model := &scriptedLLM{script: []*responses.Response{first, textResponse("done")}}
 	agent := agents.NewAgent(&agents.AgentOptions{
 		Name: "image-agent", History: manager, Tools: []agents.Tool{newFakeTool("continue", false, "continued")},
-		Middlewares: []agents.Middleware{agentmiddleware.NewAttachmentMiddleware(agentmiddleware.AttachmentMiddlewareConfig{Store: store})},
+		Middlewares: []agents.Middleware{agentmiddleware.NewAttachmentMiddleware(agentmiddleware.AttachmentMiddlewareConfig{InlineAttachments: true, Store: store})},
 	}).WithLLM(model)
 
 	out := runAgent(t, agent, &agents.AgentInput{Namespace: "ns", ThreadID: "generated", Message: userMessage("draw")})
@@ -160,7 +169,7 @@ func TestAttachmentMiddleware_AgentSendsBytesAndKeepsReferences(t *testing.T) {
 		Name:        "media-agent",
 		Tools:       []agents.Tool{tool},
 		History:     manager,
-		Middlewares: []agents.Middleware{agentmiddleware.NewAttachmentMiddleware(agentmiddleware.AttachmentMiddlewareConfig{Store: store})},
+		Middlewares: []agents.Middleware{agentmiddleware.NewAttachmentMiddleware(agentmiddleware.AttachmentMiddlewareConfig{InlineAttachments: true, Store: store})},
 	}).WithLLM(model)
 
 	// The user's turn arrives as history shapes it: a reference, no bytes.

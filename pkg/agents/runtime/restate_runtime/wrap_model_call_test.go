@@ -84,7 +84,7 @@ func TestRestateLLMStepResolvesReferencesUnderTheTrustedScope(t *testing.T) {
 			{OfInputImage: &responses.InputImageContent{FileID: utils.Ptr(attachments.FileID(ref))}},
 		}},
 	}}}}
-	middleware := agentmiddleware.NewAttachmentMiddleware(agentmiddleware.AttachmentMiddlewareConfig{Store: store})
+	middleware := agentmiddleware.NewAttachmentMiddleware(agentmiddleware.AttachmentMiddlewareConfig{InlineAttachments: true, Store: store})
 
 	provider := &capturingProvider{}
 	step := NewRestateLLM(nil, provider, "", nil, "stream", middleware).(*RestateLLM)

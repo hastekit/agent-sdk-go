@@ -503,7 +503,7 @@ func TestAttachmentMiddlewareHydratesGeneratedImageHistory(t *testing.T) {
 		},
 	}}}}
 
-	sent, err := prepared(t, agentmiddleware.NewAttachmentMiddleware(agentmiddleware.AttachmentMiddlewareConfig{Store: store}), t.Context(), request)
+	sent, err := prepared(t, agentmiddleware.NewAttachmentMiddleware(agentmiddleware.AttachmentMiddlewareConfig{InlineAttachments: true, Store: store}), t.Context(), request)
 	require.NoError(t, err)
 	require.NotSame(t, request, sent)
 	require.Equal(t, base64.StdEncoding.EncodeToString(pngBytes(t)), sent.Input.OfInputMessageList[0].OfImageGenerationCall.Result)
@@ -558,7 +558,7 @@ func TestAttachmentMiddlewareGeneratedImageFailuresStayInsideModelCall(t *testin
 func TestAttachmentMiddleware_ResolvesReferencesForTheModel(t *testing.T) {
 	store := middlewareStore(t)
 	image, file := uploadedRefs(t, store)
-	middleware := agentmiddleware.NewAttachmentMiddleware(agentmiddleware.AttachmentMiddlewareConfig{Store: store})
+	middleware := agentmiddleware.NewAttachmentMiddleware(agentmiddleware.AttachmentMiddlewareConfig{InlineAttachments: true, Store: store})
 	request := referencedRequest(image, file)
 	before, err := json.Marshal(request)
 	require.NoError(t, err)
@@ -611,7 +611,7 @@ func TestAttachmentMiddlewarePreservesProviderFileIDs(t *testing.T) {
 func TestAttachmentMiddleware_UsesTheResolverItIsGiven(t *testing.T) {
 	store := middlewareStore(t)
 	image, file := uploadedRefs(t, store)
-	middleware := agentmiddleware.NewAttachmentMiddleware(agentmiddleware.AttachmentMiddlewareConfig{Resolver: attachments.NewResolver(store, attachments.Config{})})
+	middleware := agentmiddleware.NewAttachmentMiddleware(agentmiddleware.AttachmentMiddlewareConfig{InlineAttachments: true, Resolver: attachments.NewResolver(store, attachments.Config{})})
 
 	sent, err := prepared(t, middleware, t.Context(), referencedRequest(image, file))
 	require.NoError(t, err)
@@ -625,21 +625,21 @@ func TestAttachmentMiddleware_FailsClosedOnAReferenceItCannotRead(t *testing.T) 
 	image, file := uploadedRefs(t, store)
 
 	// Neither a resolver nor a store to build one over.
-	_, err := prepared(t, agentmiddleware.NewAttachmentMiddleware(agentmiddleware.AttachmentMiddlewareConfig{}), t.Context(), referencedRequest(image, file))
+	_, err := prepared(t, agentmiddleware.NewAttachmentMiddleware(agentmiddleware.AttachmentMiddlewareConfig{InlineAttachments: true}), t.Context(), referencedRequest(image, file))
 	require.ErrorIs(t, err, attachments.ErrUnresolved)
 
 	// Nothing to read, no reference: the request passes through.
 	plain := &responses.Request{Input: responses.InputUnion{OfInputMessageList: []responses.InputMessageUnion{responses.UserMessage("hi")}}}
-	same, err := prepared(t, agentmiddleware.NewAttachmentMiddleware(agentmiddleware.AttachmentMiddlewareConfig{}), t.Context(), plain)
+	same, err := prepared(t, agentmiddleware.NewAttachmentMiddleware(agentmiddleware.AttachmentMiddlewareConfig{InlineAttachments: true}), t.Context(), plain)
 	require.NoError(t, err)
 	require.Same(t, plain, same)
 
 	// A reference nobody uploaded.
-	_, err = prepared(t, agentmiddleware.NewAttachmentMiddleware(agentmiddleware.AttachmentMiddlewareConfig{Store: store}), t.Context(), referencedRequest(attachments.Ref{ID: "missing"}, file))
+	_, err = prepared(t, agentmiddleware.NewAttachmentMiddleware(agentmiddleware.AttachmentMiddlewareConfig{InlineAttachments: true, Store: store}), t.Context(), referencedRequest(attachments.Ref{ID: "missing"}, file))
 	require.Error(t, err)
 
 	// More than one request may carry.
-	_, err = prepared(t, agentmiddleware.NewAttachmentMiddleware(agentmiddleware.AttachmentMiddlewareConfig{Store: store, MaxInlineBytes: 16}), t.Context(), referencedRequest(image, file))
+	_, err = prepared(t, agentmiddleware.NewAttachmentMiddleware(agentmiddleware.AttachmentMiddlewareConfig{InlineAttachments: true, Store: store, MaxInlineBytes: 16}), t.Context(), referencedRequest(image, file))
 	require.ErrorIs(t, err, attachments.ErrTooLarge)
 }
 
@@ -721,4 +721,75 @@ func TestPreparationCountsRepeatedInlineContent(t *testing.T) {
 	in := &responses.Request{Input: responses.InputUnion{OfInputMessageList: []responses.InputMessageUnion{{OfInputMessage: &responses.InputMessage{Content: content}}}}}
 	_, err := agentmiddleware.PrepareAttachments(context.Background(), "a", in, nil, int64(len(data)))
 	require.ErrorIs(t, err, attachments.ErrTooLarge)
+}
+
+func TestAttachmentMiddlewareDefaultsToTextReferencesWithoutStorageReads(t *testing.T) {
+	// An embedded nil store panics on any storage access, including through the
+	// supplied resolver. Even nonexistent or oversized files need no reads.
+	unreadable := struct{ attachments.UploadStore }{}
+	for _, cfg := range []agentmiddleware.AttachmentMiddlewareConfig{
+		{},
+		{Store: unreadable, Resolver: attachments.NewResolver(unreadable, attachments.Config{}), MaxFileBytes: 1, MaxInlineBytes: 1},
+	} {
+		id := "attachment://missing-file"
+		content := responses.InputContent{
+			{OfInputText: &responses.InputTextContent{Text: "inspect with a tool"}},
+			{OfInputImage: &responses.InputImageContent{FileID: &id}},
+			{OfInputFile: &responses.InputFileContent{FileID: &id, FileName: utils.Ptr("large.pdf")}},
+		}
+		request := &responses.Request{Input: responses.InputUnion{OfInputMessageList: []responses.InputMessageUnion{
+			{OfEasyInput: &responses.EasyMessage{Role: constants.RoleUser, Content: responses.EasyInputContentUnion{OfInputMessageList: content}}},
+			{OfInputMessage: &responses.InputMessage{Role: constants.RoleUser, Content: content}},
+			{OfFunctionCallOutput: &responses.FunctionCallOutputMessage{CallID: "call", Output: responses.FunctionCallOutputContentUnion{OfList: content}}},
+			{OfImageGenerationCall: &responses.ImageGenerationCallMessage{ID: "generated", Result: id}},
+		}}}
+		before, err := json.Marshal(request)
+		require.NoError(t, err)
+		sent, err := prepared(t, agentmiddleware.NewAttachmentMiddleware(cfg), t.Context(), request)
+		require.NoError(t, err)
+		require.NotSame(t, request, sent)
+		for _, parts := range []responses.InputContent{
+			sent.Input.OfInputMessageList[0].OfEasyInput.Content.OfInputMessageList,
+			sent.Input.OfInputMessageList[1].OfInputMessage.Content,
+			sent.Input.OfInputMessageList[2].OfFunctionCallOutput.Output.OfList,
+		} {
+			require.Equal(t, "inspect with a tool", parts[0].OfInputText.Text)
+			for _, part := range parts[1:] {
+				require.Nil(t, part.OfInputImage)
+				require.Nil(t, part.OfInputFile)
+				require.Contains(t, part.OfInputText.Text, id)
+				require.Contains(t, part.OfInputText.Text, "File contents are not included")
+			}
+		}
+		require.Equal(t, "call", sent.Input.OfInputMessageList[2].OfFunctionCallOutput.CallID)
+		generated := sent.Input.OfInputMessageList[3]
+		require.Nil(t, generated.OfImageGenerationCall)
+		require.Equal(t, constants.RoleAssistant, generated.OfEasyInput.Role)
+		require.Contains(t, *generated.OfEasyInput.Content.OfString, id)
+		after, err := json.Marshal(request)
+		require.NoError(t, err)
+		require.JSONEq(t, string(before), string(after))
+		for _, wire := range []interface{}{
+			sent, anthropic.NativeRequestToRequest(sent), gemini.ResponsesInputToGeminiResponsesInput(sent), bedrock.NativeRequestToConverseRequest(sent),
+		} {
+			encoded, err := json.Marshal(wire)
+			require.NoError(t, err)
+			require.Contains(t, string(encoded), id)
+			require.NotContains(t, string(encoded), "base64")
+		}
+	}
+}
+
+func TestAttachmentMiddlewareTextReferencesRejectInvalidSources(t *testing.T) {
+	id := "attachment://file"
+	for _, part := range []responses.InputContentUnion{
+		{OfInputImage: &responses.InputImageContent{FileID: utils.Ptr("attachment://../secret")}},
+		{OfInputImage: &responses.InputImageContent{FileID: &id, ImageURL: utils.Ptr("data:image/png;base64,AAAA")}},
+		{OfInputFile: &responses.InputFileContent{FileID: &id, FileData: utils.Ptr("AAAA")}},
+		{OfInputFile: &responses.InputFileContent{FileID: &id, FileURL: utils.Ptr("https://example.com/file")}},
+	} {
+		req := &responses.Request{Input: responses.InputUnion{OfInputMessageList: []responses.InputMessageUnion{{OfInputMessage: &responses.InputMessage{Content: responses.InputContent{part}}}}}}
+		_, err := prepared(t, agentmiddleware.NewAttachmentMiddleware(agentmiddleware.AttachmentMiddlewareConfig{}), t.Context(), req)
+		require.ErrorIs(t, err, attachments.ErrInvalid)
+	}
 }

@@ -30,7 +30,7 @@ func TestRestateLLMStepDoesNotRetryAMiddlewaresOwnError(t *testing.T) {
 	defer store.Close()
 	provider := &resilienceProvider{}
 	worker := NewRestateLLM(nil, provider, "", nil, "stream",
-		agentmiddleware.NewAttachmentMiddleware(agentmiddleware.AttachmentMiddlewareConfig{Store: store})).(*RestateLLM)
+		agentmiddleware.NewAttachmentMiddleware(agentmiddleware.AttachmentMiddlewareConfig{InlineAttachments: true, Store: store})).(*RestateLLM)
 
 	_, err = worker.invoke(t.Context(), &agents.ModelCall{Namespace: "test"}, missingAttachmentRequest(), func(*responses.ResponseChunk) {})
 

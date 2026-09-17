@@ -126,6 +126,7 @@ agent := agents.NewAgent(&agents.AgentOptions{
     Middlewares: []agents.Middleware{middleware.NewAttachmentMiddleware(middleware.AttachmentMiddlewareConfig{
         Store: store,
         Resolver: resolver,
+        InlineAttachments: true, // Opt in when this model should see the file contents.
         MaxInlineBytes: 32 << 20,
     })},
 })
@@ -176,7 +177,12 @@ Resolution and generated-image externalization are the middleware's `WrapModelCa
 It wraps the model call inside the
 step that makes it — the agent loop locally, the LLM activity under Temporal,
 the LLM run step under Restate — after the request has crossed into that step,
-and hands the provider a transient copy carrying inline data. As complete
+and hands the provider a transient copy carrying plain-text attachment references.
+The default does not read storage or load file contents into the model context.
+The model can pass the exact `attachment://...` reference to a tool that accepts
+attachments. Set `InlineAttachments: true` to resolve references into inline bytes
+for a model that needs the contents, such as a vision or image-editing model.
+This applies to user inputs, tool results, and generated-image history. As complete
 generated-image items arrive, it uploads their `image_generation_call.result`
 before publishing the event, replaces the result with `attachment://...` on a
 copy, and reuses that reference in the accumulated response. Binary
@@ -185,7 +191,7 @@ tool events continue streaming. The loop, broker/UI, conversation history, and
 the durable journal therefore keep references.
 Adding the middleware to an agent turns attachment support on for that agent;
 removing it turns it off, and the LLM client is not involved either way. OpenAI
-gets data URLs; Anthropic/Gemini/Bedrock adapters translate those into their
+gets data URLs when `InlineAttachments` is enabled; Anthropic/Gemini/Bedrock adapters translate those into their
 inline representation. A request carrying no references passes through
 untouched.
 
@@ -194,7 +200,8 @@ fallback and tracing all see the request the middleware produced, and the client
 sends exactly what it is handed. A caller dispatching Responses requests
 outside an agent — a direct `client.Model(...)` call, or an external gateway
 server with access to the store — prepares them itself with
-`middleware.PrepareAttachments(ctx, namespace, ...)`, which is the same function the middleware uses.
+`middleware.PrepareAttachments(ctx, namespace, ...)`, which explicitly resolves references to bytes (the middleware uses it only when
+`InlineAttachments` is enabled).
 Without a middleware or that preparation, the SDK does not resolve `file_id: "attachment://..."`, and
 the request continues through the existing provider adapter without an SDK
 validation step. A provider may reject the unresolved ID or its adapter may
@@ -207,12 +214,14 @@ raw bytes. Concurrent misses for an immutable object share one load. Each caller
 is independently authorized. Cancelling a waiter does not cancel another
 waiter's load; shared reads have a timeout (30 seconds by default). Set
 `middleware.AttachmentMiddlewareConfig.Resolver` to share one resolver — and its cache —
-across agents; a middleware given only a `Store` builds a private resolver over it.
+across agents when `InlineAttachments` is enabled; in that mode a middleware given
+only a `Store` builds a private resolver over it.
 
 Defaults: 64 MiB retained cache, 20 MiB per file, four simultaneous storage loads,
 and 32 MiB aggregate encoded attachment content per model request. Negative
 `CacheBytes` disables retention. Configure the aggregate limit using
-`middleware.AttachmentMiddlewareConfig.MaxInlineBytes`. Encoded limits count repeated message
+`middleware.AttachmentMiddlewareConfig.MaxInlineBytes` when `InlineAttachments`
+is enabled. Encoded limits count repeated message
 occurrences, even if the storage read is deduplicated. Provider request, MIME,
 image dimension, and model limits still apply. These are not a global limit on
 all simultaneous LLM request allocations.
@@ -314,7 +323,8 @@ Register it on each agent that sends or returns files:
 Middlewares: []agents.Middleware{
     middleware.NewAttachmentMiddleware(middleware.AttachmentMiddlewareConfig{
         Store: store,
-        Resolver: resolver, // optional; built over Store when omitted
+        Resolver: resolver,
+        InlineAttachments: true, // Opt in when this model should see the file contents. // optional; built over Store when omitted
         MaxFileBytes: 20 << 20,
     }),
 },

@@ -124,7 +124,7 @@ func TestTemporalLLMActivityResolvesReferencesInsideTheActivity(t *testing.T) {
 	require.NoError(t, err)
 	defer store.Close()
 	provider := &capturingProvider{}
-	middleware := &activityRequestTransform{AttachmentMiddleware: agentmiddleware.NewAttachmentMiddleware(agentmiddleware.AttachmentMiddlewareConfig{Store: store}), t: t}
+	middleware := &activityRequestTransform{AttachmentMiddleware: agentmiddleware.NewAttachmentMiddleware(agentmiddleware.AttachmentMiddlewareConfig{InlineAttachments: true, Store: store}), t: t}
 
 	a := temporal_runtime.NewTemporalAgent(nil, &agents.AgentOptions{
 		Name:        "A",

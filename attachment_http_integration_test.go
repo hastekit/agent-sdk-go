@@ -45,7 +45,7 @@ func TestChatAttachmentHTTPToProviderAndHistory(t *testing.T) {
 		Name:        "attachment-http-test",
 		LLM:         NewLLMClient(configs).Model("OpenAI/gpt-4o"),
 		History:     testFileHistory(t),
-		Middlewares: []agents.Middleware{agentmiddleware.NewAttachmentMiddleware(agentmiddleware.AttachmentMiddlewareConfig{Resolver: attachments.NewResolver(cacheStore, attachments.Config{})})},
+		Middlewares: []agents.Middleware{agentmiddleware.NewAttachmentMiddleware(agentmiddleware.AttachmentMiddlewareConfig{InlineAttachments: true, Resolver: attachments.NewResolver(cacheStore, attachments.Config{})})},
 	})
 	// Uploads, the runs that read them, and the transcript all live under the
 	// handler's namespace; nothing has to be stamped by hand.

@@ -103,7 +103,7 @@ func TestAttachmentMiddlewareResolvesBeforeTheClientAcrossTurnsAndRetries(t *tes
 		Name:        "attachment-retry-test",
 		LLM:         client.Model("OpenAI/vision"),
 		History:     hist,
-		Middlewares: []agents.Middleware{agentmiddleware.NewAttachmentMiddleware(agentmiddleware.AttachmentMiddlewareConfig{Resolver: attachments.NewResolver(store, attachments.Config{})})},
+		Middlewares: []agents.Middleware{agentmiddleware.NewAttachmentMiddleware(agentmiddleware.AttachmentMiddlewareConfig{InlineAttachments: true, Resolver: attachments.NewResolver(store, attachments.Config{})})},
 	})
 
 	require.NoError(t, runTurn(t, agent, ctx, "thread", imageTurn("first", ref)))
@@ -151,7 +151,7 @@ func TestAttachmentMiddlewareResolvesBeforeProviderFallback(t *testing.T) {
 		Name:        "attachment-fallback-test",
 		LLM:         client.Model("OpenAI/vision"),
 		History:     testFileHistory(t),
-		Middlewares: []agents.Middleware{agentmiddleware.NewAttachmentMiddleware(agentmiddleware.AttachmentMiddlewareConfig{Resolver: attachments.NewResolver(store, attachments.Config{})})},
+		Middlewares: []agents.Middleware{agentmiddleware.NewAttachmentMiddleware(agentmiddleware.AttachmentMiddlewareConfig{InlineAttachments: true, Resolver: attachments.NewResolver(store, attachments.Config{})})},
 	})
 
 	require.NoError(t, runTurn(t, agent, ctx, "thread", imageTurn("first", ref)))
@@ -174,7 +174,7 @@ func TestAttachmentMiddlewareLimitsFailBeforeTheProviderIsCalled(t *testing.T) {
 		Name:        "attachment-limit-test",
 		LLM:         NewLLMClient(configs).Model("OpenAI/vision"),
 		History:     testFileHistory(t),
-		Middlewares: []agents.Middleware{agentmiddleware.NewAttachmentMiddleware(agentmiddleware.AttachmentMiddlewareConfig{Resolver: attachments.NewResolver(store, attachments.Config{}), MaxInlineBytes: 1})},
+		Middlewares: []agents.Middleware{agentmiddleware.NewAttachmentMiddleware(agentmiddleware.AttachmentMiddlewareConfig{InlineAttachments: true, Resolver: attachments.NewResolver(store, attachments.Config{}), MaxInlineBytes: 1})},
 	})
 
 	err := runTurn(t, agent, ctx, "thread", imageTurn("first", ref))

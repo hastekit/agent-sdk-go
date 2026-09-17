@@ -47,7 +47,7 @@ func TestTemporalLLMActivityDoesNotRetryAMiddlewaresOwnError(t *testing.T) {
 	defer store.Close()
 	provider := &failingProvider{}
 	worker := temporal_runtime.NewTemporalLLM(provider, streambroker.NewMemoryStreamBroker(),
-		agentmiddleware.NewAttachmentMiddleware(agentmiddleware.AttachmentMiddlewareConfig{Store: store}))
+		agentmiddleware.NewAttachmentMiddleware(agentmiddleware.AttachmentMiddlewareConfig{InlineAttachments: true, Store: store}))
 
 	var suite testsuite.WorkflowTestSuite
 	env := suite.NewTestActivityEnvironment()
