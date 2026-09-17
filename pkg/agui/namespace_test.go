@@ -162,7 +162,7 @@ func TestNamespaceResolverAttachmentUploadDownloadAndRun(t *testing.T) {
 		return &agents.AgentOutput{}, nil
 	})})
 	calls := 0
-	h := NewHandler(registry{"Helper": a}, WithAttachmentStore(store), WithNamespaceResolver(func(r *http.Request) (string, error) { calls++; return r.Header.Get("X-Test-Tenant"), nil }))
+	h := http.StripPrefix("/api/agui", NewHandler(registry{"Helper": a}, WithAttachmentStore(store), WithNamespaceResolver(func(r *http.Request) (string, error) { calls++; return r.Header.Get("X-Test-Tenant"), nil })))
 	var body bytes.Buffer
 	form := multipart.NewWriter(&body)
 	file, err := form.CreateFormFile("file", "note.txt")
@@ -171,7 +171,7 @@ func TestNamespaceResolverAttachmentUploadDownloadAndRun(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, form.WriteField("session_id", "alice"))
 	require.NoError(t, form.Close())
-	req := httptest.NewRequest("POST", "/attachments/", &body)
+	req := httptest.NewRequest("POST", "/api/agui/attachments/", &body)
 	req.Header.Set("Content-Type", form.FormDataContentType())
 	req.Header.Set("X-Test-Tenant", "alice")
 	w := httptest.NewRecorder()
@@ -193,7 +193,7 @@ func TestNamespaceResolverAttachmentUploadDownloadAndRun(t *testing.T) {
 		input := RunAgentInput{ThreadID: ns, Messages: []Message{{ID: "m", Role: RoleUser, ContentParts: []ContentPart{{Type: "document", Source: &ContentSource{Type: "url", Value: uploaded.FileID}}}}}}
 		data, err := json.Marshal(input)
 		require.NoError(t, err)
-		req = httptest.NewRequest("POST", "/agents/Helper/run", bytes.NewReader(data))
+		req = httptest.NewRequest("POST", "/api/agui/agents/Helper/run", bytes.NewReader(data))
 		req.Header.Set("X-Test-Tenant", ns)
 		w = httptest.NewRecorder()
 		h.ServeHTTP(w, req)

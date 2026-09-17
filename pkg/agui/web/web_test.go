@@ -1,9 +1,11 @@
 package web
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -116,7 +118,7 @@ func TestHandlerForwardsNamespaceResolverToAPIAndAttachments(t *testing.T) {
 	require.Equal(t, 204, w.Code)
 	require.Equal(t, agents.StreamIDForThread("tenant", "shared"), w.Header().Get("X-Stream-Id"))
 	w = httptest.NewRecorder()
-	h.ServeHTTP(w, httptest.NewRequest("GET", "/attachments/missing", nil))
+	h.ServeHTTP(w, httptest.NewRequest("GET", APIPrefix+"/attachments/missing", nil))
 	require.Equal(t, 400, w.Code) // malformed file ID, after namespace resolution
 	require.Equal(t, 2, calls)
 	// Static assets do not need namespace resolution.
@@ -150,5 +152,52 @@ func TestHandlerSkillStore(t *testing.T) {
 				require.Equal(t, http.StatusNotFound, w.Code)
 			}
 		})
+	}
+}
+
+func TestAttachmentsOnlyUnderAPIPrefix(t *testing.T) {
+	store, err := attachments.NewFileStore(t.TempDir(), attachments.FileStoreConfig{})
+	require.NoError(t, err)
+	defer store.Close()
+	h := Handler(registry{}, agui.WithAttachmentStore(store), agui.WithNamespaceResolver(func(r *http.Request) (string, error) {
+		return r.Header.Get("X-Tenant"), nil
+	}))
+	var body bytes.Buffer
+	form := multipart.NewWriter(&body)
+	file, err := form.CreateFormFile("file", "notes.txt")
+	require.NoError(t, err)
+	_, err = io.WriteString(file, "attachment content")
+	require.NoError(t, err)
+	require.NoError(t, form.WriteField("session_id", "thread"))
+	require.NoError(t, form.Close())
+	req := httptest.NewRequest(http.MethodPost, APIPrefix+"/attachments/", &body)
+	req.Header.Set("Content-Type", form.FormDataContentType())
+	req.Header.Set("X-Tenant", "alice")
+	uploaded := httptest.NewRecorder()
+	h.ServeHTTP(uploaded, req)
+	require.Equal(t, http.StatusCreated, uploaded.Code, uploaded.Body.String())
+	var saved attachments.HTTPFile
+	require.NoError(t, json.Unmarshal(uploaded.Body.Bytes(), &saved))
+	require.Equal(t, APIPrefix+"/attachments/"+strings.TrimPrefix(saved.FileID, "attachment://"), saved.URL)
+	require.Equal(t, saved.URL, uploaded.Header().Get("Location"))
+	for _, tenant := range []string{"alice", "bob"} {
+		req := httptest.NewRequest(http.MethodGet, saved.URL, nil)
+		req.Header.Set("X-Tenant", tenant)
+		downloaded := httptest.NewRecorder()
+		h.ServeHTTP(downloaded, req)
+		if tenant == "alice" {
+			require.Equal(t, http.StatusOK, downloaded.Code)
+			require.Equal(t, "attachment content", downloaded.Body.String())
+		} else {
+			require.Contains(t, []int{http.StatusForbidden, http.StatusNotFound}, downloaded.Code)
+		}
+	}
+	for _, request := range []struct{ method, path string }{
+		{http.MethodPost, "/attachments/"},
+		{http.MethodGet, strings.TrimPrefix(saved.URL, APIPrefix)},
+	} {
+		result := httptest.NewRecorder()
+		h.ServeHTTP(result, httptest.NewRequest(request.method, request.path, nil))
+		require.Equal(t, http.StatusNotFound, result.Code)
 	}
 }

@@ -29,6 +29,9 @@
 //
 //	GET  /                            → embedded CopilotKit chat UI
 //	GET  /basic.html                  → offline (no-CDN) fallback UI
+//	GET  /api/agui/a2a/ → A2A agent directory
+//	GET  /api/agui/a2a/{agent}/.well-known/agent-card.json → A2A discovery card
+//	POST /api/agui/a2a/{agent} → A2A 1.0 JSON-RPC (including SSE)
 //	GET  /api/agui/agents             → registered agent names
 //	POST /api/agui/agents/{name}/run  → AG-UI run endpoint (SSE)
 //	POST /api/agui/agents/{name}/stop → stop a run in flight
@@ -83,7 +86,6 @@ func Handler(registry agui.Registry, opts ...agui.Option) http.Handler {
 	mux := http.NewServeMux()
 	api := agui.NewHandler(registry, opts...)
 	mux.Handle(APIPrefix+"/", http.StripPrefix(APIPrefix, api))
-	mux.Handle("/attachments/", api)
 
 	static, err := fs.Sub(staticFS, "static")
 	if err != nil {

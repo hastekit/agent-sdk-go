@@ -314,7 +314,7 @@ func TestImageGenerationEmitsOneMarkdownMessage(t *testing.T) {
 	))
 	require.Len(t, refEvents, 3)
 	assert.Equal(t,
-		"![generated image](/attachments/0123456789abcdef0123456789abcdef)",
+		"![generated image](/api/agui/attachments/0123456789abcdef0123456789abcdef)",
 		refEvents[1].(*TextMessageContentEvent).Delta,
 	)
 }

@@ -590,6 +590,17 @@ if err := web.Serve(":8080", registry); err != nil {
 }
 ```
 
+Registered agents are also accessible through A2A 1.0 JSON-RPC:
+
+- `GET /api/agui/a2a/` lists agents and their discovery URLs.
+- `GET /api/agui/a2a/{agent}/.well-known/agent-card.json` returns an agent card.
+- `POST /api/agui/a2a/{agent}` accepts A2A requests, including streaming,
+  task lookup/listing, cancellation, and continuation after an input-required pause.
+
+See [A2A setup and protocol examples](pkg/agui/A2A.md). The adapter supports text
+and JSON data; task state is isolated per agent and resolved namespace and is
+in memory by default. Configure shared A2A persistence/queues for multiple replicas.
+
 The embedded UI lists registered agents, shows a sidebar of prior conversations (select one to resume it on the same thread), streams assistant text, reasoning, and tool calls live, and renders CopilotKit's `useInterrupt` approval cards inline when a run pauses for human-in-the-loop tool approval.
 
 The messages endpoint is paginated:
@@ -1487,7 +1498,7 @@ See [owned attachments](pkg/attachments/README.md) for local setup, caching, and
 Temporal/Restate configuration.
 
 Pass `agui.WithAttachmentStore(store)` to the embedded web handler to enable
-`/attachments/` upload/download APIs and the chat file picker. The
+`/api/agui/attachments/` upload/download APIs and the chat file picker. The
 [sample chat](samples/attachments/main.go) demonstrates the full attachment flow. Uploads accept original files including
 DOCX, CSV, TXT and audio. Images use image inputs; other files use native file
 inputs. The middleware resolves file references to base64 data with the stored

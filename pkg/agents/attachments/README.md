@@ -352,13 +352,13 @@ OPENAI_API_KEY=... go run ./samples/attachments
 
 The API exposes:
 
-- `POST /attachments/`: multipart form with one `file` field and a required `session_id` field. Returns HTTP 201
+- `POST /api/agui/attachments/`: multipart form with one `file` field and a required `session_id` field. Returns HTTP 201
   and `{file_id, url, filename, original_filename, mediaType, size}`.
-- `GET /attachments/{uuid}`: authorizes through `ReferenceStore.LookupReference`, then
+- `GET /api/agui/attachments/{uuid}`: authorizes through `ReferenceStore.LookupReference`, then
   streams `Store.Open`. Images display inline; PDFs download as documents.
 
 `attachments.NewHTTPHandler(store, maxBytes, namespaceOf)` can also be mounted
-independently; `namespaceOf` reports a request's namespace from whatever
+under `/api/agui/` using `http.StripPrefix("/api/agui", handler)`; `namespaceOf` reports a request's namespace from whatever
 authenticated it.
 The default upload limit is 20 MiB; `agui.WithAttachmentUploadLimit` can lower it.
 The embedded picker has a 20 MiB client limit. Supported browser uploads are PNG,
@@ -367,7 +367,7 @@ identify format; they do not perform malware scanning or validate all document
 structure. A custom UploadStore can add processing before returning a reference.
 
 The browser uploads first and sends AG-UI image/document parts whose `source`
-is `{type: "url", value: "/attachments/<id>?version=..."}`. These are owned API
+is `{type: "url", value: "/api/agui/attachments/<id>?version=..."}`. These are owned API
 URLs, not arbitrary fetch targets. AG-UI validates ownership and format, pins
 an immutable version, and converts them to SDK `file_id: "attachment://..."` inputs **before**
 starting or enqueueing the turn. Client-provided MIME types and filenames are

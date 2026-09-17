@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/a2aproject/a2a-go/v2/a2asrv"
 	"github.com/google/uuid"
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/attachments"
@@ -26,6 +27,8 @@ type Registry interface {
 }
 
 type options struct {
+	a2aBaseURL         string
+	a2aHandlerOptions  func(agentName, namespace string) []a2asrv.RequestHandlerOption
 	skillStore         skills.Store
 	attachmentStore    attachments.UploadStore
 	attachmentMaxBytes int64
@@ -107,6 +110,9 @@ func buildOptions(opts []Option) options {
 // NewHandler exposes every agent registered on the client over the
 // AG-UI protocol:
 //
+//	GET  /a2a/                                    → A2A agent directory
+//	GET  /a2a/{agent}/.well-known/agent-card.json  → A2A discovery card
+//	POST /a2a/{agent}                            → A2A 1.0 JSON-RPC (including SSE)
 //	GET  /agents                                  → {"agents": ["name", ...]}
 //	GET  /agents/{agent}/skills                   → visible skill catalog and default enablement
 //	POST /agents/{agent}/run                      → run the agent; SSE stream of AG-UI events
@@ -133,6 +139,7 @@ func buildOptions(opts []Option) options {
 func NewHandler(registry Registry, opts ...Option) http.Handler {
 	o := buildOptions(opts)
 	mux := http.NewServeMux()
+	o.mountA2A(mux, registry)
 	handleFunc := func(pattern string, fn http.HandlerFunc) {
 		mux.Handle(pattern, o.withNamespace(fn))
 	}

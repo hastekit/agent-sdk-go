@@ -74,7 +74,7 @@ func TestChatAttachmentHTTPToProviderAndHistory(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, form.WriteField("session_id", "attachments"))
 		require.NoError(t, form.Close())
-		res, err := http.Post(server.URL+"/attachments/", form.FormDataContentType(), &body)
+		res, err := http.Post(server.URL+"/api/agui/attachments/", form.FormDataContentType(), &body)
 		require.NoError(t, err)
 		var file attachments.HTTPFile
 		require.NoError(t, json.NewDecoder(res.Body).Decode(&file))

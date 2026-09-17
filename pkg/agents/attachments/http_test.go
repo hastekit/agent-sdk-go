@@ -18,7 +18,7 @@ func TestHTTPUploadFetchAndAuthorization(t *testing.T) {
 	require.NoError(t, err)
 	defer store.Close()
 	// The host says whose request this is; here a header stands in for auth.
-	handler := NewHTTPHandler(store, 1024, func(r *http.Request) (string, error) { return r.Header.Get("X-Namespace"), nil })
+	handler := http.StripPrefix("/api/agui", NewHTTPHandler(store, 1024, func(r *http.Request) (string, error) { return r.Header.Get("X-Namespace"), nil }))
 	png, err := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a6xkAAAAASUVORK5CYII=")
 	require.NoError(t, err)
 	for _, tc := range []struct {
@@ -41,7 +41,7 @@ func TestHTTPUploadFetchAndAuthorization(t *testing.T) {
 			require.NoError(t, err)
 			require.NoError(t, mw.WriteField("session_id", "thread"))
 			require.NoError(t, mw.Close())
-			req := httptest.NewRequest("POST", "/attachments/", &body)
+			req := httptest.NewRequest("POST", "/api/agui/attachments/", &body)
 			req.Header.Set("Content-Type", mw.FormDataContentType())
 			req.Header.Set("X-Namespace", "alice")
 			rr := httptest.NewRecorder()
@@ -93,13 +93,13 @@ func TestHTTPUploadRejectsInvalidAndOversized(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, mw.WriteField("session_id", "thread"))
 		require.NoError(t, mw.Close())
-		req := httptest.NewRequest("POST", "/attachments/", &body)
+		req := httptest.NewRequest("POST", "/api/agui/attachments/", &body)
 		req.Header.Set("Content-Type", mw.FormDataContentType())
 		rr := httptest.NewRecorder()
-		NewHTTPHandler(store, 64, func(*http.Request) (string, error) { return "test", nil }).ServeHTTP(rr, req)
+		http.StripPrefix("/api/agui", NewHTTPHandler(store, 64, func(*http.Request) (string, error) { return "test", nil })).ServeHTTP(rr, req)
 		require.Equal(t, tc.status, rr.Code)
 	}
-	for _, raw := range []string{"https://evil/attachments/a", "//evil/attachments/a", "/attachments/../secret", "/attachments/a?tenant=b", "/attachments/a?version=1&version=2", "data:image/png;base64,AA"} {
+	for _, raw := range []string{"https://evil/attachments/a", "//evil/attachments/a", "/api/agui/attachments/../secret", "/api/agui/attachments/a?tenant=b", "/api/agui/attachments/a?version=1&version=2", "data:image/png;base64,AA"} {
 		_, err := RefFromURL(raw)
 		require.Error(t, err, raw)
 	}
@@ -109,7 +109,7 @@ func TestHTTPRequiresThreadForUploadAndDownloadsByUUID(t *testing.T) {
 	store, err := NewFileStore(t.TempDir(), FileStoreConfig{})
 	require.NoError(t, err)
 	defer store.Close()
-	handler := NewHTTPHandler(store, 1024, func(*http.Request) (string, error) { return "tenant", nil })
+	handler := http.StripPrefix("/api/agui", NewHTTPHandler(store, 1024, func(*http.Request) (string, error) { return "tenant", nil }))
 	for _, thread := range []string{"", "../escape", "thread-one"} {
 		var body bytes.Buffer
 		form := multipart.NewWriter(&body)
@@ -121,7 +121,7 @@ func TestHTTPRequiresThreadForUploadAndDownloadsByUUID(t *testing.T) {
 			require.NoError(t, form.WriteField("session_id", thread))
 		}
 		require.NoError(t, form.Close())
-		req := httptest.NewRequest(http.MethodPost, "/attachments/", &body)
+		req := httptest.NewRequest(http.MethodPost, "/api/agui/attachments/", &body)
 		req.Header.Set("Content-Type", form.FormDataContentType())
 		recorder := httptest.NewRecorder()
 		handler.ServeHTTP(recorder, req)
@@ -139,7 +139,7 @@ func TestHTTPRequiresThreadForUploadAndDownloadsByUUID(t *testing.T) {
 		parsed, err := RefFromURL(file.URL)
 		require.NoError(t, err)
 		require.Equal(t, ref, parsed)
-		for _, target := range []string{file.URL, "/attachments/" + ref.ID, "/attachments/" + ref.ID + "?session_id=thread-two"} {
+		for _, target := range []string{file.URL, "/api/agui/attachments/" + ref.ID, "/api/agui/attachments/" + ref.ID + "?session_id=thread-two"} {
 			fetched := httptest.NewRecorder()
 			handler.ServeHTTP(fetched, httptest.NewRequest(http.MethodGet, target, nil))
 			if target == file.URL {
@@ -149,5 +149,14 @@ func TestHTTPRequiresThreadForUploadAndDownloadsByUUID(t *testing.T) {
 				require.Contains(t, []int{400, 403, 404}, fetched.Code)
 			}
 		}
+	}
+}
+
+func TestRefFromURLAcceptsCanonicalAndLegacyPaths(t *testing.T) {
+	for _, prefix := range []string{"/api/agui/attachments/", "/attachments/"} {
+		ref, err := RefFromURL(prefix + "file-id?version=v1&session_id=thread")
+		require.NoError(t, err)
+		require.Equal(t, Ref{ID: "file-id", Version: "v1", SessionID: "thread"}, ref)
+		require.Equal(t, "/api/agui/attachments/file-id", URL(ref))
 	}
 }

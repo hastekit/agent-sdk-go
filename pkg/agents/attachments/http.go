@@ -13,17 +13,22 @@ import (
 
 // URL returns the same-origin HTTP representation of a reference.
 func URL(ref Ref) string {
-	u := "/attachments/" + url.PathEscape(ref.ID)
+	u := "/api/agui/attachments/" + url.PathEscape(ref.ID)
 	return u
 }
 
-// RefFromURL accepts only this API's relative URLs. It never fetches URLs.
+// RefFromURL accepts canonical and legacy same-origin attachment URLs.
+// Legacy paths are parsed for saved messages, not exposed as HTTP routes.
 func RefFromURL(raw string) (Ref, error) {
 	u, err := url.Parse(raw)
-	if err != nil || u.IsAbs() || u.Host != "" || u.Fragment != "" || !strings.HasPrefix(u.Path, "/attachments/") {
+	if err != nil || u.IsAbs() || u.Host != "" || u.Fragment != "" {
 		return Ref{}, ErrInvalid
 	}
-	id := strings.TrimPrefix(u.Path, "/attachments/")
+	path := strings.TrimPrefix(u.Path, "/api/agui")
+	if !strings.HasPrefix(path, "/attachments/") {
+		return Ref{}, ErrInvalid
+	}
+	id := strings.TrimPrefix(path, "/attachments/")
 	if id == "" || id == "." || id == ".." || strings.ContainsAny(id, "/\\") {
 		return Ref{}, ErrInvalid
 	}
@@ -87,7 +92,8 @@ type HTTPFile struct {
 }
 
 // NewHTTPHandler serves POST /attachments/ (multipart fields "file" and "session_id")
-// and GET /attachments/{uuid}. Mount behind application authentication. UUID
+// and GET /attachments/{uuid}, relative to an /api/agui mount. Strip that prefix
+// before passing requests to this handler. Mount behind application authentication. UUID
 // downloads require ReferenceStore and authorize within the supplied namespace.
 // namespaceOf reports the namespace a request may read and write, from whatever
 // authenticated it; a request it cannot place is refused. maxBytes defaults to

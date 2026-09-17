@@ -12,8 +12,12 @@ function AttachmentUserMessage(props: CopilotChatUserMessageProps) {
     if ((part.type === "image" || part.type === "document") &&
         part.source.type === "url" && part.source.value.startsWith("attachment://")) {
       return { ...part, source: { ...part.source,
-        value: "/attachments/" + part.source.value.slice("attachment://".length),
+        value: "/api/agui/attachments/" + part.source.value.slice("attachment://".length),
       }};
+    }
+    if ((part.type === "image" || part.type === "document") &&
+        part.source.type === "url" && part.source.value.startsWith("/attachments/")) {
+      return { ...part, source: { ...part.source, value: "/api/agui" + part.source.value } };
     }
     return part;
   });
@@ -22,7 +26,7 @@ function AttachmentUserMessage(props: CopilotChatUserMessageProps) {
   // CopilotKit renders document cards without a link. Owned documents use
   // the authorized download endpoint so the user can retrieve the original.
   const documents = content.filter(part => part.type === "document" &&
-    part.source.type === "url" && part.source.value.startsWith("/attachments/"));
+    part.source.type === "url" && part.source.value.startsWith("/api/agui/attachments/"));
   if (!documents.length) return <CopilotChatUserMessage {...props} />;
   return <div>
     <CopilotChatUserMessage {...props} message={{ ...props.message,
