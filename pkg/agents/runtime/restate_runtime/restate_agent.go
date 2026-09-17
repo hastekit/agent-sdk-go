@@ -108,7 +108,7 @@ func (w *AgentWorkflow) proxyAgent(
 
 	var skillSets []agents.SkillSet
 	for _, set := range agentOptions.Skills {
-		skillSets = append(skillSets, restateSkillSet(restateCtx, set, w.broker, agents.ToolCallMiddlewaresOf(agentOptions.Middlewares)))
+		skillSets = append(skillSets, NewRestateSkillSet(restateCtx, set, w.broker, agents.ToolCallMiddlewaresOf(agentOptions.Middlewares)...))
 	}
 	opts := &agents.AgentOptions{
 		Name:       agentOptions.Name,

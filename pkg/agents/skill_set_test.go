@@ -13,7 +13,7 @@ import (
 func TestDynamicSkillsPoliciesAndReader(t *testing.T) {
 	ctx := context.Background()
 	var reads []string
-	set := SkillSetFuncs{Name: "team", List: func(context.Context, string, map[string]any) ([]Skill, error) {
+	set := stubSkillSet{Name: "team", List: func(context.Context, string, map[string]any) ([]Skill, error) {
 		return []Skill{
 			{Name: "required", Required: true}, {Name: "default", DefaultEnabled: true},
 			{Name: "optional", Resources: []string{"refs/help.md"}},
@@ -52,7 +52,7 @@ func TestDynamicSkillsPoliciesAndReader(t *testing.T) {
 }
 
 func TestDynamicSkillsRunIsolation(t *testing.T) {
-	set := SkillSetFuncs{Name: "tenant", List: func(_ context.Context, namespace string, rc map[string]any) ([]Skill, error) {
+	set := stubSkillSet{Name: "tenant", List: func(_ context.Context, namespace string, rc map[string]any) ([]Skill, error) {
 		return []Skill{{Name: rc["user"].(string)}}, nil
 	}, Resolve: func(_ context.Context, namespace string, rc map[string]any, name, file string) (string, error) {
 		return rc["user"].(string), nil
@@ -78,7 +78,7 @@ func TestDynamicSkillsRunIsolation(t *testing.T) {
 
 func TestDynamicSkillsValidationAndRefresh(t *testing.T) {
 	calls := 0
-	set := SkillSetFuncs{Name: "team", List: func(context.Context, string, map[string]any) ([]Skill, error) {
+	set := stubSkillSet{Name: "team", List: func(context.Context, string, map[string]any) ([]Skill, error) {
 		calls++
 		return []Skill{{Name: fmt.Sprint(calls), Required: true}}, nil
 	}}
@@ -91,12 +91,12 @@ func TestDynamicSkillsValidationAndRefresh(t *testing.T) {
 	for _, skills := range [][]Skill{
 		{{Name: "x/y"}}, {{Name: "x", Resources: []string{"../secret"}}},
 	} {
-		agent.skillSets = []SkillSet{SkillSetFuncs{Name: "team", List: func(context.Context, string, map[string]any) ([]Skill, error) { return skills, nil }}}
+		agent.skillSets = []SkillSet{stubSkillSet{Name: "team", List: func(context.Context, string, map[string]any) ([]Skill, error) { return skills, nil }}}
 		_, _, _, err := agent.prepareSkills(context.Background(), &AgentInput{}, nil)
 		require.Error(t, err)
 	}
 	failure := errors.New("catalog unavailable")
-	agent.skillSets = []SkillSet{SkillSetFuncs{Name: "team", List: func(context.Context, string, map[string]any) ([]Skill, error) { return nil, failure }}}
+	agent.skillSets = []SkillSet{stubSkillSet{Name: "team", List: func(context.Context, string, map[string]any) ([]Skill, error) { return nil, failure }}}
 	_, _, _, err := agent.prepareSkills(context.Background(), &AgentInput{}, nil)
 	require.ErrorIs(t, err, failure)
 }
@@ -109,8 +109,8 @@ func TestDynamicSkillCollisionLastSourceWins(t *testing.T) {
 	ctx := context.Background()
 	for _, flags := range []Skill{{Required: true}, {DefaultEnabled: true}, {}} {
 		t.Run(fmt.Sprintf("required=%t,default=%t", flags.Required, flags.DefaultEnabled), func(t *testing.T) {
-			source := func(name string, skill Skill) SkillSetFuncs {
-				return SkillSetFuncs{Name: name,
+			source := func(name string, skill Skill) stubSkillSet {
+				return stubSkillSet{Name: name,
 					List: func(context.Context, string, map[string]any) ([]Skill, error) { return []Skill{skill}, nil },
 					Resolve: func(_ context.Context, namespace string, _ map[string]any, skillName, file string) (string, error) {
 						require.Equal(t, "review", skillName)
@@ -145,7 +145,7 @@ func TestDynamicSkillCollisionLastSourceWins(t *testing.T) {
 }
 
 func TestDynamicSkillCollisionWithinSource(t *testing.T) {
-	source := SkillSetFuncs{Name: "source", List: func(context.Context, string, map[string]any) ([]Skill, error) {
+	source := stubSkillSet{Name: "source", List: func(context.Context, string, map[string]any) ([]Skill, error) {
 		return []Skill{{Name: "review", Required: true}, {Name: "review", Description: "last", DefaultEnabled: true}}, nil
 	}}
 	agent := NewAgent(&AgentOptions{Name: "skills", Skills: []SkillSet{source}})
@@ -163,7 +163,7 @@ func TestSkillNamespaceIsExplicitForListAndRead(t *testing.T) {
 				expected = "default"
 			}
 			rc := map[string]any{"Namespace": "untrusted-legacy-value", "user": "alice"}
-			set := SkillSetFuncs{Name: "source",
+			set := stubSkillSet{Name: "source",
 				List: func(_ context.Context, namespace string, values map[string]any) ([]Skill, error) {
 					require.Equal(t, expected, namespace)
 					require.Equal(t, rc, values)
@@ -187,7 +187,7 @@ func TestSkillNamespaceIsExplicitForListAndRead(t *testing.T) {
 }
 
 func TestSkillNamespaceNotInjectedIntoRunContext(t *testing.T) {
-	source := SkillSetFuncs{Name: "source", List: func(_ context.Context, ns string, rc map[string]any) ([]Skill, error) {
+	source := stubSkillSet{Name: "source", List: func(_ context.Context, ns string, rc map[string]any) ([]Skill, error) {
 		require.Equal(t, "tenant", ns)
 		require.NotContains(t, rc, "Namespace")
 		return nil, nil
@@ -199,7 +199,7 @@ func TestSkillNamespaceNotInjectedIntoRunContext(t *testing.T) {
 
 func TestSkillReaderKeepsItsRunCatalog(t *testing.T) {
 	name := "first"
-	source := SkillSetFuncs{Name: "changing", List: func(context.Context, string, map[string]any) ([]Skill, error) {
+	source := stubSkillSet{Name: "changing", List: func(context.Context, string, map[string]any) ([]Skill, error) {
 		return []Skill{{Name: name, DefaultEnabled: true}}, nil
 	}, Resolve: func(_ context.Context, _ string, _ map[string]any, name, file string) (string, error) {
 		return name, nil
@@ -220,10 +220,10 @@ func TestSkillReaderKeepsItsRunCatalog(t *testing.T) {
 
 func TestGlobalSkillsWinAcrossSourcesRegardlessOfOrder(t *testing.T) {
 	for _, required := range []bool{false, true} {
-		global := SkillSetFuncs{Name: "global", List: func(context.Context, string, map[string]any) ([]Skill, error) {
+		global := stubSkillSet{Name: "global", List: func(context.Context, string, map[string]any) ([]Skill, error) {
 			return []Skill{{Name: "review", Global: true, Required: required, Resources: []string{"global.md"}}}, nil
 		}, Resolve: func(context.Context, string, map[string]any, string, string) (string, error) { return "global", nil }}
-		user := SkillSetFuncs{Name: "user", List: func(context.Context, string, map[string]any) ([]Skill, error) {
+		user := stubSkillSet{Name: "user", List: func(context.Context, string, map[string]any) ([]Skill, error) {
 			return []Skill{{Name: "review", DefaultEnabled: true, Resources: []string{"user.md"}}}, nil
 		}, Resolve: func(context.Context, string, map[string]any, string, string) (string, error) { return "user", nil }}
 		for _, sources := range [][]SkillSet{{global, user}, {user, global}} {

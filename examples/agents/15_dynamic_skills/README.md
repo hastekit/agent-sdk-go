@@ -18,7 +18,7 @@ to choose the storage directory (default `./data/skills`). For S3 and API detail
 see [persistent skills](../../../pkg/skills/README.md).
 
 `AgentConfig.Skills` is a list of sources. Each source implements `GetName`, `ListSkills`,
-and `ResolveSkill`; `SkillSetFuncs` provides callbacks for these methods.
+and `ResolveSkill`, as shown by `teamSkills` in this example.
 `NewFilesystemSkillSet` loads a folder; `NewFSSkillSet` accepts embedded or other
 `fs.FS` sources. Both enable every skill by default and discover catalog changes
 on each run.

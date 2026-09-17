@@ -1041,8 +1041,7 @@ The prompt lists skill names such as `changelog`. One `read_skill` tool
 reads instructions and allowed resources from all sources. Include `ResolveSkills`
 in the prompt resolvers to advertise the catalog.
 
-For custom storage, implement `SkillSet` (`GetName`, `ListSkills`, `ResolveSkill`)
-or use `SkillSetFuncs` callbacks. Set `Required: true` for skills users cannot
+For custom storage, implement `SkillSet` (`GetName`, `ListSkills`, `ResolveSkill`). Set `Required: true` for skills users cannot
 disable, and `DefaultEnabled: true` for optional skills enabled by default.
 The zero value is optional and disabled by default. Global skills (`Global: true`)
 always win name conflicts with user skills. Availability flags are host-controlled.

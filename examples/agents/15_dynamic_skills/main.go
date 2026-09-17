@@ -32,33 +32,10 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	// Replace these callbacks with a database or HTTP-backed catalog and reader.
-	// List runs at the start of each run, so newly saved skills appear without
+	// Implement teamSkills with a database or HTTP-backed catalog and reader.
+	// ListSkills runs at the start of each run, so newly saved skills appear without
 	// rebuilding the agent. Policies come from the host, never the model.
-	team := hastekit.SkillSetFuncs{
-		Name: "team",
-		List: func(ctx context.Context, namespace string, rc map[string]any) ([]hastekit.Skill, error) {
-			return []hastekit.Skill{
-				{Name: "release-review", Description: "Review a release before shipping.", Global: true, Resources: []string{"checklist.md"}},
-				{Name: "writing", Description: "Write concise release notes.", Global: true, DefaultEnabled: true},
-			}, ctx.Err()
-		},
-		Resolve: func(ctx context.Context, namespace string, rc map[string]any, name, file string) (string, error) {
-			if err := ctx.Err(); err != nil {
-				return "", err
-			}
-			switch {
-			case name == "release-review" && (file == "" || file == "SKILL.md"):
-				return "Review the release using checklist.md. Read it with read_skill before advising the user.", nil
-			case name == "release-review" && file == "checklist.md":
-				return "Check tests, upgrade notes, rollback steps, and release ownership.", nil
-			case name == "writing" && (file == "" || file == "SKILL.md"):
-				return "Use short sentences. Explain user-visible changes and required migration steps.", nil
-			default:
-				return "", fmt.Errorf("unknown skill or resource: %s/%s", name, file)
-			}
-		},
-	}
+	team := &teamSkills{}
 	client := hastekit.NewLLMClient([]hastekit.ProviderConfig{{ProviderName: hastekit.ProviderOpenAI, ApiKeys: []*hastekit.APIKeyConfig{{APIKey: os.Getenv("OPENAI_API_KEY")}}}})
 	agent, err := hastekit.NewAgent(&hastekit.AgentConfig{
 		Name: "ReleaseAssistant", LLM: client.Model("OpenAI/gpt-4.1-mini"),
@@ -90,4 +67,31 @@ func main() {
 		log.Fatal(err)
 	}
 	fmt.Println(result.Text())
+}
+
+type teamSkills struct{}
+
+func (s *teamSkills) GetName() string { return "team" }
+
+func (s *teamSkills) ListSkills(ctx context.Context, namespace string, rc map[string]any) ([]hastekit.Skill, error) {
+	return []hastekit.Skill{
+		{Name: "release-review", Description: "Review a release before shipping.", Global: true, Resources: []string{"checklist.md"}},
+		{Name: "writing", Description: "Write concise release notes.", Global: true, DefaultEnabled: true},
+	}, ctx.Err()
+}
+
+func (s *teamSkills) ResolveSkill(ctx context.Context, namespace string, rc map[string]any, name, file string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	switch {
+	case name == "release-review" && (file == "" || file == "SKILL.md"):
+		return "Review the release using checklist.md. Read it with read_skill before advising the user.", nil
+	case name == "release-review" && file == "checklist.md":
+		return "Check tests, upgrade notes, rollback steps, and release ownership.", nil
+	case name == "writing" && (file == "" || file == "SKILL.md"):
+		return "Use short sentences. Explain user-visible changes and required migration steps.", nil
+	default:
+		return "", fmt.Errorf("unknown skill or resource: %s/%s", name, file)
+	}
 }

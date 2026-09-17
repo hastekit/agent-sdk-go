@@ -17,23 +17,7 @@ import (
 func TestDynamicSkillsUseActivities(t *testing.T) {
 	var suite testsuite.WorkflowTestSuite
 	env := suite.NewTestWorkflowEnvironment()
-	listed, read := 0, 0
-	set := agents.SkillSetFuncs{Name: "team", List: func(ctx context.Context, namespace string, rc map[string]any) ([]agents.Skill, error) {
-		require.True(t, activity.IsActivity(ctx))
-		require.Equal(t, "tenant", namespace)
-		require.NotContains(t, rc, "Namespace")
-		listed++
-		require.Equal(t, "alice", rc["user"])
-		return []agents.Skill{{Name: "review", Required: true}}, nil
-	}, Resolve: func(ctx context.Context, namespace string, rc map[string]any, name, file string) (string, error) {
-		require.True(t, activity.IsActivity(ctx))
-		require.Equal(t, "tenant", namespace)
-		require.NotContains(t, rc, "Namespace")
-		read++
-		require.Equal(t, "review", name)
-		require.Equal(t, "ref.md", file)
-		return "instructions", nil
-	}}
+	set := &activitySkillSet{t: t}
 	opts := &agents.AgentOptions{Name: "helper", Skills: []agents.SkillSet{set}, History: history.NewConversationManager(history.NewInMemoryConversationPersistence())}
 	acts := NewTemporalAgent(nil, opts, nil).GetActivities()
 	for _, suffix := range []string{"_ListSkills", "_ResolveSkill", "_ReadSkill"} {
@@ -57,6 +41,32 @@ func TestDynamicSkillsUseActivities(t *testing.T) {
 	var result string
 	require.NoError(t, env.GetWorkflowResult(&result))
 	require.Equal(t, "instructions", result)
-	require.Equal(t, 1, listed)
-	require.Equal(t, 1, read)
+	require.Equal(t, 1, set.listed)
+	require.Equal(t, 1, set.read)
+}
+
+type activitySkillSet struct {
+	t            *testing.T
+	listed, read int
+}
+
+func (s *activitySkillSet) GetName() string { return "team" }
+
+func (s *activitySkillSet) ListSkills(ctx context.Context, namespace string, rc map[string]any) ([]agents.Skill, error) {
+	require.True(s.t, activity.IsActivity(ctx))
+	require.Equal(s.t, "tenant", namespace)
+	require.NotContains(s.t, rc, "Namespace")
+	s.listed++
+	require.Equal(s.t, "alice", rc["user"])
+	return []agents.Skill{{Name: "review", Required: true}}, nil
+}
+
+func (s *activitySkillSet) ResolveSkill(ctx context.Context, namespace string, rc map[string]any, name, file string) (string, error) {
+	require.True(s.t, activity.IsActivity(ctx))
+	require.Equal(s.t, "tenant", namespace)
+	require.NotContains(s.t, rc, "Namespace")
+	s.read++
+	require.Equal(s.t, "review", name)
+	require.Equal(s.t, "ref.md", file)
+	return "instructions", nil
 }

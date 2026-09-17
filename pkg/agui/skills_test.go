@@ -37,11 +37,7 @@ func (s skillRegistryForHTTP) Agent(name string) (*agents.Agent, bool) {
 }
 
 func TestSkillsEndpointNamespaceAndPolicies(t *testing.T) {
-	set := agents.SkillSetFuncs{Name: "team", List: func(ctx context.Context, namespace string, rc map[string]any) ([]agents.Skill, error) {
-		require.Equal(t, "tenant", namespace)
-		require.NotContains(t, rc, "Namespace")
-		return []agents.Skill{{Name: "required", Required: true}, {Name: "optional"}}, nil
-	}}
+	set := &httpSkillSet{t: t}
 	agent := agents.NewAgent(&agents.AgentOptions{Name: "helper", Skills: []agents.SkillSet{set}})
 	handler := NewHandler(skillRegistryForHTTP{agent}, WithNamespaceResolver(func(*http.Request) (string, error) { return "tenant", nil }))
 	recorder := httptest.NewRecorder()
@@ -138,4 +134,20 @@ func TestGlobalSkillsRemainReadOnlyThroughTenantManagement(t *testing.T) {
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/skills?namespace=global", nil))
 	require.Equal(t, http.StatusOK, recorder.Code)
 	require.NotContains(t, recorder.Body.String(), "review")
+}
+
+type httpSkillSet struct {
+	t *testing.T
+}
+
+func (s *httpSkillSet) GetName() string { return "team" }
+
+func (s *httpSkillSet) ListSkills(ctx context.Context, namespace string, rc map[string]any) ([]agents.Skill, error) {
+	require.Equal(s.t, "tenant", namespace)
+	require.NotContains(s.t, rc, "Namespace")
+	return []agents.Skill{{Name: "required", Required: true}, {Name: "optional"}}, nil
+}
+
+func (s *httpSkillSet) ResolveSkill(context.Context, string, map[string]any, string, string) (string, error) {
+	panic("unexpected skill read")
 }

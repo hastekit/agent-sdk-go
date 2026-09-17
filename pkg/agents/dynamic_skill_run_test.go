@@ -13,15 +13,7 @@ import (
 )
 
 func TestDynamicSkillRunAdvertisesAndReadsOneSnapshot(t *testing.T) {
-	lists, reads := 0, 0
-	set := agents.SkillSetFuncs{Name: "team", List: func(context.Context, string, map[string]any) ([]agents.Skill, error) {
-		lists++
-		return []agents.Skill{{Name: "review", Description: "Review releases", Resources: []string{"check.md"}}}, nil
-	}, Resolve: func(_ context.Context, namespace string, _ map[string]any, name, file string) (string, error) {
-		reads++
-		require.Equal(t, "review", name)
-		return "review instructions", nil
-	}}
+	set := &runSkillSet{t: t}
 	llm := &scriptedLLM{script: []*responses.Response{
 		toolCallResponse("read1", "read_skill", `{"name":"review"}`),
 		toolCallResponse("read2", "read_skill", `{"name":"review","file":"check.md"}`),
@@ -30,8 +22,8 @@ func TestDynamicSkillRunAdvertisesAndReadsOneSnapshot(t *testing.T) {
 	agent := agents.NewAgent(&agents.AgentOptions{Name: "reviewer", Skills: []agents.SkillSet{set}, Instruction: prompts.New("Use skills.", prompts.WithResolver(prompts.DefaultResolvers()...))}).WithLLM(llm)
 	out := runAgent(t, agent, &agents.AgentInput{Namespace: "test", ThreadID: "dynamic-skills", Message: userMessage("review the release"), Skills: agents.SkillSelection{Enable: []string{"review", "secret"}}})
 	requireStatus(t, out, agentstate.RunStatusCompleted)
-	require.Equal(t, 1, lists)
-	require.Equal(t, 2, reads)
+	require.Equal(t, 1, set.lists)
+	require.Equal(t, 2, set.reads)
 	encoded, err := json.Marshal(llm.request(0))
 	require.NoError(t, err)
 	require.Contains(t, string(encoded), "review")
@@ -39,4 +31,22 @@ func TestDynamicSkillRunAdvertisesAndReadsOneSnapshot(t *testing.T) {
 	encoded, err = json.Marshal(llm.request(2))
 	require.NoError(t, err)
 	require.Contains(t, string(encoded), "review instructions")
+}
+
+type runSkillSet struct {
+	t            *testing.T
+	lists, reads int
+}
+
+func (s *runSkillSet) GetName() string { return "team" }
+
+func (s *runSkillSet) ListSkills(context.Context, string, map[string]any) ([]agents.Skill, error) {
+	s.lists++
+	return []agents.Skill{{Name: "review", Description: "Review releases", Resources: []string{"check.md"}}}, nil
+}
+
+func (s *runSkillSet) ResolveSkill(_ context.Context, namespace string, _ map[string]any, name, file string) (string, error) {
+	s.reads++
+	require.Equal(s.t, "review", name)
+	return "review instructions", nil
 }

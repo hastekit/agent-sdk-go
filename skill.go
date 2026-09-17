@@ -11,7 +11,6 @@ type Skill = agents.Skill
 
 // SkillSet provides a runtime catalog and resolver for a group of skills.
 type SkillSet = agents.SkillSet
-type SkillSetFuncs = agents.SkillSetFuncs
 type SkillSelection = agents.SkillSelection
 type ListedSkill = agents.ListedSkill
 

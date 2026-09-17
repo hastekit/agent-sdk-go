@@ -30,29 +30,6 @@ type SkillSet interface {
 	ResolveSkill(ctx context.Context, namespace string, runContext map[string]any, name, file string) (string, error)
 }
 
-// SkillSetFuncs implements SkillSet using application callbacks. List may read
-// a database or registry; Resolve may read embedded, filesystem or HTTP content.
-// The application owns authentication, tenant filtering, and content validation.
-type SkillSetFuncs struct {
-	Name    string
-	List    func(context.Context, string, map[string]any) ([]Skill, error)
-	Resolve func(context.Context, string, map[string]any, string, string) (string, error)
-}
-
-func (s SkillSetFuncs) GetName() string { return s.Name }
-func (s SkillSetFuncs) ListSkills(ctx context.Context, namespace string, rc map[string]any) ([]Skill, error) {
-	if s.List == nil {
-		return nil, fmt.Errorf("skill set %q has no list function", s.Name)
-	}
-	return s.List(ctx, namespace, rc)
-}
-func (s SkillSetFuncs) ResolveSkill(ctx context.Context, namespace string, rc map[string]any, name, file string) (string, error) {
-	if s.Resolve == nil {
-		return "", fmt.Errorf("skill set %q has no resolver", s.Name)
-	}
-	return s.Resolve(ctx, namespace, rc, name, file)
-}
-
 // ListedSkill is a catalog entry for clients building a skill picker. Name is
 // unprefixed and can be copied directly into SkillSelection. Enabled describes
 // the supplied selection, including required skills and defaults.
