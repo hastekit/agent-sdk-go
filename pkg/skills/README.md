@@ -156,10 +156,25 @@ and `ResolveSkill(ctx, namespace, runContext, name, file)`. The agent picker use
 `agent.ListSkills(ctx, namespace, runContext, selection)`. `RunContext` remains
 application data; a key named `Namespace` has no special meaning.
 
-To read shared built-ins from a global namespace, configure
-`skills.WithNamespaceResolver(func(ctx context.Context, namespace string,
-runContext map[string]any) (string, error) { return "global", nil })`. The resolver
-receives the explicit namespace and may deliberately override it.
+Configure an additional shared namespace with:
+
+```go
+set, err := skills.NewSkillSet("library", store,
+    skills.WithGlobalNamespace("global"),
+)
+```
+
+The set lists all pages from the caller's namespace and then the global namespace.
+An empty global namespace disables this behavior; matching namespaces are listed
+only once. Caller-owned skills take precedence on duplicate names. Resolution
+checks the caller's namespace first and falls back to global only when the skill
+bundle is absent, never for a missing resource or an authorization/storage error.
+Policies apply equally to both sources.
+
+This setting affects only skill-set reads. UI uploads and management operations
+continue to use the authenticated user's namespace through `agui.WithNamespaceResolver`;
+request parameters cannot select the global namespace. Populate shared skills
+through trusted server-side calls to the store.
 
 The adapter defaults to `SkillOptIn`. Set a host-controlled default or per-skill
 policies when constructing it:

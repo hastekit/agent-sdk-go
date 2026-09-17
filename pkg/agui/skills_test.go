@@ -93,3 +93,49 @@ func TestSkillStoreManagementUsesResolvedNamespace(t *testing.T) {
 	_, err = store.Get(context.Background(), "other", "review")
 	require.ErrorIs(t, err, skills.ErrNotFound)
 }
+
+func TestGlobalSkillsRemainReadOnlyThroughTenantManagement(t *testing.T) {
+	store, err := skills.NewFileStore(t.TempDir())
+	require.NoError(t, err)
+	global := skills.Bundle{Files: map[string][]byte{"SKILL.md": []byte("---\nname: review\ndescription: Shared review\n---\nGlobal instructions")}}
+	_, err = store.Put(t.Context(), "global", global)
+	require.NoError(t, err)
+	source, err := skills.NewSkillSet("library", store, skills.WithGlobalNamespace("global"))
+	require.NoError(t, err)
+	agent := agents.NewAgent(&agents.AgentOptions{Name: "helper", Skills: []agents.SkillSet{source}})
+	handler := NewHandler(skillRegistryForHTTP{agent}, WithSkillStore(store), WithNamespaceResolver(func(*http.Request) (string, error) { return "tenant", nil }))
+	local := skills.Bundle{Files: map[string][]byte{"SKILL.md": []byte("---\nname: review\ndescription: Tenant review\n---\nTenant instructions")}}
+	data, err := json.Marshal(local)
+	require.NoError(t, err)
+	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodDelete} {
+		path := "/skills/review?namespace=global"
+		if method == http.MethodPost {
+			path = "/skills?namespace=global"
+		}
+		req := httptest.NewRequest(method, path, bytes.NewReader(data))
+		req.Header.Set("Content-Type", "application/json")
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, req)
+		require.Less(t, recorder.Code, 300, recorder.Body.String())
+		stored, err := store.Get(t.Context(), "global", "review")
+		require.NoError(t, err)
+		require.Equal(t, global, stored)
+		tenant, err := store.Get(t.Context(), "tenant", "review")
+		if method == http.MethodDelete {
+			require.ErrorIs(t, err, skills.ErrNotFound)
+		} else {
+			require.NoError(t, err)
+			require.Equal(t, local, tenant)
+		}
+	}
+	// The picker still exposes shared skills after the tenant copy is deleted.
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/agents/helper/skills", nil))
+	require.Equal(t, http.StatusOK, recorder.Code)
+	require.Contains(t, recorder.Body.String(), "Shared review")
+	// The management library lists only the tenant's own uploads.
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/skills?namespace=global", nil))
+	require.Equal(t, http.StatusOK, recorder.Code)
+	require.NotContains(t, recorder.Body.String(), "review")
+}

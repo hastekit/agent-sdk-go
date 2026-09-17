@@ -200,7 +200,7 @@ func TestFileStoreSurvivesReopen(t *testing.T) {
 	require.Equal(t, bundle("saved", "persistent"), got)
 }
 
-func TestSkillSetExplicitNamespaceDefaultAndOverride(t *testing.T) {
+func TestSkillSetUsesCallerNamespace(t *testing.T) {
 	ctx := context.Background()
 	store, err := NewFileStore(t.TempDir())
 	require.NoError(t, err)
@@ -217,18 +217,23 @@ func TestSkillSetExplicitNamespaceDefaultAndOverride(t *testing.T) {
 	content, err := source.ResolveSkill(ctx, "", nil, "local", "")
 	require.NoError(t, err)
 	require.Contains(t, content, "default content")
-	shared, err := NewSkillSet("shared", store, WithNamespaceResolver(func(_ context.Context, namespace string, rc map[string]any) (string, error) {
-		require.Equal(t, "tenant", namespace)
-		require.Equal(t, "alice", rc["user"])
-		return "global", nil
-	}))
+	_, err = store.Put(ctx, "tenant", bundle("tenant-skill", "tenant content"))
 	require.NoError(t, err)
-	rc := map[string]any{"user": "alice"}
-	listed, err = shared.ListSkills(ctx, "tenant", rc)
+	rc := map[string]any{"Namespace": "global"}
+	listed, err = source.ListSkills(ctx, "tenant", rc)
+	require.NoError(t, err)
+	require.Len(t, listed, 1)
+	require.Equal(t, "tenant-skill", listed[0].Name)
+	content, err = source.ResolveSkill(ctx, "tenant", rc, "tenant-skill", "")
+	require.NoError(t, err)
+	require.Contains(t, content, "tenant content")
+	_, err = source.ResolveSkill(ctx, "tenant", rc, "builtin", "")
+	require.ErrorIs(t, err, ErrNotFound)
+	listed, err = source.ListSkills(ctx, "global", nil)
 	require.NoError(t, err)
 	require.Len(t, listed, 1)
 	require.Equal(t, "builtin", listed[0].Name)
-	content, err = shared.ResolveSkill(ctx, "tenant", rc, "builtin", "")
+	content, err = source.ResolveSkill(ctx, "global", nil, "builtin", "")
 	require.NoError(t, err)
 	require.Contains(t, content, "shared content")
 }
