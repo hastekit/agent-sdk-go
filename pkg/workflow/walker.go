@@ -152,6 +152,10 @@ func (w *Walker) Walk(ctx context.Context, c *Compiled, in *Input, ne NodeExecut
 		for _, r := range results {
 			if r.Pause != nil && ctx.Err() == nil {
 				in.SetStatus(r.NodeID, NodeStatusPaused)
+				if in.Suspended == nil {
+					in.Suspended = map[string]*PauseState{}
+				}
+				in.Suspended[r.NodeID] = r.Pause
 				in.Pause = r.Pause
 				if in.Pause.NodeID == "" {
 					in.Pause.NodeID = r.NodeID
@@ -175,6 +179,8 @@ func (w *Walker) Walk(ctx context.Context, c *Compiled, in *Input, ne NodeExecut
 				in.SetStatus(r.NodeID, NodeStatusCancelled)
 				continue
 			}
+			delete(in.Suspended, r.NodeID)
+			delete(in.Resumes, r.NodeID)
 			in.MergeContext(r.Output)
 			in.SetStatus(r.NodeID, NodeStatusCompleted)
 			in.SetPort(r.NodeID, r.Port)

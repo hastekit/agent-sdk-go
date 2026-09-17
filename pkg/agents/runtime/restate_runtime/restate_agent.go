@@ -50,6 +50,7 @@ func (w *AgentWorkflow) Run(restateCtx restate.WorkflowContext, input *WorkflowI
 		PreviousRunID: input.PreviousRunID,
 		Message:       input.Message,
 		RunContext:    input.RunContext,
+		Skills:        input.Skills,
 		StreamID:      streamID,
 	})
 }
@@ -94,11 +95,8 @@ func (w *AgentWorkflow) proxyAgent(
 	}
 	conversationHistory := history.NewConversationManager(conversationPersistenceProxy, options...)
 
-	// WithSkillTool, not options.Tools: an agent given skills adds the tool that
-	// reads them itself, and a tool this loop never wraps is one that would
-	// run outside the workflow's journal.
 	var restateTools []agents.Tool
-	for _, tool := range agents.WithSkillTool(agentOptions.Tools, agentOptions.Skills) {
+	for _, tool := range agentOptions.Tools {
 		restateTools = append(restateTools, newRestateTool(restateCtx, agentOptions.Name, tool, w.broker, agents.ToolCallMiddlewaresOf(agentOptions.Middlewares)...))
 	}
 
@@ -107,6 +105,10 @@ func (w *AgentWorkflow) proxyAgent(
 		mcpClients = append(mcpClients, NewRestateMCPServer(restateCtx, mcpClient, w.broker, agents.ToolCallMiddlewaresOf(agentOptions.Middlewares)...))
 	}
 
+	var skillSets []agents.SkillSet
+	for _, set := range agentOptions.Skills {
+		skillSets = append(skillSets, restateSkillSet(restateCtx, set, w.broker, agents.ToolCallMiddlewaresOf(agentOptions.Middlewares)))
+	}
 	opts := &agents.AgentOptions{
 		Name:       agentOptions.Name,
 		Output:     agentOptions.Output,
@@ -119,14 +121,10 @@ func (w *AgentWorkflow) proxyAgent(
 		StickyHandoff: agentOptions.StickyHandoff,
 		SingleTurn:    agentOptions.SingleTurn,
 
-		Instruction: promptProxy,
-		History:     conversationHistory,
-		Tools:       restateTools,
-		// The skills travel with the proxy agent so the prompt still lists
-		// them, and names the tool that reads them. The reader tool itself is
-		// already in restateTools, wrapped as a workflow step — the agent sees
-		// it there and does not add a second, unjournaled one.
-		Skills:       agentOptions.Skills,
+		Instruction:  promptProxy,
+		History:      conversationHistory,
+		Tools:        restateTools,
+		Skills:       skillSets,
 		McpServers:   mcpClients,
 		ToolExecutor: NewRestateToolExecutor(restateCtx),
 		StreamBroker: NewRestateStreamBroker(restateCtx, w.broker),

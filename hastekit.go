@@ -39,10 +39,8 @@ type AgentConfig struct {
 	Parameters    responses.Parameters
 	StickyHandoff bool
 
-	// Skills are folders of instructions the agent reads only when it needs
-	// them — see NewSkillRegistryFromDir. The agent lists them in its prompt
-	// and adds the reader tool to Tools itself.
-	Skills agents.SkillProvider
+	// Skills list runtime catalogs and resolve enabled skills through read_skill.
+	Skills []agents.SkillSet
 
 	// Middlewares wrap model/tool calls, history loads/saves and prompt
 	// retrieval. Embed agents.NoopMiddleware and override selected methods.
@@ -96,6 +94,9 @@ func buildAgent(cfg *AgentConfig, opts ...AgentOption) (*Agent, *agents.AgentOpt
 	}
 	if strings.TrimSpace(options.Name) == "" {
 		return nil, nil, fmt.Errorf("agent name is required")
+	}
+	if err := agents.ValidateSkillSets(options.Skills); err != nil {
+		return nil, nil, err
 	}
 	if options.LLM == nil {
 		return nil, nil, fmt.Errorf("agent model is required")

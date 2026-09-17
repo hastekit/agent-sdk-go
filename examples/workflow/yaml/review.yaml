@@ -1,0 +1,54 @@
+version: 1
+id: review-request
+nodes:
+  - id: policy
+    type: api
+    config:
+      url: '${{ context.context.policy_url }}'
+      method: GET
+      timeout: 5s
+  - id: prepare
+    type: javascript
+    config:
+      code: |
+        return {amount: input.amount, needsReview: input.amount > nodes.policy.body.reviewLimit};
+  - id: route
+    type: if_else
+    config:
+      condition: nodes.prepare.needsReview
+  - id: review
+    type: human
+    config:
+      message: '${{ `Approve the request for ${nodes.prepare.amount}?` }}'
+      schema:
+        type: object
+        properties:
+          note: {type: string}
+        required: [note]
+  - id: accepted
+    type: javascript
+    config:
+      code: 'return {approved: true, amount: nodes.prepare.amount};'
+  - id: record
+    type: mcp
+    config:
+      server: approvals
+      tool: record_approval
+      arguments:
+        amount: '${{ nodes.accepted.amount }}'
+        note: '${{ nodes.review ? nodes.review.content.note : "Auto-approved" }}'
+  - id: declined
+    type: javascript
+    config:
+      code: 'return {approved: false, amount: nodes.prepare.amount};'
+edges:
+  - {from: START, to: policy}
+  - {from: policy, to: prepare}
+  - {from: prepare, to: route}
+  - {from: route, port: 'true', to: review}
+  - {from: route, port: 'false', to: accepted}
+  - {from: review, port: approved, to: accepted}
+  - {from: review, port: rejected, to: declined}
+  - {from: accepted, to: record}
+  - {from: record, to: END}
+  - {from: declined, to: END}

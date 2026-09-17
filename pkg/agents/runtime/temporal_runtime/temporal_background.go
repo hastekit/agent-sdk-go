@@ -151,6 +151,7 @@ func (w *BackgroundTaskWorkflow) Execute(ctx workflow.Context, in *BackgroundTas
 		ThreadID:   in.Ref.ThreadID,
 		StreamID:   in.Ref.ThreadStreamID,
 		RunContext: in.Ref.RunContext,
+		Skills:     in.Ref.Skills,
 		Message:    decision.Message,
 	})
 	return run.GetChildWorkflowExecution().Get(runCtx, nil)

@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/hastekit/agent-sdk-go/pkg/agents"
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/constants"
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
 )
@@ -69,7 +70,8 @@ func (in *RunAgentInput) Validate() error {
 			return fmt.Errorf("agui: messages[%d].role is required", i)
 		}
 	}
-	return nil
+	_, err := in.SkillSelection()
+	return err
 }
 
 // ApprovalDecision is one entry in forwardedProps.command.resume —
@@ -402,3 +404,21 @@ func ensureFunctionCallID(id string) string {
 }
 
 func ptr[T any](v T) *T { return &v }
+
+// SkillSelection reads the SDK extension forwardedProps.skills. Clients must
+// resend their selection on every run, including approval resumes.
+func (in *RunAgentInput) SkillSelection() (agents.SkillSelection, error) {
+	var selection agents.SkillSelection
+	fp, ok := in.ForwardedProps.(map[string]any)
+	if !ok || fp["skills"] == nil {
+		return selection, nil
+	}
+	data, err := json.Marshal(fp["skills"])
+	if err == nil {
+		err = json.Unmarshal(data, &selection)
+	}
+	if err != nil {
+		return selection, fmt.Errorf("agui: invalid forwardedProps.skills: %w", err)
+	}
+	return selection, nil
+}

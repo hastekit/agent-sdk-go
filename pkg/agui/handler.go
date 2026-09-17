@@ -15,6 +15,7 @@ import (
 	"github.com/hastekit/agent-sdk-go/pkg/attachments"
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/constants"
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
+	"github.com/hastekit/agent-sdk-go/pkg/skills"
 )
 
 // Registry is the minimal view of an SDK client the AG-UI handler
@@ -25,6 +26,7 @@ type Registry interface {
 }
 
 type options struct {
+	skillStore         skills.Store
 	attachmentStore    attachments.UploadStore
 	attachmentMaxBytes int64
 	namespaceResolver  NamespaceResolver
@@ -32,6 +34,11 @@ type options struct {
 	fullHistory        bool
 	keepalive          time.Duration
 }
+
+// WithSkillStore enables namespace-scoped skill management APIs and the embedded
+// UI library. Configure an adapter over the same store in the agent's Skills.
+// Protect management routes with application authorization middleware.
+func WithSkillStore(store skills.Store) Option { return func(o *options) { o.skillStore = store } }
 
 // WithAttachmentStore enables upload/download endpoints and owned file references.
 // Give the same store to the agent's middleware.NewAttachmentMiddleware, which resolves
@@ -100,6 +107,7 @@ func buildOptions(opts []Option) options {
 // AG-UI protocol:
 //
 //	GET  /agents                                  → {"agents": ["name", ...]}
+//	GET  /agents/{agent}/skills                   → visible skill catalog and default enablement
 //	POST /agents/{agent}/run                      → run the agent; SSE stream of AG-UI events
 //	GET  /agents/{agent}/threads                  → stored conversation threads, newest first
 //	GET  /agents/{agent}/threads/{thread}/messages → thread history as AG-UI messages
@@ -127,6 +135,11 @@ func NewHandler(registry Registry, opts ...Option) http.Handler {
 	handleFunc := func(pattern string, fn http.HandlerFunc) {
 		mux.Handle(pattern, o.withNamespace(fn))
 	}
+	if o.skillStore != nil {
+		h := o.withNamespace(skills.NewHandler(o.skillStore, func(r *http.Request) (string, error) { return requestNamespace(r), nil }))
+		mux.Handle("/skills", h)
+		mux.Handle("/skills/", h)
+	}
 	if o.attachmentStore != nil {
 		// Uploads and downloads live under this handler's namespace, the same
 		// one every run it starts stores and reads attachments under.
@@ -146,7 +159,26 @@ func NewHandler(registry Registry, opts ...Option) http.Handler {
 			"agents":       registry.AgentNames(),
 			"full_history": o.fullHistory,
 			"attachments":  o.attachmentStore != nil,
+			"skill_store":  o.skillStore != nil,
 		})
+	})
+
+	handleFunc("GET /agents/{agent}/skills", func(w http.ResponseWriter, r *http.Request) {
+		agent, ok := registry.Agent(r.PathValue("agent"))
+		if !ok {
+			writeJSONError(w, http.StatusNotFound, "agent not found")
+			return
+		}
+		catalog, err := agent.ListSkills(r.Context(), requestNamespace(r), map[string]any{"Header": collectHeaders(r.Header)}, agents.SkillSelection{})
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "unable to list skills: "+err.Error())
+			return
+		}
+		if catalog == nil {
+			catalog = []agents.ListedSkill{}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"skills": catalog})
 	})
 
 	handleFunc("POST /agents/{agent}/run", func(w http.ResponseWriter, r *http.Request) {
@@ -525,7 +557,9 @@ func serveRun(w http.ResponseWriter, r *http.Request, agent *agents.Agent, o opt
 		}
 	}
 
+	selection, _ := input.SkillSelection() // validated before claiming the run
 	in := &agents.AgentInput{
+		Skills:    selection,
 		Namespace: requestNamespace(r),
 		RunID:     runID,
 		ThreadID:  input.ThreadID,

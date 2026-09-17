@@ -52,3 +52,18 @@ test("prepending history is ordered, deduplicated, and survives live events", as
   await agent.runAgent();
   assert.deepEqual(agent.messages.map(m => m.id), ["older", "recent", "reply"]);
 });
+
+test("skill selection accompanies new turns and approvals without replacing resume data", async t => {
+  globalThis.window = { location: { origin: "http://local" } };
+  t.after(() => { delete globalThis.window; });
+  for (const fullHistory of [false, true]) {
+    const agent = new StoppableHttpAgent({ agentName: "agent", url: "/run", threadId: "thread", fullHistory });
+    agent.skillSelection = { enable: ["team/review"], disable: ["team/writing"] };
+    const decisions = [{ toolCallId: "call", approved: true }];
+    // requestInit is protected in TypeScript but available to this transport test.
+    const request = agent.requestInit({ threadId: "thread", runId: "run", messages: [], tools: [], context: [], state: {}, forwardedProps: { command: { resume: { decisions } } } });
+    const body = JSON.parse(request.body);
+    assert.deepEqual(body.forwardedProps.skills, agent.skillSelection);
+    assert.deepEqual(body.forwardedProps.command.resume.decisions, decisions);
+  }
+});

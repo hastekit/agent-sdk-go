@@ -21,21 +21,14 @@ var (
 	globalPool = newConnectionPool(5 * time.Minute)
 )
 
-// SchemaCache defines the interface for caching MCP tool schemas.
-// Implementations can use Redis, in-memory stores, or any other backing store.
+// SchemaCache stores opaque serialized tool listings. The MCP client owns
+// serialization, keys, cache scope, and TTL policy. Get returns found=false for
+// missing or expired keys. Set atomically replaces a key for at most ttl;
+// nonpositive ttl removes the key. Implementations must be concurrency-safe.
 type SchemaCache interface {
-	// Get retrieves cached tool schemas by key. Returns nil, false on cache miss.
-	Get(ctx context.Context, key string) (*CachedToolEntry, bool)
-	// Set stores tool schemas with the given key, for at most ttl.
-	//
-	// A store that can expire keys itself should use ttl; one that cannot may
-	// ignore it, since the entry carries its own ExpiresAt and is checked on
-	// the way out. ListTools only stores entries with a positive ttl.
-	Set(ctx context.Context, key string, entry *CachedToolEntry, ttl time.Duration)
-	// Delete removes a cached entry by key.
-	Delete(ctx context.Context, key string)
-	// Clear removes all cached entries.
-	Clear(ctx context.Context)
+	Get(context.Context, string) ([]byte, bool, error)
+	Set(context.Context, string, []byte, time.Duration) error
+	Delete(context.Context, string) error
 }
 
 // CachedToolEntry stores cached MCP tool schemas.

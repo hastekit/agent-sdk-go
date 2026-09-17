@@ -76,6 +76,7 @@ function serverIdOf(id: string): string {
 export class StoppableHttpAgent extends HttpAgent {
   private readonly agentName: string;
   private streamId?: string;
+  skillSelection: { enable: string[]; disable: string[] } = { enable: [], disable: [] };
 
   // Whether the server needs the whole conversation posted to it. It
   // normally does not — see requestInit.
@@ -237,6 +238,7 @@ export class StoppableHttpAgent extends HttpAgent {
   // Approvals are untouched: they travel in forwardedProps, so a resume
   // whose trailing block is empty still posts its decisions.
   protected requestInit(input: RunAgentInput): RequestInit {
+    input = { ...input, forwardedProps: { ...input.forwardedProps, skills: this.skillSelection } };
     if (this.fullHistory) return super.requestInit(input);
     return super.requestInit({ ...input, messages: newTurnOf(input.messages) });
   }

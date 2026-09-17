@@ -3,6 +3,8 @@ package workflow
 import (
 	"context"
 	"errors"
+	"fmt"
+	"time"
 )
 
 // NodeType identifies the kind of node in a workflow.
@@ -62,3 +64,31 @@ func (b *BaseNode) Type() NodeType { return b.NodeType }
 // NodeFactory builds a Node. Host-side dependencies are captured
 // in the closure.
 type NodeFactory func() (Node, error)
+
+type builtinNode struct {
+	BaseNode
+	id      string
+	ports   map[string]bool
+	delay   *time.Duration // built-in delays can use a durable runtime timer
+	execute func(context.Context, *Input) (any, string, error)
+}
+
+func (n *builtinNode) Validate() error { return nil }
+func (n *builtinNode) Execute(ctx context.Context, in *Input) (map[string]any, string, error) {
+	// Keep suspended integrations dormant until their own decision arrives.
+	if saved := in.Suspended[n.id]; saved != nil {
+		if _, ok := in.Resume(n.id); !ok {
+			return nil, "", Pause(saved.Payload)
+		}
+	}
+	result, port, err := n.execute(ctx, in)
+	if err != nil {
+		return nil, "", err
+	}
+	// Outputs must survive history serialization and cannot alias shared input.
+	result, err = jsonValue(result)
+	if err != nil {
+		return nil, "", fmt.Errorf("node output must be JSON: %w", err)
+	}
+	return map[string]any{"nodes": map[string]any{n.id: result}}, port, nil
+}

@@ -17,6 +17,9 @@ importers:
       '@copilotkit/react-core':
         specifier: ^1.58.0
         version: 1.59.5(@types/mdast@4.0.4)(@types/react-dom@18.3.7(@types/react@18.3.31))(@types/react@18.3.31)(graphql@16.14.2)(micromark-util-types@2.0.2)(micromark@4.0.2)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(zod@3.25.76)
+      '@radix-ui/react-dropdown-menu':
+        specifier: 2.1.17
+        version: 2.1.17(@types/react-dom@18.3.7(@types/react@18.3.31))(@types/react@18.3.31)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
       react:
         specifier: ^18.3.1
         version: 18.3.1

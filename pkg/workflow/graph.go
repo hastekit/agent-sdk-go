@@ -141,12 +141,18 @@ func (g *Graph) Compile() (*Compiled, error) {
 	}
 
 	for id, n := range g.nodes {
+		if builtin, ok := n.(*builtinNode); ok && builtin.id != id {
+			errs = append(errs, fmt.Errorf("workflow: node ID %q does not match graph key %q", builtin.id, id))
+		}
 		if err := n.Validate(); err != nil {
 			errs = append(errs, fmt.Errorf("workflow %s: node %q validation: %w", g.id, id, err))
 		}
 	}
 
 	for _, e := range g.edges {
+		if builtin, ok := g.nodes[e.FromNode].(*builtinNode); ok && !builtin.ports[e.FromPort] {
+			errs = append(errs, fmt.Errorf("workflow node %q has no port %q", e.FromNode, e.FromPort))
+		}
 		if e.FromNode != StartNode {
 			if _, ok := g.nodes[e.FromNode]; !ok {
 				errs = append(errs, fmt.Errorf("workflow %s: edge %s->%s references unknown from_node %q", g.id, e.FromNode, e.ToNode, e.FromNode))

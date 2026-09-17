@@ -1,24 +1,27 @@
-package agents_test
+package agents
 
 import (
 	"context"
 	"strings"
 	"testing"
 
-	"github.com/hastekit/agent-sdk-go/pkg/agents"
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
 )
 
-func readSkillTool(t *testing.T) *agents.ReadSkillTool {
+func readSkillTool(t *testing.T) Tool {
 	t.Helper()
-
-	return agents.NewReadSkillTool(newRegistry(t, skillFS()))
+	agent := NewAgent(&AgentOptions{Name: "reader", Skills: []SkillSet{testSkillSet(SkillEnabled)}})
+	tools, _, _, err := agent.prepareSkills(context.Background(), &AgentInput{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tools[0]
 }
 
-func runReadSkill(t *testing.T, tool *agents.ReadSkillTool, args string) (string, error) {
+func runReadSkill(t *testing.T, tool Tool, args string) (string, error) {
 	t.Helper()
 
-	resp, err := tool.Execute(context.Background(), &agents.ToolCall{
+	resp, err := tool.Execute(context.Background(), &ToolCall{
 		FunctionCallMessage: &responses.FunctionCallMessage{
 			ID:        "fc_1",
 			CallID:    "call_1",
@@ -64,8 +67,8 @@ func TestReadSkillErrorsOnUnknownSkill(t *testing.T) {
 	if err == nil {
 		t.Fatal("Execute succeeded for an unknown skill")
 	}
-	if !strings.Contains(err.Error(), "pdf") {
-		t.Errorf("error does not name the available skills: %v", err)
+	if !strings.Contains(err.Error(), "not enabled") {
+		t.Errorf("error does not explain unavailable skill: %v", err)
 	}
 }
 
@@ -86,6 +89,6 @@ func TestReadSkillIsAnnotatedReadOnly(t *testing.T) {
 
 // skillDescriptor reads the tool's schema and flags the one way there is:
 // through the BaseTool it reports.
-func skillDescriptor(tool agents.Tool) *agents.BaseTool {
+func skillDescriptor(tool Tool) *BaseTool {
 	return tool.GetToolDescriptor()
 }

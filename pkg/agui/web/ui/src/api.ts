@@ -30,11 +30,12 @@ export async function fetchAgents(): Promise<{
   agents: string[];
   fullHistory: boolean;
   attachmentsEnabled: boolean;
+  skillStoreEnabled: boolean;
 }> {
   const r = await fetch(`${API}/agents`);
   if (!r.ok) throw new Error(`agents → ${r.status}`);
   const body = await r.json();
-  return { agents: body.agents ?? [], fullHistory: body.full_history === true, attachmentsEnabled: body.attachments === true };
+  return { agents: body.agents ?? [], fullHistory: body.full_history === true, attachmentsEnabled: body.attachments === true, skillStoreEnabled: body.skill_store === true };
 }
 
 // fetchThreads returns supported=false when the agent's persistence
@@ -209,4 +210,43 @@ export async function uploadAttachment(file: File): Promise<UploadedAttachment> 
   const response = await fetch("/attachments/", { method: "POST", body });
   if (!response.ok) throw new Error(`Upload failed (${response.status}). Please try again.`);
   return response.json();
+}
+
+export interface SkillInfo {
+  name: string;
+  description: string;
+  policy?: "required" | "enabled" | "opt_in" | "blocked";
+  enabled: boolean;
+}
+export async function fetchSkills(agent: string): Promise<SkillInfo[]> {
+  const r = await fetch(`${API}/agents/${encodeURIComponent(agent)}/skills`);
+  if (!r.ok) throw new Error(`skills → ${r.status}`);
+  return (await r.json()).skills ?? [];
+}
+
+export interface StoredSkill { name: string; description: string; resources: string[] }
+export async function fetchStoredSkills(cursor = ""): Promise<{skills: StoredSkill[]; nextCursor?: string}> {
+  const r = await fetch(`${API}/skills?limit=50&cursor=${encodeURIComponent(cursor)}`);
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+export function skillFileUrl(name: string, file: string): string {
+  return `${API}/skills/${encodeURIComponent(name)}?file=${encodeURIComponent(file)}`;
+}
+export async function uploadSkill(files: File[]): Promise<StoredSkill> {
+  const data = new FormData();
+  for (const file of files) {
+    // A folder selection includes its enclosing directory. Store only paths
+    // inside that directory, preserving nested references and scripts.
+    const path = file.webkitRelativePath ? file.webkitRelativePath.split("/").slice(1).join("/") : file.name;
+    data.append("files", file, path);
+  }
+  const r = await fetch(`${API}/skills`, { method: "POST", body: data });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+export async function deleteSkill(name: string): Promise<void> {
+  const r = await fetch(`${API}/skills/${encodeURIComponent(name)}`, { method: "DELETE" });
+  if (!r.ok) throw new Error(await r.text());
 }

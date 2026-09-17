@@ -1,4 +1,4 @@
-package agents_test
+package skills
 
 import (
 	"os"
@@ -6,8 +6,6 @@ import (
 	"strings"
 	"testing"
 	"testing/fstest"
-
-	"github.com/hastekit/agent-sdk-go/pkg/agents"
 )
 
 func skillFS() fstest.MapFS {
@@ -21,25 +19,25 @@ func skillFS() fstest.MapFS {
 	}
 }
 
-func newRegistry(t *testing.T, fsys fstest.MapFS) *agents.SkillRegistry {
+func newRegistry(t *testing.T, fsys fstest.MapFS) *filesystemCatalog {
 	t.Helper()
 
-	registry, err := agents.NewSkillRegistry(fsys)
+	registry, err := loadFSCatalog(fsys)
 	if err != nil {
-		t.Fatalf("NewSkillRegistry: %v", err)
+		t.Fatalf("loadFSCatalog: %v", err)
 	}
 	return registry
 }
 
-func TestSkillRegistryLoadsEmbeddedFolders(t *testing.T) {
+func TestFilesystemCatalogLoadsEmbeddedFolders(t *testing.T) {
 	registry := newRegistry(t, skillFS())
 
-	skills := registry.Skills()
+	skills := registry.skillsList()
 	if len(skills) != 2 {
 		t.Fatalf("got %d skills, want 2: %+v", len(skills), skills)
 	}
 
-	pdf, ok := registry.Get("pdf")
+	pdf, ok := registry.get("pdf")
 	if !ok {
 		t.Fatal("skill pdf not found")
 	}
@@ -54,15 +52,15 @@ func TestSkillRegistryLoadsEmbeddedFolders(t *testing.T) {
 	}
 
 	// A skill that names nothing takes its name from its folder.
-	if _, ok := registry.Get("invoice"); !ok {
+	if _, ok := registry.get("invoice"); !ok {
 		t.Error("skill invoice not found")
 	}
 }
 
-func TestSkillRegistryReadStripsFrontmatter(t *testing.T) {
+func TestFilesystemCatalogReadStripsFrontmatter(t *testing.T) {
 	registry := newRegistry(t, skillFS())
 
-	body, err := registry.Read("pdf")
+	body, err := registry.read("pdf")
 	if err != nil {
 		t.Fatalf("Read: %v", err)
 	}
@@ -74,10 +72,10 @@ func TestSkillRegistryReadStripsFrontmatter(t *testing.T) {
 	}
 }
 
-func TestSkillRegistryReadFileServesBundledResources(t *testing.T) {
+func TestFilesystemCatalogReadFileServesBundledResources(t *testing.T) {
 	registry := newRegistry(t, skillFS())
 
-	content, err := registry.ReadFile("pdf", "references/forms.md")
+	content, err := registry.readFile("pdf", "references/forms.md")
 	if err != nil {
 		t.Fatalf("ReadFile: %v", err)
 	}
@@ -86,21 +84,21 @@ func TestSkillRegistryReadFileServesBundledResources(t *testing.T) {
 	}
 }
 
-func TestSkillRegistryReadFileRejectsEscapes(t *testing.T) {
+func TestFilesystemCatalogReadFileRejectsEscapes(t *testing.T) {
 	registry := newRegistry(t, skillFS())
 
 	// Both of these resolve outside the pdf folder; neither may be served.
 	for _, file := range []string{"../invoice/SKILL.md", "/etc/passwd"} {
-		if _, err := registry.ReadFile("pdf", file); err == nil {
+		if _, err := registry.readFile("pdf", file); err == nil {
 			t.Errorf("ReadFile(%q) succeeded, want refusal", file)
 		}
 	}
 }
 
-func TestSkillRegistryUnknownSkillListsWhatExists(t *testing.T) {
+func TestFilesystemCatalogUnknownSkillListsWhatExists(t *testing.T) {
 	registry := newRegistry(t, skillFS())
 
-	_, err := registry.Read("spreadsheet")
+	_, err := registry.read("spreadsheet")
 	if err == nil {
 		t.Fatal("Read of an unknown skill succeeded")
 	}
@@ -109,7 +107,7 @@ func TestSkillRegistryUnknownSkillListsWhatExists(t *testing.T) {
 	}
 }
 
-func TestSkillRegistryRejectsMalformedSkills(t *testing.T) {
+func TestFilesystemCatalogRejectsMalformedSkills(t *testing.T) {
 	cases := map[string]fstest.MapFS{
 		"no description": {
 			"skills/a/SKILL.md": &fstest.MapFile{Data: []byte("---\nname: a\n---\n\nbody\n")},
@@ -125,8 +123,8 @@ func TestSkillRegistryRejectsMalformedSkills(t *testing.T) {
 
 	for name, fsys := range cases {
 		t.Run(name, func(t *testing.T) {
-			if _, err := agents.NewSkillRegistry(fsys); err == nil {
-				t.Error("NewSkillRegistry succeeded, want an error")
+			if _, err := loadFSCatalog(fsys); err == nil {
+				t.Error("loadFSCatalog succeeded, want an error")
 			}
 		})
 	}
@@ -135,39 +133,39 @@ func TestSkillRegistryRejectsMalformedSkills(t *testing.T) {
 // A SKILL.md a skill bundles — an example, a template — belongs to that skill.
 // Registering it as a second skill of its own is how a template with no real
 // description would take the whole registry down at startup.
-func TestSkillRegistryTreatsNestedSkillFilesAsResources(t *testing.T) {
+func TestFilesystemCatalogTreatsNestedSkillFilesAsResources(t *testing.T) {
 	registry := newRegistry(t, fstest.MapFS{
 		"outer/SKILL.md":           &fstest.MapFile{Data: []byte("---\nname: outer\ndescription: d\n---\nbody\n")},
 		"outer/templates/SKILL.md": &fstest.MapFile{Data: []byte("---\nname: <name>\n---\ntemplate\n")},
 	})
 
-	if len(registry.Skills()) != 1 {
-		t.Fatalf("got %d skills, want 1: %+v", len(registry.Skills()), registry.Skills())
+	if len(registry.skillsList()) != 1 {
+		t.Fatalf("got %d skills, want 1: %+v", len(registry.skillsList()), registry.skillsList())
 	}
 
-	outer, _ := registry.Get("outer")
+	outer, _ := registry.get("outer")
 	if len(outer.Resources) != 1 || outer.Resources[0] != "templates/SKILL.md" {
 		t.Errorf("resources = %v", outer.Resources)
 	}
 
-	content, err := registry.ReadFile("outer", "templates/SKILL.md")
+	content, err := registry.readFile("outer", "templates/SKILL.md")
 	if err != nil || content != "---\nname: <name>\n---\ntemplate\n" {
 		t.Errorf("ReadFile = %q, %v", content, err)
 	}
 }
 
-func TestSkillRegistryFromDirReadsSkillsOffDisk(t *testing.T) {
+func TestFilesystemCatalogFromDirReadsSkillsOffDisk(t *testing.T) {
 	dir := writeSkillDir(t, map[string]string{
 		"changelog/SKILL.md":            "---\nname: changelog\ndescription: Write a release changelog entry.\n---\n\nGroup by Added and Fixed.\n",
 		"changelog/references/style.md": "no trailing full stop\n",
 	})
 
-	registry, err := agents.NewSkillRegistryFromDir(dir)
+	registry, err := loadDirectoryCatalog(dir)
 	if err != nil {
-		t.Fatalf("NewSkillRegistryFromDir: %v", err)
+		t.Fatalf("loadDirectoryCatalog: %v", err)
 	}
 
-	changelog, ok := registry.Get("changelog")
+	changelog, ok := registry.get("changelog")
 	if !ok {
 		t.Fatal("skill changelog not found")
 	}
@@ -177,7 +175,7 @@ func TestSkillRegistryFromDirReadsSkillsOffDisk(t *testing.T) {
 		t.Errorf("file location = %q, want %q", changelog.FileLocation, want)
 	}
 
-	body, err := registry.Read("changelog")
+	body, err := registry.read("changelog")
 	if err != nil {
 		t.Fatalf("Read: %v", err)
 	}
@@ -185,7 +183,7 @@ func TestSkillRegistryFromDirReadsSkillsOffDisk(t *testing.T) {
 		t.Errorf("body = %q", body)
 	}
 
-	style, err := registry.ReadFile("changelog", "references/style.md")
+	style, err := registry.readFile("changelog", "references/style.md")
 	if err != nil {
 		t.Fatalf("ReadFile: %v", err)
 	}
@@ -194,7 +192,7 @@ func TestSkillRegistryFromDirReadsSkillsOffDisk(t *testing.T) {
 	}
 }
 
-func TestSkillRegistryFromDirMergesLibraries(t *testing.T) {
+func TestFilesystemCatalogFromDirMergesLibraries(t *testing.T) {
 	shared := writeSkillDir(t, map[string]string{
 		"changelog/SKILL.md": "---\ndescription: Write a release changelog entry.\n---\nbody\n",
 	})
@@ -202,12 +200,12 @@ func TestSkillRegistryFromDirMergesLibraries(t *testing.T) {
 		"triage/SKILL.md": "---\ndescription: Triage an incoming bug report.\n---\nbody\n",
 	})
 
-	registry, err := agents.NewSkillRegistryFromDir(shared, own)
+	registry, err := loadDirectoryCatalog(shared, own)
 	if err != nil {
-		t.Fatalf("NewSkillRegistryFromDir: %v", err)
+		t.Fatalf("loadDirectoryCatalog: %v", err)
 	}
-	if len(registry.Skills()) != 2 {
-		t.Fatalf("got %d skills, want 2: %+v", len(registry.Skills()), registry.Skills())
+	if len(registry.skillsList()) != 2 {
+		t.Fatalf("got %d skills, want 2: %+v", len(registry.skillsList()), registry.skillsList())
 	}
 
 	// The same name in two libraries is an error, not a silent win for
@@ -215,30 +213,30 @@ func TestSkillRegistryFromDirMergesLibraries(t *testing.T) {
 	clash := writeSkillDir(t, map[string]string{
 		"changelog/SKILL.md": "---\ndescription: A different changelog skill.\n---\nbody\n",
 	})
-	if _, err := agents.NewSkillRegistryFromDir(shared, clash); err == nil {
-		t.Error("NewSkillRegistryFromDir accepted a duplicate skill name")
+	if _, err := loadDirectoryCatalog(shared, clash); err == nil {
+		t.Error("loadDirectoryCatalog accepted a duplicate skill name")
 	}
 }
 
 // Pointing straight at one skill's folder works: the skill takes its name from
 // the directory that was pointed at.
-func TestSkillRegistryFromDirAcceptsASingleSkillFolder(t *testing.T) {
+func TestFilesystemCatalogFromDirAcceptsASingleSkillFolder(t *testing.T) {
 	dir := writeSkillDir(t, map[string]string{
 		"changelog/SKILL.md": "---\ndescription: Write a release changelog entry.\n---\nbody\n",
 	})
 
-	registry, err := agents.NewSkillRegistryFromDir(filepath.Join(dir, "changelog"))
+	registry, err := loadDirectoryCatalog(filepath.Join(dir, "changelog"))
 	if err != nil {
-		t.Fatalf("NewSkillRegistryFromDir: %v", err)
+		t.Fatalf("loadDirectoryCatalog: %v", err)
 	}
-	if _, ok := registry.Get("changelog"); !ok {
-		t.Errorf("skill changelog not found: %+v", registry.Skills())
+	if _, ok := registry.get("changelog"); !ok {
+		t.Errorf("skill changelog not found: %+v", registry.skillsList())
 	}
 }
 
-func TestSkillRegistryFromDirRejectsABadPath(t *testing.T) {
-	if _, err := agents.NewSkillRegistryFromDir(filepath.Join(t.TempDir(), "nope")); err == nil {
-		t.Error("NewSkillRegistryFromDir accepted a directory that does not exist")
+func TestFilesystemCatalogFromDirRejectsABadPath(t *testing.T) {
+	if _, err := loadDirectoryCatalog(filepath.Join(t.TempDir(), "nope")); err == nil {
+		t.Error("loadDirectoryCatalog accepted a directory that does not exist")
 	}
 }
 

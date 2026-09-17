@@ -2,6 +2,7 @@ package web
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,7 @@ import (
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
 	"github.com/hastekit/agent-sdk-go/pkg/agui"
 	"github.com/hastekit/agent-sdk-go/pkg/attachments"
+	"github.com/hastekit/agent-sdk-go/pkg/skills"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -120,4 +122,33 @@ func TestHandlerForwardsNamespaceResolverToAPIAndAttachments(t *testing.T) {
 	// Static assets do not need namespace resolution.
 	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/", nil))
 	require.Equal(t, 2, calls)
+}
+
+func TestHandlerSkillStore(t *testing.T) {
+	store, err := skills.NewFileStore(t.TempDir())
+	require.NoError(t, err)
+	for _, enabled := range []bool{true, false} {
+		t.Run(fmt.Sprint(enabled), func(t *testing.T) {
+			var configured skills.Store
+			if enabled {
+				configured = store
+			}
+			h := Handler(registry{}, agui.WithSkillStore(configured))
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, httptest.NewRequest("GET", APIPrefix+"/agents", nil))
+			require.Equal(t, http.StatusOK, w.Code)
+			var capability struct {
+				SkillStore bool `json:"skill_store"`
+			}
+			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &capability))
+			require.Equal(t, enabled, capability.SkillStore)
+			w = httptest.NewRecorder()
+			h.ServeHTTP(w, httptest.NewRequest("GET", APIPrefix+"/skills", nil))
+			if enabled {
+				require.Equal(t, http.StatusOK, w.Code)
+			} else {
+				require.Equal(t, http.StatusNotFound, w.Code)
+			}
+		})
+	}
 }

@@ -45,7 +45,7 @@ type Agent struct {
 	stickyHandoff        bool
 	singleTurn           bool
 	modelCallMiddlewares []ModelCallMiddleware
-	skills               SkillProvider
+	skillSets            []SkillSet
 
 	// background waits on the tasks this agent's tools start, and is nil where
 	// nothing can wait — see BackgroundRunner and ErrBackgroundUnsupported.
@@ -71,11 +71,8 @@ type AgentOptions struct {
 	Tools    []Tool
 	Handoffs []*Handoff
 
-	// Skills are folders of instructions the agent reads only when it needs
-	// them — see SkillProvider and NewSkillRegistryFromDir. The agent lists
-	// them in its prompt and adds the provider's reader tool to Tools itself,
-	// so the two halves cannot be wired up inconsistently.
-	Skills        SkillProvider
+	// Skills are listed once per run; enabled skills share the read_skill tool.
+	Skills        []SkillSet
 	McpServers    []MCPToolset
 	Runtime       Runtime
 	MaxLoops      *int
@@ -178,15 +175,12 @@ func NewAgent(opts *AgentOptions) *Agent {
 	}
 
 	agent := &Agent{
-		Name:        opts.Name,
-		output:      opts.Output,
-		history:     conversationHistory,
-		instruction: instruction,
-		// The skill source brings its own reader tool, so an agent given
-		// skills can always read them — there is no second thing to remember
-		// to pass, and no way to advertise a skill the model cannot open.
-		tools:                WithSkillTool(opts.Tools, opts.Skills),
-		skills:               opts.Skills,
+		Name:                 opts.Name,
+		output:               opts.Output,
+		history:              conversationHistory,
+		instruction:          instruction,
+		tools:                slices.Clone(opts.Tools),
+		skillSets:            slices.Clone(opts.Skills),
 		mcpServers:           opts.McpServers,
 		llm:                  &WrappedLLM{opts.LLM},
 		parameters:           opts.Parameters,
@@ -360,6 +354,8 @@ func (e *Agent) ToolExecutor() ToolExecutor {
 }
 
 type AgentInput struct {
+	// Skills selects opt-in skills by name for this execution, including resumes.
+	Skills SkillSelection `json:"skills,omitempty"`
 	// RunID optionally identifies this execution. History generates one when omitted.
 	RunID         string          `json:"run_id,omitempty"`
 	Namespace     string          `json:"namespace"`
@@ -498,7 +494,11 @@ func (e *Agent) ExecuteWithRun(ctx context.Context, in *AgentInput, run *history
 	}
 
 	handoffTools := e.PrepareHandoffTools(ctx)
-	tools := append(e.tools, handoffTools...)
+	tools := append(slices.Clone(e.tools), handoffTools...)
+	tools, skills, skillHint, err := e.prepareSkills(ctx, in, tools)
+	if err != nil {
+		return &AgentOutput{Status: agentstate.RunStatusError, RunID: run.GetRunID()}, err
+	}
 
 	// Connect to MCP servers, and list the tools. A server that could not be
 	// listed is reported to the model through the prompt's Dependencies below
@@ -563,8 +563,6 @@ func (e *Agent) ExecuteWithRun(ctx context.Context, in *AgentInput, run *history
 				deferredToolInfos = append(deferredToolInfos, info)
 			}
 		}
-
-		skills, skillHint := skillDependencies(e.skills)
 
 		prompt, err := e.instruction.GetPrompt(ctx, &Dependencies{
 			RunContext:    in.RunContext,

@@ -13,6 +13,8 @@ import {
   useDefaultRenderTool,
   useInterrupt,
 } from "@copilotkit/react-core/v2";
+import { ComposerSkillsContext } from "./composer-menu";
+import { SkillLibrary } from "./skill-library";
 import { AttachmentMessageView } from "./attachment-message";
 import { AttachmentInput } from "./attachment-input";
 import type { InputContent } from "@ag-ui/core";
@@ -20,6 +22,8 @@ import { StoppableHttpAgent } from "./stoppable-agent";
 import type { Message as AGUIMessage } from "@ag-ui/core";
 import {
   fetchAgents,
+  fetchSkills,
+  type SkillInfo,
   fetchThreads,
   fetchMessages,
   runUrl,
@@ -111,6 +115,12 @@ interface TrayInterrupt {
 const TrayContext = createContext<Tray>({ tasks: [], interrupt: null });
 
 export default function App() {
+  const [skillStoreEnabled, setSkillStoreEnabled] = useState(false);
+  const [libraryOpen, setLibraryOpen] = useState(false);
+  const [skillRevision, setSkillRevision] = useState(0);
+  const [skillCatalog, setSkillCatalog] = useState<SkillInfo[]>([]);
+  const [skillError, setSkillError] = useState("");
+  const [skillChoices, setSkillChoices] = useState<Record<string, boolean>>({});
   const [agents, setAgents] = useState<string[]>([]);
   const [agentName, setAgentName] = useState<string>("");
   // Whether the server needs the full message list posted on every run.
@@ -157,7 +167,8 @@ export default function App() {
   // Load the agent list once.
   useEffect(() => {
     fetchAgents()
-      .then(({ agents: names, fullHistory, attachmentsEnabled }) => {
+      .then(({ agents: names, fullHistory, attachmentsEnabled, skillStoreEnabled }) => {
+        setSkillStoreEnabled(skillStoreEnabled);
  setAttachmentsEnabled(attachmentsEnabled);
         setAgents(names);
         setFullHistory(fullHistory);
@@ -212,6 +223,34 @@ export default function App() {
       fullHistory,
     });
   }, [agentName, active.threadId, active.initialMessages, fullHistory]);
+
+  // Selections are remembered per agent in this browser and resent on resumes.
+  useEffect(() => {
+    let cancelled = false;
+    setSkillCatalog([]);
+    setSkillError("");
+    let saved: Record<string, boolean> = {};
+    try { saved = JSON.parse(localStorage.getItem(`hastekit-skills:${agentName}`) || "{}"); } catch { /* storage unavailable */ }
+    setSkillChoices(saved);
+    if (agentName) fetchSkills(agentName).then(skills => {
+      if (!cancelled) setSkillCatalog(skills);
+    }).catch(err => { if (!cancelled) setSkillError(String(err)); });
+    return () => { cancelled = true; };
+  }, [agentName, skillRevision]);
+
+  useEffect(() => {
+    if (!agent) return;
+    agent.skillSelection = {
+      enable: Object.entries(skillChoices).filter(([, enabled]) => enabled).map(([name]) => name),
+      disable: Object.entries(skillChoices).filter(([, enabled]) => !enabled).map(([name]) => name),
+    };
+  }, [agent, skillCatalog, skillChoices]);
+
+  const toggleSkill = (name: string, checked: boolean) => {
+    const choices = { ...skillChoices, [name]: checked };
+    setSkillChoices(choices);
+    try { localStorage.setItem(`hastekit-skills:${agentName}`, JSON.stringify(choices)); } catch { /* storage unavailable */ }
+  };
 
   useEffect(() => {
     agentRef.current = agent;
@@ -510,6 +549,7 @@ export default function App() {
       className={"dark app" + (sidebarOpen ? "" : " sidebar-hidden")}
       data-copilotkit
     >
+      {libraryOpen && <SkillLibrary onClose={() => setLibraryOpen(false)} onSaved={() => setSkillRevision(v => v + 1)} />}
       <Sidebar
         threads={threads}
         activeThreadId={active.threadId}
@@ -542,6 +582,7 @@ export default function App() {
                 agentName={agentName}
                 onAgentChange={onAgentChange}
               />
+
             </header>
             <InterruptHandler agentName={agentName} publish={setLiveInterrupt} />
             <InlineToolRenderer agentName={agentName} />
@@ -558,6 +599,7 @@ export default function App() {
                 </button>
               </div>
             )}
+            <ComposerSkillsContext.Provider value={{ skills: skillCatalog, choices: skillChoices, error: skillError, toggle: toggleSkill, canManage: skillStoreEnabled, onManage: () => setLibraryOpen(true) }}>
             <TrayContext.Provider value={tray}>
               <HistoryPager key={`${agentName}:${active.threadId}`} agent={agent!} agentName={agentName} threadId={active.threadId} initialCursor={active.nextCursor ?? ""}>
                 <CopilotChat
@@ -573,6 +615,7 @@ export default function App() {
                 />
               </HistoryPager>
             </TrayContext.Provider>
+            </ComposerSkillsContext.Provider>
           </div>
         </CopilotKitProvider>
       )}
@@ -718,6 +761,7 @@ function Sidebar({
           <ComposeIcon />
           New chat
         </button>
+
       </nav>
 
       <div className="thread-list">

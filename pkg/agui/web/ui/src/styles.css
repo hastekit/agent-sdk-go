@@ -665,3 +665,76 @@ body {
 .history-controls button { cursor: pointer; color: var(--hk-text); background: var(--hk-bg); border: 1px solid var(--hk-border); border-radius: 8px; padding: 6px 12px; }
 .history-controls button:disabled { cursor: default; opacity: .6; }
 .history-controls [role="alert"] { display: block; margin-top: 4px; }
+
+.skill-library { width: min(760px, 92vw); max-height: 85vh; overflow: auto; background: #202020; color: #eee; border: 1px solid #444; border-radius: 12px; padding: 24px; }
+.skill-library::backdrop { background: #0009; }
+.skill-library header, .skill-library article { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.skill-library h2 { margin: 0; }
+.skill-library p { line-height: 1.5; color: #bbb; }
+.skill-library button { padding: 8px 12px; border: 1px solid #555; border-radius: 6px; background: #303030; color: #eee; cursor: pointer; }
+.skill-library button:disabled { opacity: .5; cursor: default; }
+.skill-library article { border-bottom: 1px solid #444; padding: 12px 0; }
+.skill-library article button { flex-shrink: 0; }
+.skill-library pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 280px; overflow: auto; padding: 16px; background: #151515; border-radius: 8px; }
+.skill-library a { color: #91c9ff; }
+.skill-library-error { color: #ffa6a6 !important; }
+.skill-upload { display: grid; gap: 12px; padding: 16px; border: 1px solid #444; border-radius: 8px; margin: 20px 0; }
+.skill-upload label { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+.skill-upload small { color: #bbb; }
+.skill-upload p { margin: 0; }
+.skill-library { margin: auto; }
+.skill-library h2 { font-size: 1.25rem; font-weight: 600; }
+.skill-library h3 { font-size: 1rem; font-weight: 600; margin: 16px 0 8px; }
+
+.skill-library { width: min(860px, 94vw); }
+.skill-library header p { margin: 4px 0 0; font-size: 13px; }
+.skill-upload summary { font-weight: 600; cursor: pointer; }
+.skill-upload[open] > * + * { margin-top: 12px; }
+.skill-upload input { max-width: 100%; font-size: 13px; }
+.skill-upload input::file-selector-button { padding: 6px 10px; margin-right: 10px; border: 1px solid #555; border-radius: 6px; background: #303030; color: #eee; cursor: pointer; }
+.skill-count { color: #bbb; background: #353535; padding: 2px 7px; border-radius: 10px; font-size: 12px; margin-left: 6px; }
+.skill-library article { padding: 16px; margin: 10px 0; border: 1px solid #414141; border-radius: 8px; align-items: flex-start; }
+.skill-library article.selected { border-color: #91c9ff; }
+.skill-summary { min-width: 0; overflow-wrap: anywhere; }
+.skill-summary p { margin: 6px 0; font-size: 13px; }
+.skill-summary small { color: #999; font-size: 12px; }
+.skill-row-actions { display: flex; gap: 8px; flex-shrink: 0; }
+.skill-library .skill-danger { color: #ffb3b3; border-color: #784545; }
+.skill-delete-confirm { max-width: 240px; }
+.skill-delete-confirm p { margin: 0 0 8px; font-size: 13px; }
+.skill-delete-confirm button + button { margin-left: 8px; }
+.skill-library-notice { padding: 12px; background: #1c372b; border-radius: 8px; color: #bce8ce !important; }
+.skill-empty { text-align: center; padding: 28px 16px; border: 1px dashed #555; border-radius: 8px; }
+.skill-preview { margin-top: 24px; padding-top: 16px; border-top: 1px solid #444; }
+.skill-preview ul { display: flex; flex-wrap: wrap; gap: 8px 16px; list-style: none; padding: 0; font-size: 13px; }
+.skill-library button:hover:not(:disabled) { background: #414141; }
+@media (max-width: 600px) {
+ .skill-library { padding: 16px; }
+ .skill-library article { flex-direction: column; }
+ .skill-row-actions { width: 100%; }
+ .skill-delete-confirm { max-width: none; }
+}
+
+.composer-menu-trigger { display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 36px; margin-left: 4px; border: 0; border-radius: 50%; background: transparent; color: inherit; cursor: pointer; }
+.composer-menu-trigger:hover, .composer-menu-trigger[data-state="open"] { background: #ffffff12; }
+.composer-menu-trigger:focus-visible { outline: 2px solid #91c9ff; outline-offset: 2px; }
+.composer-menu { z-index: 100; min-width: 190px; padding: 6px; background: #262626; color: #eee; border: 1px solid #444; border-radius: 12px; box-shadow: 0 8px 28px #0006; font-size: 14px; }
+.composer-menu-item { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 9px 12px; border-radius: 7px; cursor: pointer; outline: none; }
+.composer-menu-item[data-highlighted], .composer-menu-item[data-state="open"], .composer-skill[data-highlighted] { background: #ffffff12; }
+.composer-menu-separator { height: 1px; background: #444; margin: 5px; }
+.composer-skills { width: min(340px, calc(100vw - 24px)); max-height: min(420px, var(--radix-dropdown-menu-content-available-height)); overflow-y: auto; }
+.composer-skills-heading { padding: 8px 10px 0; font-weight: 600; }
+.composer-skills-hint { margin: 4px 10px 10px; font-size: 12px; color: #aaa; }
+.composer-skill { display: flex; align-items: center; gap: 16px; padding: 12px 10px; border-radius: 7px; cursor: pointer; outline: none; }
+.composer-skill-copy { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.composer-skill-copy strong { font-size: 13px; font-weight: 500; }
+.composer-skill-copy small { display: block; color: #aaa; font-size: 12px; margin-top: 3px; line-height: 1.4; }
+.composer-skill[data-disabled] { cursor: default; opacity: .65; }
+.skill-switch { flex-shrink: 0; width: 34px; height: 20px; padding: 3px; border-radius: 20px; background: #606060; transition: background .15s; }
+.skill-switch > span { display: block; width: 14px; height: 14px; border-radius: 50%; background: white; transition: transform .15s; }
+.skill-switch[data-checked="true"] { background: #bd633f; }
+.skill-switch[data-checked="true"] > span { transform: translateX(14px); }
+@media (prefers-reduced-motion: reduce) { .skill-switch, .skill-switch > span { transition: none; } }
+
+.composer-manage-skills { width: 100%; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; }
+.composer-manage-skills:disabled { opacity: .5; cursor: default; }

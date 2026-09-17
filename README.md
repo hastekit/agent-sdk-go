@@ -1005,113 +1005,63 @@ runtime the trick.
 
 ### Skills
 
-A skill is a folder of instructions the agent reads only when it needs them — a house style, a procedure, a checklist too long to keep in the system prompt every turn. Write one as a `SKILL.md` with YAML frontmatter, and put any supporting files beside it:
+Configure one or more skill sources with `AgentConfig.Skills`. A filesystem source
+loads folders containing `SKILL.md` and optional supporting files:
 
-```
+```text
 skills/
-└── changelog/
-    ├── SKILL.md
-    └── references/
-        └── style.md
+├── changelog/
+│   ├── SKILL.md
+│   └── references/style.md
+└── review/
+    └── SKILL.md
 ```
 
-```markdown
----
-name: changelog
-description: Write a release changelog entry. Use whenever the user asks for release notes.
----
-
-Group the changes under `Added`, `Changed`, `Fixed`, and `Removed`...
-The full house style is in `references/style.md`.
-```
-
-Point the agent at that folder:
+Each `SKILL.md` needs YAML frontmatter with a description and an optional name
+(defaulting to the folder name), followed by the instructions.
 
 ```go
-registry, err := hastekit.NewSkillRegistryFromDir("./skills")
-if err != nil {
-    log.Fatal(err)
-}
-
+skills, err := hastekit.NewFilesystemSkillSet("local", "./skills")
+if err != nil { log.Fatal(err) }
 agent := hastekit.MustNewAgent(&hastekit.AgentConfig{
     Name: "Release_Agent",
-    Instruction: hastekit.NewPrompt(
-        "You help maintain this project's releases.",
-        prompts.WithResolver(prompts.DefaultResolvers()...), // ResolveSkills lists them
-    ),
-    Skills: registry,
-    LLM:    model,
+    LLM: model,
+    Skills: []hastekit.SkillSet{skills},
+    Instruction: hastekit.NewPrompt("Help prepare releases.",
+        prompts.WithResolver(prompts.DefaultResolvers()...)),
 })
 ```
 
-The agent lists the skills in its prompt and adds the tool that reads them to its own tools, so a prompt can never advertise a skill the model has no way to open. A prompt runs only the resolvers it is given, so one that leaves out `ResolveSkills` gets a model that never hears about them — see [Prompt resolvers](#prompt-resolvers) below.
+Every filesystem skill is enabled by default. Each run discovers added and removed
+skills without reconstructing the agent. Its catalog becomes a snapshot for that
+run; content is read on demand. `NewFSSkillSet("builtin", skillsFS)` supports
+`embed.FS` and other `fs.FS` implementations using the same defaults.
 
-The prompt carries only each skill's name and description. The model calls `read_skill` with a name to pull in the instructions, and `read_skill` with a `file` to pull in one of the bundled files — so a long skill costs context only on the turns it is actually used.
+The prompt lists skill names such as `changelog`. One `read_skill` tool
+reads instructions and allowed resources from all sources. Include `ResolveSkills`
+in the prompt resolvers to advertise the catalog.
 
-Pass several directories to draw from more than one library — a shared set plus this agent's own, say:
+For custom storage, implement `SkillSet` (`GetName`, `ListSkills`, `ResolveSkill`)
+or use `SkillSetFuncs` callbacks. Policies are `SkillRequired` (cannot disable),
+`SkillEnabled` (enabled by default), `SkillOptIn` (disabled by default, including
+the zero value), and `SkillBlocked` (cannot enable).
 
-```go
-registry, err := hastekit.NewSkillRegistryFromDir("./skills", "/etc/agent/skills")
-```
+Select skills per run with `Input.Skills.Enable` and `Input.Skills.Disable`, using
+skill names. Resend selections on new turns and approval resumes. The embedded
+UI provides a picker and remembers choices per agent in browser storage. Temporal
+and Restate execute listing and reads within durable steps.
 
-Reading happens once, at construction. To pick up edits on disk, build a new registry.
+`AgentConfig.Skills` now takes `[]SkillSet`; the former `SkillProvider` API has been
+removed. Use `skills.NewFilesystemSkillSet` or `skills.NewFSSkillSet` for folder
+and embedded sources. The root `hastekit` constructors remain available as
+convenience aliases. The old registry and standalone reader APIs have been removed.
 
-#### Shipping skills inside the binary
+Use `pkg/skills` for uploaded, persistent skills. `NewFileStore` and `NewS3Store`
+implement the pluggable `Store` interface. Wrap either with `skills.NewSkillSet`
+and pass it in `AgentConfig.Skills`; enable library APIs and uploads with
+`web.Serve(":8080", registry, agui.WithSkillStore(store))`. See [persistent skills](pkg/skills/README.md).
 
-Where the skills are part of the program rather than of its deployment, `go:embed` puts the whole tree in the binary — no folder to mount, copy, or keep in sync:
-
-```go
-//go:embed skills
-var skillsFS embed.FS
-
-registry, err := hastekit.NewSkillRegistry(skillsFS)
-```
-
-Embedding the parent folder is enough: a skill is found wherever a `SKILL.md` sits, so there is no `fs.Sub` to get right. `NewSkillRegistry` takes any `fs.FS`, so this is also the middleware for skills that come from somewhere else entirely.
-
-#### Rules
-
-The name comes from the frontmatter, or from the folder when the frontmatter omits it. A folder holding a `SKILL.md` is one skill, and everything below it belongs to that skill — so a `SKILL.md` bundled as an example or a template stays a bundled file rather than becoming a second, half-formed skill.
-
-Loading fails loudly on a skill with no description, on broken frontmatter, on a directory that isn't there, and on the same name defined twice. Skills decide how the agent behaves, so a bad one should stop startup rather than go quietly missing at runtime.
-
-Only files a skill actually bundles are reachable through the tool: a path that tries to traverse out of the skill folder is refused, so one skill cannot read another or the rest of the filesystem the skills were read from.
-
-Skills work the same under the Temporal and Restate runtimes: the durable agent registers and wraps the reader tool along with the rest, so a `read_skill` call is journaled like any other tool call and replays from the journal rather than re-reading the folder.
-
-#### Skills from somewhere else
-
-`AgentConfig.Skills` takes an `agents.SkillProvider` — a source that lists its skills, supplies the tool that reads them, and introduces them to the model:
-
-```go
-type SkillProvider interface {
-    Skills() []agents.Skill
-    SkillTool() agents.Tool // nil when the model already has a way to read them
-    SkillHint() string      // the prompt's prose: what they are, how to read one
-}
-```
-
-The agent asks the source for all three, which is what keeps the prompt and the tools in step. `SkillHint` is the whole of the section's prose and goes in verbatim — the resolver writes the `## Skills` heading and the catalogue, nothing else. Only the provider can write that hint honestly: a `SkillRegistry` names its own `read_skill` tool, while a host serving skills its own way names whatever the model actually has. Say nothing and the model gets the bare catalogue, which beats a prompt naming a tool the agent does not have.
-
-A source that returns no tool is one the model can already reach. `agents.SkillList` lists such skills and adds nothing:
-
-```go
-Skills: agents.SkillList{{Name: "changelog", Description: "Write a release changelog entry."}},
-```
-
-`agents.SkillsWithHint` is the same, plus the prose — for a host that serves skill files through a tool of its own:
-
-```go
-Skills: agents.SkillsWithHint{
-    List: agents.SkillList{{
-        Name:         "changelog",
-        Description:  "Write a release changelog entry.",
-        FileLocation: "/skills/changelog/SKILL.md",
-    }},
-    Hint: "Skills are specialised instructions for particular kinds of work. " +
-        "Read one with the `read_file` tool at the location listed below.",
-},
-```
+See [the dynamic skills example](examples/agents/15_dynamic_skills) for Go and UI usage.
 
 #### Prompt resolvers
 
@@ -1544,3 +1494,11 @@ inputs. The middleware resolves file references to base64 data with the stored
 MIME type and filename; it does not extract text, transcribe, or convert formats.
 The selected provider decides whether it supports a file's type. Non-image
 files are served as downloads, and upload/dispatch size limits still apply.
+
+### YAML workflows
+
+Build workflows from YAML and expose them as agent tools with human-input pause/resume.
+See the [workflow guide](pkg/workflow/README.md) and the
+[approval example](examples/workflow/yaml/review.yaml).
+
+Skill names have no source prefix. When names collide, the last entry in `AgentConfig.Skills` wins, replacing the description, policy, allowed files, and resolver. Within a source, the last listed entry wins. Selection policies apply after merging. Source names must still be unique for runtime registration.

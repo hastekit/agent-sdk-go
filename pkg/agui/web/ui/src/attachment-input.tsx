@@ -1,5 +1,6 @@
 import { useRef, useState } from "react";
 import { CopilotChatInput } from "@copilotkit/react-core/v2";
+import { ComposerMenu } from "./composer-menu";
 import type { InputContent } from "@ag-ui/core";
 import { uploadAttachment, type UploadedAttachment } from "./api";
 
@@ -60,7 +61,7 @@ export function AttachmentInput({ onSteer, attachmentsEnabled, ...props }: any) 
     {error && <div role="alert" className="attachment-error">{error}</div>}
     <CopilotChatInput {...props}
       onAddFile={attachmentsEnabled ? () => { if (!busy) picker.current?.click(); } : undefined}
-      addMenuButton={{ disabled: busy }}
+      addMenuButton={ComposerMenu}
       isRunning={props.isRunning && !hasText && !files.length}
       onSubmitMessage={busy ? undefined : (text: string) => void submit(text)} />
   </>;

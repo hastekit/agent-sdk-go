@@ -15,6 +15,7 @@ import (
 
 // WorkflowInput is the input structure for the Restate workflow.
 type WorkflowInput struct {
+	Skills    agents.SkillSelection
 	RunID     string
 	AgentName string `json:"agent_name"`
 
@@ -70,6 +71,7 @@ func (r *RestateRuntime) Run(ctx context.Context, agent *agents.Agent, in *agent
 		PreviousRunID:     in.PreviousRunID,
 		Message:           in.Message,
 		RunContext:        in.RunContext,
+		Skills:            in.Skills,
 		StreamID:          streamID,
 		ProviderConfigKey: gateway.ProviderConfigKeyFromContext(ctx),
 	}

@@ -54,10 +54,7 @@ func (a *TemporalAgentV2) GetActivities() map[string]interface{} {
 		activities[a.options.Name+"_MessageFilterActivity"] = temporalMessageFilter.Filter
 	}
 
-	// WithSkillTool, not options.Tools: an agent given skills adds the tool that
-	// reads them itself, and a tool with no activity registered is one the
-	// workflow cannot call.
-	for _, tool := range agents.WithSkillTool(a.options.Tools, a.options.Skills) {
+	for _, tool := range a.options.Tools {
 		temporalTool := NewTemporalTool(tool, a.broker, agents.ToolCallMiddlewaresOf(a.options.Middlewares)...)
 		activities[getToolName(a.options.Name, tool)+"_ExecuteToolActivity"] = temporalTool.Execute
 
@@ -82,6 +79,13 @@ func (a *TemporalAgentV2) GetActivities() map[string]interface{} {
 		activities[prefix+"_ExecuteMCPToolActivity"] = temporalMCP.ExecuteTool
 	}
 
+	for _, set := range a.options.Skills {
+		prefix := a.options.Name + "_SkillSet_" + set.GetName()
+		activities[prefix+"_ListSkills"] = set.ListSkills
+		activities[prefix+"_ResolveSkill"] = set.ResolveSkill
+		reader := &temporalSkillReader{set: set, broker: a.broker, middlewares: append([]agents.ToolCallMiddleware{agents.StopMiddleware{Watcher: agents.StopWatcherFrom(a.broker)}}, agents.ToolCallMiddlewaresOf(a.options.Middlewares)...)}
+		activities[prefix+"_ReadSkill"] = reader.Read
+	}
 	return activities
 }
 
@@ -156,7 +160,7 @@ func (a *TemporalAgentV2) proxyAgent(ctx workflow.Context, built map[string]*age
 	conversationHistory := history.NewConversationManager(conversationPersistenceProxy, options...)
 
 	var toolProxies []agents.Tool
-	for _, tool := range agents.WithSkillTool(a.options.Tools, a.options.Skills) {
+	for _, tool := range a.options.Tools {
 		toolProxy := NewTemporalToolProxy(ctx, getToolName(a.options.Name, tool), tool)
 		toolProxies = append(toolProxies, toolProxy)
 	}
@@ -167,6 +171,10 @@ func (a *TemporalAgentV2) proxyAgent(ctx workflow.Context, built map[string]*age
 		mcpProxies = append(mcpProxies, mcpProxy)
 	}
 
+	var skillSets []agents.SkillSet
+	for _, set := range a.options.Skills {
+		skillSets = append(skillSets, &temporalSkillSet{ctx: ctx, name: set.GetName(), prefix: a.options.Name + "_SkillSet_" + set.GetName()})
+	}
 	opts := &agents.AgentOptions{
 		Name:       a.options.Name,
 		Output:     a.options.Output,
@@ -179,14 +187,10 @@ func (a *TemporalAgentV2) proxyAgent(ctx workflow.Context, built map[string]*age
 		StickyHandoff: a.options.StickyHandoff,
 		SingleTurn:    a.options.SingleTurn,
 
-		History:     conversationHistory,
-		Instruction: promptProxy,
-		Tools:       toolProxies,
-		// The skills travel with the proxy agent so the prompt still lists
-		// them, and names the tool that reads them. The reader tool itself is
-		// already in toolProxies, wrapped as a workflow step — the agent sees
-		// it there and does not add a second, unjournaled one.
-		Skills:       a.options.Skills,
+		History:      conversationHistory,
+		Instruction:  promptProxy,
+		Tools:        toolProxies,
+		Skills:       skillSets,
 		McpServers:   mcpProxies,
 		ToolExecutor: NewTemporalToolExecutor(ctx),
 		StreamBroker: NewTemporalStreamBrokerProxy(ctx, a.options.Name, a.broker),

@@ -82,7 +82,7 @@ type BackgroundTaskService struct {
 func NewBackgroundTaskService(agentConfigs map[string]*agents.AgentOptions, broker agents.StreamBroker) *BackgroundTaskService {
 	s := &BackgroundTaskService{tools: make(map[string]agents.BackgroundTool), broker: broker}
 	for name, options := range agentConfigs {
-		for _, tool := range agents.WithSkillTool(options.Tools, options.Skills) {
+		for _, tool := range options.Tools {
 			if background, ok := tool.(agents.BackgroundTool); ok {
 				s.tools[backgroundToolKey(name, backgroundToolName(tool))] = agents.WrapBackgroundTool(name, background, agents.ToolCallMiddlewaresOf(options.Middlewares)...)
 			}
@@ -155,6 +155,7 @@ func (s *BackgroundTaskService) Await(ctx restate.Context, in *BackgroundTaskInp
 		ThreadID:          in.Ref.ThreadID,
 		Message:           decision.Message,
 		RunContext:        in.Ref.RunContext,
+		Skills:            in.Ref.Skills,
 		StreamID:          in.Ref.ThreadStreamID,
 		ProviderConfigKey: in.ProviderConfigKey,
 	})

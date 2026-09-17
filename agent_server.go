@@ -1,6 +1,7 @@
 package sdk
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
 	"github.com/hastekit/agent-sdk-go/pkg/utils"
+	"github.com/hastekit/agent-sdk-go/pkg/workflow"
 )
 
 type HTTPHandler struct{ registry *AgentRegistry }
@@ -81,11 +83,16 @@ func (h *HTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // ErrAgentAlreadyRegistered indicates a duplicate name in one registry.
 var ErrAgentAlreadyRegistered = errors.New("agent already registered")
 
-// AgentRegistry is an instance-owned, concurrency-safe registry. Its zero value
-// is ready to use. Agent names must not be mutated after registration.
+// ErrWorkflowAlreadyRegistered indicates a duplicate workflow name in a registry.
+var ErrWorkflowAlreadyRegistered = workflow.ErrAlreadyRegistered
+
+// AgentRegistry is an instance-owned, concurrency-safe registry of agents and
+// workflows. Its zero value is ready to use. Names and registered graphs must
+// not be mutated after registration.
 type AgentRegistry struct {
-	mu     sync.RWMutex
-	agents map[string]*agents.Agent
+	mu        sync.RWMutex
+	agents    map[string]*agents.Agent
+	workflows workflow.Registry
 }
 
 func NewRegistry() *AgentRegistry { return &AgentRegistry{} }
@@ -131,4 +138,43 @@ func (r *AgentRegistry) AgentNames() []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+// RegisterWorkflow registers an independently invokable workflow alongside agents.
+func (r *AgentRegistry) RegisterWorkflow(name string, compiled *workflow.Compiled, options ...workflow.InvokeOption) error {
+	if r == nil {
+		return fmt.Errorf("nil registry")
+	}
+	return r.workflows.Register(name, compiled, options...)
+}
+func (r *AgentRegistry) Workflow(name string) (*workflow.Compiled, bool) {
+	if r == nil {
+		return nil, false
+	}
+	return r.workflows.Workflow(name)
+}
+func (r *AgentRegistry) WorkflowNames() []string {
+	if r == nil {
+		return nil
+	}
+	return r.workflows.WorkflowNames()
+}
+
+// RunWorkflow executes or resumes a workflow by its registered name.
+func (r *AgentRegistry) RunWorkflow(ctx context.Context, name string, in *workflow.Input, options ...workflow.InvokeOption) (*workflow.Input, error) {
+	if r == nil {
+		return in, fmt.Errorf("nil registry")
+	}
+	return r.workflows.Execute(ctx, name, in, options...)
+}
+
+// NewWorkflowHTTPHandler serves independent workflow start/status/resume routes.
+// Keep the returned handler for the server's lifetime: it owns bounded, in-memory
+// HTTP run checkpoints. It does not require an agent or model.
+func NewWorkflowHTTPHandler(registry *AgentRegistry, config workflow.HTTPConfig) *workflow.HTTPHandler {
+	var workflows *workflow.Registry
+	if registry != nil {
+		workflows = &registry.workflows
+	}
+	return workflow.NewHTTPHandler(workflows, config)
 }
