@@ -23,16 +23,17 @@ import (
 // an attachment reference is read back from when the model needs the bytes.
 type AttachmentMiddlewareConfig struct {
 	// InlineAttachments resolves SDK attachment references into bytes for model calls.
-	// By default, references are sent as plain text without reading storage, so the
-	// model can pass them to tools without loading file contents into its context.
+	// By default, references and available metadata are sent as plain text, so
+	// the model can pass them to tools without loading file contents into context.
 	InlineAttachments bool
 
 	Store        attachments.UploadStore
 	MaxFileBytes int64 // zero: 20 MiB per decoded attachment
 
-	// Resolver reads owned references when InlineAttachments is enabled. Leave it nil to
-	// have one built over Store with MaxFileBytes and default cache limits;
-	// set it to share one resolver — and its byte cache — across agents.
+	// Resolver supplies metadata and, when InlineAttachments is enabled, bytes.
+	// When nil, metadata is read from Store directly; inline mode builds a resolver
+	// over Store with MaxFileBytes and default cache limits. Set it to share one
+	// resolver and its byte cache across agents.
 	Resolver *attachments.Resolver
 
 	// MaxInlineBytes limits the encoded attachment content one model request
@@ -98,7 +99,7 @@ func (h *AttachmentMiddleware) WrapModelCall(next agents.ModelCallFunc) agents.M
 			if h.cfg.InlineAttachments {
 				prepared, err = PrepareAttachments(ctx, namespace, request, h.resolver, h.cfg.MaxInlineBytes)
 			} else {
-				prepared, err = prepareAttachmentReferences(request)
+				prepared, err = h.prepareAttachmentReferences(ctx, namespace, request)
 			}
 			if err != nil {
 				return nil, err
@@ -536,15 +537,37 @@ func mapInputContent(in []responses.InputMessageUnion, fn func(responses.InputCo
 	return out, nil
 }
 
-// prepareAttachmentReferences never reads storage. References remain usable by
+// prepareAttachmentReferences reads metadata only. References remain usable by
 // tools, while the original structured media stays intact for durable history.
-func prepareAttachmentReferences(in *responses.Request) (*responses.Request, error) {
+func (h *AttachmentMiddleware) prepareAttachmentReferences(ctx context.Context, namespace string, in *responses.Request) (*responses.Request, error) {
 	changed := false
+	// Repeated references share one authorized metadata lookup within this call.
+	texts := make(map[string]string)
 	referenceText := func(id string) (string, error) {
-		if _, err := attachments.RefFromFileID(id); err != nil {
+		if text, ok := texts[id]; ok {
+			return text, nil
+		}
+		ref, err := attachments.RefFromFileID(id)
+		if err != nil {
 			return "", err
 		}
-		return "[Attached file reference: " + id + ". File contents are not included; pass this reference to a tool that accepts attachments.]", nil
+		var descriptor attachments.Descriptor
+		switch {
+		case h.resolver != nil:
+			descriptor, err = h.resolver.Lookup(ctx, namespace, ref)
+		case h.cfg.Store != nil:
+			descriptor, err = h.cfg.Store.Lookup(ctx, namespace, ref)
+		}
+		if err != nil {
+			return "", fmt.Errorf("attachment metadata %q: %w", id, err)
+		}
+		metadata := ""
+		if h.resolver != nil || h.cfg.Store != nil {
+			metadata = fmt.Sprintf(" Filename: %q; MIME type: %q; size: %d bytes.", descriptor.Filename, descriptor.MediaType, descriptor.Size)
+		}
+		text := "[Attached file reference: " + id + "." + metadata + " File contents are not included; pass this reference to a tool that accepts attachments.]"
+		texts[id] = text
+		return text, nil
 	}
 	mapped, err := mapInputContent(in.Input.OfInputMessageList, func(content responses.InputContent) (responses.InputContent, error) {
 		out := slices.Clone(content)

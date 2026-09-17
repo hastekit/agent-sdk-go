@@ -117,6 +117,21 @@ func (b *Blob) WriteTo(w io.Writer) (int64, error) {
 	return int64(n), err
 }
 
+// Lookup returns authorized metadata without opening the file or populating the
+// byte cache. File size limits apply only when Resolve loads the contents.
+func (r *Resolver) Lookup(ctx context.Context, namespace string, ref Ref) (Descriptor, error) {
+	if err := ctx.Err(); err != nil {
+		return Descriptor{}, err
+	}
+	if r == nil || r.store == nil {
+		return Descriptor{}, ErrUnresolved
+	}
+	if ref.ID == "" {
+		return Descriptor{}, fmt.Errorf("%w: empty reference", ErrInvalid)
+	}
+	return r.store.Lookup(ctx, namespace, ref)
+}
+
 // Resolve returns the bytes behind ref as namespace may read them.
 func (r *Resolver) Resolve(ctx context.Context, namespace string, ref Ref) (*Blob, error) {
 	if err := ctx.Err(); err != nil {

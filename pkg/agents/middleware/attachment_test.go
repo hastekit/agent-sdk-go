@@ -723,14 +723,16 @@ func TestPreparationCountsRepeatedInlineContent(t *testing.T) {
 	require.ErrorIs(t, err, attachments.ErrTooLarge)
 }
 
-func TestAttachmentMiddlewareDefaultsToTextReferencesWithoutStorageReads(t *testing.T) {
-	// An embedded nil store panics on any storage access, including through the
-	// supplied resolver. Even nonexistent or oversized files need no reads.
-	unreadable := struct{ attachments.UploadStore }{}
+func TestAttachmentMiddlewareDefaultsToTextReferencesWithoutOpeningFiles(t *testing.T) {
+	// Open and Put remain nil and panic if called. A huge descriptor must not
+	// trigger byte limits or populate the resolver's byte cache.
+	metadata := &metadataOnlyStore{}
 	for _, cfg := range []agentmiddleware.AttachmentMiddlewareConfig{
 		{},
-		{Store: unreadable, Resolver: attachments.NewResolver(unreadable, attachments.Config{}), MaxFileBytes: 1, MaxInlineBytes: 1},
+		{Store: metadata, MaxFileBytes: 1, MaxInlineBytes: 1},
+		{Resolver: attachments.NewResolver(metadata, attachments.Config{MaxFileBytes: 1}), MaxInlineBytes: 1},
 	} {
+		metadata.lookups = 0
 		id := "attachment://missing-file"
 		content := responses.InputContent{
 			{OfInputText: &responses.InputTextContent{Text: "inspect with a tool"}},
@@ -748,6 +750,15 @@ func TestAttachmentMiddlewareDefaultsToTextReferencesWithoutStorageReads(t *test
 		sent, err := prepared(t, agentmiddleware.NewAttachmentMiddleware(cfg), t.Context(), request)
 		require.NoError(t, err)
 		require.NotSame(t, request, sent)
+		if cfg.Store != nil || cfg.Resolver != nil {
+			require.Equal(t, 1, metadata.lookups)
+			require.Equal(t, "test", metadata.namespace)
+			text := sent.Input.OfInputMessageList[0].OfEasyInput.Content.OfInputMessageList[1].OfInputText.Text
+			require.Contains(t, text, `Filename: "large.pdf"`)
+			require.Contains(t, text, `MIME type: "application/pdf"`)
+			require.Contains(t, text, "size: 1073741824 bytes")
+		}
+
 		for _, parts := range []responses.InputContent{
 			sent.Input.OfInputMessageList[0].OfEasyInput.Content.OfInputMessageList,
 			sent.Input.OfInputMessageList[1].OfInputMessage.Content,
@@ -791,5 +802,29 @@ func TestAttachmentMiddlewareTextReferencesRejectInvalidSources(t *testing.T) {
 		req := &responses.Request{Input: responses.InputUnion{OfInputMessageList: []responses.InputMessageUnion{{OfInputMessage: &responses.InputMessage{Content: responses.InputContent{part}}}}}}
 		_, err := prepared(t, agentmiddleware.NewAttachmentMiddleware(agentmiddleware.AttachmentMiddlewareConfig{}), t.Context(), req)
 		require.ErrorIs(t, err, attachments.ErrInvalid)
+	}
+}
+
+// Only Lookup is implemented: reading file contents would panic.
+type metadataOnlyStore struct {
+	attachments.UploadStore
+	lookups   int
+	namespace string
+	err       error
+}
+
+func (s *metadataOnlyStore) Lookup(_ context.Context, namespace string, ref attachments.Ref) (attachments.Descriptor, error) {
+	s.lookups++
+	s.namespace = namespace
+	return attachments.Descriptor{Filename: "large.pdf", MediaType: "application/pdf", Size: 1 << 30}, s.err
+}
+
+func TestAttachmentMiddlewareMetadataLookupFailure(t *testing.T) {
+	for _, failure := range []error{attachments.ErrDenied, attachments.ErrNotFound, context.Canceled} {
+		store := &metadataOnlyStore{err: failure}
+		req := referencedRequest(attachments.Ref{ID: "image"}, attachments.Ref{ID: "file"})
+		sent, err := prepared(t, agentmiddleware.NewAttachmentMiddleware(agentmiddleware.AttachmentMiddlewareConfig{Store: store}), t.Context(), req)
+		require.ErrorIs(t, err, failure)
+		require.Nil(t, sent)
 	}
 }

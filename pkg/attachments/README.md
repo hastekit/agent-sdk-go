@@ -178,7 +178,11 @@ It wraps the model call inside the
 step that makes it — the agent loop locally, the LLM activity under Temporal,
 the LLM run step under Restate — after the request has crossed into that step,
 and hands the provider a transient copy carrying plain-text attachment references.
-The default does not read storage or load file contents into the model context.
+The default looks up authorized metadata (filename, MIME type, and size in bytes)
+and includes it beside each reference. It never opens files or loads their contents
+into the model context. Repeated references share a metadata lookup within each
+model call. Lookup failures abort the call; with no store or resolver configured,
+only the reference is sent.
 The model can pass the exact `attachment://...` reference to a tool that accepts
 attachments. Set `InlineAttachments: true` to resolve references into inline bytes
 for a model that needs the contents, such as a vision or image-editing model.
