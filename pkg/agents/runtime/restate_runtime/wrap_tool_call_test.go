@@ -38,7 +38,7 @@ func TestRestateRunBodiesReturnReferences(t *testing.T) {
 	middleware := agentmiddleware.NewAttachmentMiddleware(agentmiddleware.AttachmentMiddlewareConfig{Store: store})
 	tool := &transformMediaTool{BaseTool: &agents.BaseTool{ToolUnion: responses.ToolUnion{OfFunction: &responses.FunctionTool{Name: "media"}}}}
 	ctx := t.Context()
-	call := &agents.ToolCall{FunctionCallMessage: &responses.FunctionCallMessage{CallID: "call", Name: "media"}, Namespace: "tenant"}
+	call := &agents.ToolCall{ThreadID: "thread", SessionID: "thread", FunctionCallMessage: &responses.FunctionCallMessage{CallID: "call", Name: "media"}, Namespace: "tenant"}
 	// A call with no namespace has nowhere to store, and the run ends rather
 	// than letting the bytes through.
 	homeless := *call
@@ -54,7 +54,7 @@ func TestRestateRunBodiesReturnReferences(t *testing.T) {
 		require.NotContains(t, string(bytes), "base64")
 		ref, err := attachments.RefFromFileID(*result.Output.OfList[0].OfInputImage.FileID)
 		require.NoError(t, err)
-		_, err = store.Lookup(ctx, "tenant", ref)
+		_, err = store.Lookup(ctx, "tenant", "thread", ref)
 		require.NoError(t, err)
 		_, err = execute(ctx, &homeless)
 		require.Error(t, err)
@@ -76,7 +76,7 @@ func TestBackgroundRegistryBindsMiddlewareBeforeSerialization(t *testing.T) {
 		proxy := newRestateTool(nil, name, tool, nil).(*RestateBackgroundTool)
 		bound, err := service.backgroundTool(&BackgroundTaskInput{AgentName: "owner", ToolKey: proxy.key})
 		require.NoError(t, err)
-		result, err := bound.AwaitTask(t.Context(), agents.BackgroundTaskRef{AgentName: "owner", ToolName: "media", Namespace: "tenant"}, nil)
+		result, err := bound.AwaitTask(t.Context(), agents.BackgroundTaskRef{ThreadID: "thread", SessionID: "thread", AgentName: "owner", ToolName: "media", Namespace: "tenant"}, nil)
 		require.NoError(t, err)
 		wire, err := json.Marshal(result)
 		require.NoError(t, err)

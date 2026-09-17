@@ -169,6 +169,7 @@ func TestNamespaceResolverAttachmentUploadDownloadAndRun(t *testing.T) {
 	require.NoError(t, err)
 	_, err = file.Write([]byte("private note"))
 	require.NoError(t, err)
+	require.NoError(t, form.WriteField("session_id", "alice"))
 	require.NoError(t, form.Close())
 	req := httptest.NewRequest("POST", "/attachments/", &body)
 	req.Header.Set("Content-Type", form.FormDataContentType())

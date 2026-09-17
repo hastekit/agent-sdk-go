@@ -2,12 +2,12 @@ package attachments
 
 import (
 	"context"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/google/uuid"
 	"io"
 	"mime"
 	"net/http"
@@ -17,20 +17,21 @@ import (
 )
 
 // FileStore implements private, immutable attachment storage on local disk,
-// partitioned by namespace. All callers in a namespace may read its files;
+// partitioned by namespace and session. The host authorizes both scopes;
 // applications with per-file ACLs can wrap Lookup/Open or provide another Store
 // implementation. Files are confined using os.Root, including symlinks.
 type FileStore struct {
-	root     *os.Root
-	identity string
-	maxBytes int64
+	root      *os.Root
+	identity  string
+	maxBytes  int64
+	mountPath string
 }
 
 // UploadStore separates ingestion from read-only LLM resolution. S3 or other
 // implementations can implement both Store and UploadStore.
 type UploadStore interface {
 	Store
-	Put(ctx context.Context, namespace string, upload Upload) (Ref, error)
+	Put(ctx context.Context, namespace, sessionID string, upload Upload) (Ref, error)
 }
 
 type Upload struct {
@@ -40,17 +41,25 @@ type Upload struct {
 }
 
 type FileStoreConfig struct {
+	// MountPath is the absolute container path at which SessionDir is mounted.
+	// Empty omits filesystem access information from model-facing metadata.
+	MountPath    string
 	MaxFileBytes int64 // zero: 20 MiB
 }
 
 type fileMetadata struct {
-	Filename  string `json:"filename"`
-	MediaType string `json:"media_type"`
-	Size      int64  `json:"size"`
-	SHA256    string `json:"sha256"`
+	SessionID      string `json:"session_id"`
+	StoredFilename string `json:"stored_filename"`
+	Filename       string `json:"filename"`
+	MediaType      string `json:"media_type"`
+	Size           int64  `json:"size"`
+	SHA256         string `json:"sha256"`
 }
 
 func NewFileStore(dir string, cfg FileStoreConfig) (*FileStore, error) {
+	if err := validateMountPath(cfg.MountPath); err != nil {
+		return nil, err
+	}
 	abs, err := filepath.Abs(dir)
 	if err != nil {
 		return nil, err
@@ -65,29 +74,41 @@ func NewFileStore(dir string, cfg FileStoreConfig) (*FileStore, error) {
 	if cfg.MaxFileBytes <= 0 {
 		cfg.MaxFileBytes = 20 << 20
 	}
-	return &FileStore{root: root, identity: abs, maxBytes: cfg.MaxFileBytes}, nil
+	return &FileStore{root: root, identity: abs, maxBytes: cfg.MaxFileBytes, mountPath: cfg.MountPath}, nil
 }
 func (s *FileStore) Close() error { return s.root.Close() }
 
-// dir is the directory a namespace's files live in. An empty namespace names
-// nothing, so it is denied rather than given a directory of its own.
-func (s *FileStore) dir(ctx context.Context, namespace string) (string, error) {
+// dir validates filesystem components before constructing a session-scoped path.
+func (s *FileStore) dir(ctx context.Context, namespace, sessionID string) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	if namespace == "" {
+	if !validScopePart(namespace) || namespace == ".metadata" || !validScopePart(sessionID) {
 		return "", ErrDenied
 	}
-	sum := sha256.Sum256([]byte(namespace))
-	return hex.EncodeToString(sum[:]), nil
-}
-func validID(id string) bool {
-	b, err := hex.DecodeString(id)
-	return err == nil && len(b) == 16 && id == strings.ToLower(id)
+	return namespace + "/" + sessionID, nil
 }
 
-func (s *FileStore) Put(ctx context.Context, namespace string, in Upload) (Ref, error) {
-	ns, err := s.dir(ctx, namespace)
+func validScopePart(value string) bool {
+	return value != "" && value != "." && value != ".." && !strings.ContainsAny(value, "/\\\x00")
+}
+
+// SessionDir returns the directory to bind-mount into a sandbox, containing only
+// this session's files under their sanitized, collision-safe names. Mount it read-only to preserve
+// immutable attachments. Namespace/thread authorization belongs to the caller.
+func (s *FileStore) SessionDir(ctx context.Context, namespace, sessionID string) (string, error) {
+	dir, err := s.dir(ctx, namespace, sessionID)
+	if err != nil {
+		return "", err
+	}
+	if err := s.root.MkdirAll(dir, 0700); err != nil {
+		return "", err
+	}
+	return filepath.Join(s.identity, dir), nil
+}
+
+func (s *FileStore) Put(ctx context.Context, namespace, sessionID string, in Upload) (Ref, error) {
+	ns, err := s.dir(ctx, namespace, sessionID)
 	if err != nil {
 		return Ref{}, err
 	}
@@ -95,24 +116,34 @@ func (s *FileStore) Put(ctx context.Context, namespace string, in Upload) (Ref, 
 	if err != nil || in.Content == nil {
 		return Ref{}, fmt.Errorf("%w: upload requires content and media type", ErrInvalid)
 	}
-	if err := s.root.Mkdir(ns, 0700); err != nil && !errors.Is(err, os.ErrExist) {
+	if err := s.root.MkdirAll(ns, 0700); err != nil && !errors.Is(err, os.ErrExist) {
 		return Ref{}, err
 	}
-	var idBytes [16]byte
-	if _, err := rand.Read(idBytes[:]); err != nil {
+	base := attachmentFilename(in.Filename)
+	uuidID := uuid.NewString()
+	indexKey := ".metadata/" + namespace + "/" + uuidID + ".json"
+	if err := s.root.MkdirAll(".metadata/"+namespace, 0700); err != nil {
 		return Ref{}, err
 	}
-	id := hex.EncodeToString(idBytes[:])
-	key := ns + "/" + id
-	f, err := s.root.OpenFile(key+".blob", os.O_CREATE|os.O_EXCL|os.O_RDWR, 0600)
+	// Stage bytes outside the mounted session directory. Publishing a hard link
+	// later claims the final filename atomically without replacing existing files.
+	tempKey := ".metadata/" + namespace + "/" + uuidID + ".upload"
+	f, err := s.root.OpenFile(tempKey, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0600)
 	if err != nil {
 		return Ref{}, err
 	}
-	committed := false
+	var id, key string
+	committed, published, indexed := false, false, false
 	defer func() {
+		_ = f.Close()
+		_ = s.root.Remove(tempKey)
 		if !committed {
-			_ = s.root.Remove(key + ".blob")
-			_ = s.root.Remove(key + ".json")
+			if published {
+				_ = s.root.Remove(key)
+			}
+			if indexed {
+				_ = s.root.Remove(indexKey)
+			}
 		}
 	}()
 	hash := sha256.New()
@@ -145,38 +176,71 @@ func (s *FileStore) Put(ctx context.Context, namespace string, in Upload) (Ref, 
 	if err := ctx.Err(); err != nil {
 		return Ref{}, err
 	}
-	meta := fileMetadata{filepath.Base(in.Filename), media, n, hex.EncodeToString(hash.Sum(nil))}
-	// Metadata is committed last. An interrupted write is never returned as a
-	// usable reference. IDs are random and clients only receive them on success.
-	mf, err := s.root.OpenFile(key+".json", os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	// Link fails with ErrExist when another upload (or an orphaned file) already
+	// owns the name. Readers only ever see the fully written and validated bytes.
+	for number := 1; ; number++ {
+		if err := ctx.Err(); err != nil {
+			return Ref{}, err
+		}
+		id = numberedFilename(base, number)
+		key = ns + "/" + id
+		if err := s.root.Link(tempKey, key); errors.Is(err, os.ErrExist) {
+			continue
+		} else if err != nil {
+			return Ref{}, err
+		}
+		published = true
+		break
+	}
+	meta := fileMetadata{SessionID: sessionID, StoredFilename: id, Filename: originalFilename(in.Filename), MediaType: media, Size: n, SHA256: hex.EncodeToString(hash.Sum(nil))}
+	index, err := s.root.OpenFile(indexKey, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if err != nil {
 		return Ref{}, err
 	}
-	writeErr := json.NewEncoder(mf).Encode(meta)
-	if writeErr == nil {
-		writeErr = mf.Sync()
+	indexed = true
+	indexErr := json.NewEncoder(index).Encode(meta)
+	if indexErr == nil {
+		indexErr = index.Sync()
 	}
-	closeErr = mf.Close()
-	if writeErr != nil {
-		return Ref{}, writeErr
+	closeIndexErr := index.Close()
+	if indexErr != nil {
+		return Ref{}, indexErr
 	}
-	if closeErr != nil {
-		return Ref{}, closeErr
+	if closeIndexErr != nil {
+		return Ref{}, closeIndexErr
 	}
 	committed = true
-	return Ref{ID: id, Version: meta.SHA256}, nil
+	return Ref{ID: uuidID, SessionID: sessionID, Version: meta.SHA256}, nil
 }
 
-func (s *FileStore) Lookup(ctx context.Context, namespace string, ref Ref) (Descriptor, error) {
-	ns, err := s.dir(ctx, namespace)
+func (s *FileStore) Lookup(ctx context.Context, namespace, sessionID string, ref Ref) (Descriptor, error) {
+	if _, err := s.dir(ctx, namespace, sessionID); err != nil {
+		return Descriptor{}, err
+	}
+	if ref.SessionID != "" && ref.SessionID != sessionID {
+		return Descriptor{}, ErrDenied
+	}
+	d, err := s.LookupReference(ctx, namespace, ref)
 	if err != nil {
 		return Descriptor{}, err
+	}
+	if d.Namespace != s.identity+":"+namespace+"/"+sessionID {
+		return Descriptor{}, ErrDenied
+	}
+	return d, nil
+}
+
+func (s *FileStore) LookupReference(ctx context.Context, namespace string, ref Ref) (Descriptor, error) {
+	if err := ctx.Err(); err != nil {
+		return Descriptor{}, err
+	}
+	if !validScopePart(namespace) || namespace == ".metadata" {
+		return Descriptor{}, ErrDenied
 	}
 	if !validID(ref.ID) {
 		return Descriptor{}, ErrInvalid
 	}
-	key := ns + "/" + ref.ID
-	f, err := s.root.Open(key + ".json")
+	f, err := s.root.Open(".metadata/" + namespace + "/" + ref.ID + ".json")
 	if errors.Is(err, os.ErrNotExist) {
 		return Descriptor{}, ErrNotFound
 	}
@@ -188,10 +252,17 @@ func (s *FileStore) Lookup(ctx context.Context, namespace string, ref Ref) (Desc
 	if err := json.NewDecoder(io.LimitReader(f, 64<<10)).Decode(&m); err != nil {
 		return Descriptor{}, fmt.Errorf("%w: unreadable file metadata", ErrInvalid)
 	}
+	if !validScopePart(m.SessionID) || !validFilename(m.StoredFilename) {
+		return Descriptor{}, ErrInvalid
+	}
+	if ref.SessionID != "" && ref.SessionID != m.SessionID {
+		return Descriptor{}, ErrDenied
+	}
 	if ref.Version != "" && ref.Version != m.SHA256 {
 		return Descriptor{}, ErrNotFound
 	}
-	return Descriptor{Namespace: s.identity + ":" + ns, Key: key, Version: m.SHA256, MediaType: m.MediaType, Size: m.Size, Filename: m.Filename, SHA256: m.SHA256}, nil
+	ns := namespace + "/" + m.SessionID
+	return Descriptor{Namespace: s.identity + ":" + ns, Key: ns + "/" + m.StoredFilename, Version: m.SHA256, MediaType: m.MediaType, Size: m.Size, Filename: m.Filename, StoredFilename: m.StoredFilename, MountPath: mountedPath(s.mountPath, m.StoredFilename), SHA256: m.SHA256}, nil
 }
 
 // Open serves the object a Lookup described. The descriptor names the
@@ -202,10 +273,11 @@ func (s *FileStore) Open(ctx context.Context, d Descriptor) (io.ReadCloser, erro
 	}
 	ns, ok := strings.CutPrefix(d.Namespace, s.identity+":")
 	prefix := ns + "/"
-	if !ok || ns == "" || !strings.HasPrefix(d.Key, prefix) || !validID(strings.TrimPrefix(d.Key, prefix)) {
+	parts := strings.Split(ns, "/")
+	if !ok || len(parts) != 2 || !validScopePart(parts[0]) || parts[0] == ".metadata" || !validScopePart(parts[1]) || !strings.HasPrefix(d.Key, prefix) || !validFilename(strings.TrimPrefix(d.Key, prefix)) {
 		return nil, ErrDenied
 	}
-	f, err := s.root.Open(d.Key + ".blob")
+	f, err := s.root.Open(d.Key)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, ErrNotFound
 	}

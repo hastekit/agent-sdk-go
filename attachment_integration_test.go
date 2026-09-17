@@ -44,7 +44,7 @@ func attachmentFixture(t *testing.T) (context.Context, *countingAttachmentStore,
 	ctx := context.Background()
 	png, err := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a6xkAAAAASUVORK5CYII=")
 	require.NoError(t, err)
-	ref, err := fs.Put(ctx, "tenant", attachments.Upload{Filename: "photo.png", MediaType: "image/png", Content: bytes.NewReader(png)})
+	ref, err := fs.Put(ctx, "tenant", "thread", attachments.Upload{Filename: "photo.png", MediaType: "image/png", Content: bytes.NewReader(png)})
 	require.NoError(t, err)
 	return ctx, &countingAttachmentStore{Store: fs}, ref
 }
@@ -68,7 +68,7 @@ func completedStream(w http.ResponseWriter) {
 
 func runTurn(t *testing.T, agent *Agent, ctx context.Context, thread string, msg history.Message) error {
 	t.Helper()
-	handle, err := agent.Execute(ctx, &agents.AgentInput{Namespace: "tenant", ThreadID: thread, Message: msg})
+	handle, err := agent.Execute(ctx, &agents.AgentInput{Namespace: "tenant", ThreadID: thread, SessionID: thread, Message: msg})
 	require.NoError(t, err)
 	_, err = handle.Result()
 	return err

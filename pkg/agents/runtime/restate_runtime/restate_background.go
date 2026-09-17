@@ -153,6 +153,7 @@ func (s *BackgroundTaskService) Await(ctx restate.Context, in *BackgroundTaskInp
 		AgentName:         in.AgentName,
 		Namespace:         in.Ref.Namespace,
 		ThreadID:          in.Ref.ThreadID,
+		SessionID:         in.Ref.SessionID,
 		Message:           decision.Message,
 		RunContext:        in.Ref.RunContext,
 		Skills:            in.Ref.Skills,

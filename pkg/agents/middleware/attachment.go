@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"mime"
@@ -22,22 +23,26 @@ import (
 // where inline tool output and generated model images are put, and Resolver is where
 // an attachment reference is read back from when the model needs the bytes.
 type AttachmentMiddlewareConfig struct {
-	// InlineAttachments resolves SDK attachment references into bytes for model calls.
-	// By default, references and available metadata are sent as plain text, so
-	// the model can pass them to tools without loading file contents into context.
+	// InlineAttachments resolves file attachments into bytes for model calls.
+	// By default, files are sent as plain-text references with available metadata.
+	// Image resolution is controlled independently by InlineImages.
 	InlineAttachments bool
+
+	// InlineImages resolves image attachments and generated-image history into bytes.
+	// Nil defaults to true; set to a pointer to false to send image references as text.
+	InlineImages *bool
 
 	Store        attachments.UploadStore
 	MaxFileBytes int64 // zero: 20 MiB per decoded attachment
 
-	// Resolver supplies metadata and, when InlineAttachments is enabled, bytes.
+	// Resolver supplies metadata and, when either inline option is enabled, bytes.
 	// When nil, metadata is read from Store directly; inline mode builds a resolver
 	// over Store with MaxFileBytes and default cache limits. Set it to share one
 	// resolver and its byte cache across agents.
 	Resolver *attachments.Resolver
 
 	// MaxInlineBytes limits the encoded attachment content one model request
-	// may carry when InlineAttachments is enabled, counting every occurrence
+	// may carry when either inline option is enabled, counting every occurrence
 	// (zero: 32 MiB).
 	MaxInlineBytes int64
 }
@@ -54,8 +59,9 @@ type AttachmentMiddlewareConfig struct {
 // ran the tool, before that step returns.
 //
 // On the way out to the model, WrapModelCall replaces SDK attachment references
-// with plain text on a transient copy, including user input, tool results, and
-// generated-image history. InlineAttachments opts into resolving them to bytes.
+// on a transient copy: images resolve to bytes by default, while files become
+// plain-text references. InlineImages and InlineAttachments control these independently.
+// This includes user input, tool results, and generated-image history.
 // On the way back, generated images are uploaded and replaced with references.
 // Preparation and uploads run inside the model call's own step; failures abort
 // the call before crossing the model durability boundary.
@@ -66,8 +72,9 @@ type AttachmentMiddlewareConfig struct {
 // removing it turns it off. Nothing about the LLM client changes either way.
 type AttachmentMiddleware struct {
 	agents.NoopMiddleware
-	cfg      AttachmentMiddlewareConfig
-	resolver *attachments.Resolver
+	cfg          AttachmentMiddlewareConfig
+	resolver     *attachments.Resolver
+	inlineImages bool
 }
 
 var _ agents.Middleware = (*AttachmentMiddleware)(nil)
@@ -76,30 +83,28 @@ func NewAttachmentMiddleware(cfg AttachmentMiddlewareConfig) *AttachmentMiddlewa
 	if cfg.MaxFileBytes <= 0 {
 		cfg.MaxFileBytes = 20 << 20
 	}
+	inlineImages := cfg.InlineImages == nil || *cfg.InlineImages
 	resolver := cfg.Resolver
-	if cfg.InlineAttachments && resolver == nil && cfg.Store != nil {
+	if (cfg.InlineAttachments || inlineImages) && resolver == nil && cfg.Store != nil {
 		resolver = attachments.NewResolver(cfg.Store, attachments.Config{MaxFileBytes: cfg.MaxFileBytes})
 	}
-	return &AttachmentMiddleware{cfg: cfg, resolver: resolver}
+	return &AttachmentMiddleware{cfg: cfg, resolver: resolver, inlineImages: inlineImages}
 }
 
 // WrapModelCall prepares attachment references on a transient request copy and
 // externalizes generated images before returning to the agent loop. Byte
-// resolution requires InlineAttachments and a Resolver or Store. Uploading raw
+// resolution requires a Resolver or Store. Uploading raw
 // generated images always requires Store.
 func (h *AttachmentMiddleware) WrapModelCall(next agents.ModelCallFunc) agents.ModelCallFunc {
 	return func(ctx context.Context, call *agents.ModelCall, request *responses.Request) (*responses.Response, error) {
-		namespace := ""
+		namespace, sessionID := "", ""
 		if call != nil {
-			namespace = call.Namespace
+			namespace, sessionID = call.Namespace, call.SessionID
 		}
 		if request != nil {
-			var prepared *responses.Request
-			var err error
-			if h.cfg.InlineAttachments {
-				prepared, err = PrepareAttachments(ctx, namespace, request, h.resolver, h.cfg.MaxInlineBytes)
-			} else {
-				prepared, err = h.prepareAttachmentReferences(ctx, namespace, request)
+			prepared, err := h.prepareAttachmentReferences(ctx, namespace, sessionID, request)
+			if err == nil && (h.inlineImages || h.cfg.InlineAttachments) {
+				prepared, err = PrepareAttachments(ctx, namespace, sessionID, prepared, h.resolver, h.cfg.MaxInlineBytes)
 			}
 			if err != nil {
 				return nil, err
@@ -109,6 +114,7 @@ func (h *AttachmentMiddleware) WrapModelCall(next agents.ModelCallFunc) agents.M
 		images := &generatedImageExternalizer{
 			middleware: h,
 			namespace:  namespace,
+			sessionID:  sessionID,
 			uploaded:   make(map[[32]byte]attachments.Ref),
 		}
 		ctx = agents.WithModelStreamTransform(ctx, images.transformChunk)
@@ -126,6 +132,7 @@ func (h *AttachmentMiddleware) WrapModelCall(next agents.ModelCallFunc) agents.M
 type generatedImageExternalizer struct {
 	middleware *AttachmentMiddleware
 	namespace  string
+	sessionID  string
 	uploaded   map[[32]byte]attachments.Ref
 }
 
@@ -234,7 +241,7 @@ func (x *generatedImageExternalizer) externalizeResult(ctx context.Context, resu
 	key := sha256.Sum256(data)
 	ref, ok := x.uploaded[key]
 	if !ok {
-		ref, err = x.middleware.cfg.Store.Put(ctx, x.namespace, attachments.Upload{
+		ref, err = x.middleware.cfg.Store.Put(ctx, x.namespace, x.sessionID, attachments.Upload{
 			Filename:  generatedImageFilename(mediaType),
 			MediaType: mediaType,
 			Content:   bytes.NewReader(data),
@@ -322,18 +329,18 @@ func (h *AttachmentMiddleware) WrapToolCall(next agents.ToolCallFunc) agents.Too
 		if err != nil {
 			return nil, err
 		}
-		namespace := ""
+		namespace, sessionID := "", ""
 		if call != nil {
-			namespace = call.Namespace
+			namespace, sessionID = call.Namespace, call.SessionID
 		}
-		return h.externalize(ctx, namespace, result)
+		return h.externalize(ctx, namespace, sessionID, result)
 	}
 }
 
 // externalize uploads every inline image/file part of a result into namespace
 // and replaces it with a reference, on a copy. A result with nothing inline is
 // returned as it was.
-func (h *AttachmentMiddleware) externalize(ctx context.Context, namespace string, result *agents.ToolCallResponse) (*agents.ToolCallResponse, error) {
+func (h *AttachmentMiddleware) externalize(ctx context.Context, namespace, sessionID string, result *agents.ToolCallResponse) (*agents.ToolCallResponse, error) {
 	if result == nil || result.FunctionCallOutputMessage == nil || len(result.Output.OfList) == 0 {
 		return result, nil
 	}
@@ -426,7 +433,7 @@ func (h *AttachmentMiddleware) externalize(ctx context.Context, namespace string
 		key := uploadKey{sha256.Sum256(data), filename, media}
 		ref, ok := uploaded[key]
 		if !ok {
-			ref, err = h.cfg.Store.Put(ctx, namespace, attachments.Upload{Filename: filename, MediaType: media, Content: bytes.NewReader(data)})
+			ref, err = h.cfg.Store.Put(ctx, namespace, sessionID, attachments.Upload{Filename: filename, MediaType: media, Content: bytes.NewReader(data)})
 			if err != nil {
 				return nil, fmt.Errorf("upload tool output part %d: %w", i, err)
 			}
@@ -539,7 +546,7 @@ func mapInputContent(in []responses.InputMessageUnion, fn func(responses.InputCo
 
 // prepareAttachmentReferences reads metadata only. References remain usable by
 // tools, while the original structured media stays intact for durable history.
-func (h *AttachmentMiddleware) prepareAttachmentReferences(ctx context.Context, namespace string, in *responses.Request) (*responses.Request, error) {
+func (h *AttachmentMiddleware) prepareAttachmentReferences(ctx context.Context, namespace, sessionID string, in *responses.Request) (*responses.Request, error) {
 	changed := false
 	// Repeated references share one authorized metadata lookup within this call.
 	texts := make(map[string]string)
@@ -554,18 +561,29 @@ func (h *AttachmentMiddleware) prepareAttachmentReferences(ctx context.Context, 
 		var descriptor attachments.Descriptor
 		switch {
 		case h.resolver != nil:
-			descriptor, err = h.resolver.Lookup(ctx, namespace, ref)
+			descriptor, err = h.resolver.Lookup(ctx, namespace, sessionID, ref)
 		case h.cfg.Store != nil:
-			descriptor, err = h.cfg.Store.Lookup(ctx, namespace, ref)
+			descriptor, err = h.cfg.Store.Lookup(ctx, namespace, sessionID, ref)
 		}
 		if err != nil {
 			return "", fmt.Errorf("attachment metadata %q: %w", id, err)
 		}
-		metadata := ""
+		// Show the canonical tool reference and only an explicitly configured mount path.
+		info := struct {
+			FileID           string `json:"file_id"`
+			MountPath        string `json:"mount_path,omitempty"`
+			OriginalFilename string `json:"original_filename,omitempty"`
+			MediaType        string `json:"mime_type,omitempty"`
+			Size             *int64 `json:"size_bytes,omitempty"`
+		}{FileID: attachments.FileID(ref), MountPath: descriptor.MountPath}
 		if h.resolver != nil || h.cfg.Store != nil {
-			metadata = fmt.Sprintf(" Filename: %q; MIME type: %q; size: %d bytes.", descriptor.Filename, descriptor.MediaType, descriptor.Size)
+			info.OriginalFilename, info.MediaType, info.Size = descriptor.Filename, descriptor.MediaType, &descriptor.Size
 		}
-		text := "[Attached file reference: " + id + "." + metadata + " File contents are not included; pass this reference to a tool that accepts attachments.]"
+		metadata, err := json.Marshal(info)
+		if err != nil {
+			return "", err
+		}
+		text := "Attached file: " + string(metadata) + "\nPass file_id to attachment tools. Use mount_path for shell commands only when provided, quoting the path. File contents are not included."
 		texts[id] = text
 		return text, nil
 	}
@@ -577,11 +595,17 @@ func (h *AttachmentMiddleware) prepareAttachmentReferences(ctx context.Context, 
 				if img.ImageURL != nil || c.OfInputFile != nil || c.OfInputText != nil || c.OfOutputText != nil {
 					return nil, attachments.ErrInvalid
 				}
+				if h.inlineImages {
+					continue
+				}
 				id = *img.FileID
 			}
 			if file := c.OfInputFile; file != nil && file.FileID != nil && attachments.IsFileID(*file.FileID) {
 				if file.FileURL != nil || file.FileData != nil || c.OfInputImage != nil || c.OfInputText != nil || c.OfOutputText != nil {
 					return nil, attachments.ErrInvalid
+				}
+				if h.cfg.InlineAttachments {
+					continue
 				}
 				id = *file.FileID
 			}
@@ -601,7 +625,7 @@ func (h *AttachmentMiddleware) prepareAttachmentReferences(ctx context.Context, 
 		return nil, err
 	}
 	for i, m := range mapped {
-		if image := m.OfImageGenerationCall; image != nil && attachments.IsFileID(image.Result) {
+		if image := m.OfImageGenerationCall; !h.inlineImages && image != nil && attachments.IsFileID(image.Result) {
 			text, err := referenceText(image.Result)
 			if err != nil {
 				return nil, err
@@ -626,7 +650,7 @@ func (h *AttachmentMiddleware) prepareAttachmentReferences(ctx context.Context, 
 // carrying no references is returned as it was, so the common case costs no
 // copy. maxInlineBytes limits encoded attachment content across all occurrences
 // in the request (zero: 32 MiB). Provider-specific request limits still apply.
-func PrepareAttachments(ctx context.Context, namespace string, in *responses.Request, resolver *attachments.Resolver, maxInlineBytes int64) (*responses.Request, error) {
+func PrepareAttachments(ctx context.Context, namespace, sessionID string, in *responses.Request, resolver *attachments.Resolver, maxInlineBytes int64) (*responses.Request, error) {
 	if maxInlineBytes <= 0 {
 		maxInlineBytes = 32 << 20
 	}
@@ -643,7 +667,7 @@ func PrepareAttachments(ctx context.Context, namespace string, in *responses.Req
 		if v, ok := resolvedFiles[ref]; ok {
 			return v, nil
 		}
-		blob, err := resolver.Resolve(ctx, namespace, ref)
+		blob, err := resolver.Resolve(ctx, namespace, sessionID, ref)
 		if err != nil {
 			return resolved{}, err
 		}
@@ -741,7 +765,8 @@ func PrepareAttachments(ctx context.Context, namespace string, in *responses.Req
 	}
 	// Generated images are provider output items that can appear again as
 	// input history. Persisted history carries the owned reference in Result;
-	// providers receive the original bare base64 value on this transient copy.
+	// providers receive ordinary image content on this transient copy, without
+	// replaying a provider-owned generation-call ID (which may not be stored).
 	for i := range mapped {
 		image := mapped[i].OfImageGenerationCall
 		if image == nil || image.Result == "" {
@@ -765,13 +790,17 @@ func PrepareAttachments(ctx context.Context, namespace string, in *responses.Req
 		if !strings.HasPrefix(v.desc.MediaType, "image/") {
 			return nil, fmt.Errorf("%w: expected image media type, got %s", attachments.ErrInvalid, v.desc.MediaType)
 		}
-		total += int64(len(v.base64))
+		total += int64(len(v.uri))
 		if total > maxInlineBytes {
 			return nil, attachments.ErrTooLarge
 		}
-		copy := *image
-		copy.Result = v.base64
-		mapped[i].OfImageGenerationCall = &copy
+		mapped[i] = responses.InputMessageUnion{OfEasyInput: &responses.EasyMessage{
+			Role: constants.RoleUser,
+			Content: responses.EasyInputContentUnion{OfInputMessageList: responses.InputContent{
+				{OfInputText: &responses.InputTextContent{Text: "Previously generated image. Attachment file_id: " + attachments.FileID(ref)}},
+				{OfInputImage: &responses.InputImageContent{ImageURL: &v.uri, Detail: "auto"}},
+			}},
+		}}
 		changed = true
 	}
 	if !changed {

@@ -72,6 +72,7 @@ func TestChatAttachmentHTTPToProviderAndHistory(t *testing.T) {
 		require.NoError(t, err)
 		_, err = part.Write(tc.data)
 		require.NoError(t, err)
+		require.NoError(t, form.WriteField("session_id", "attachments"))
 		require.NoError(t, form.Close())
 		res, err := http.Post(server.URL+"/attachments/", form.FormDataContentType(), &body)
 		require.NoError(t, err)

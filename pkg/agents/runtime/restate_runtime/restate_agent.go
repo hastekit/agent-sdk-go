@@ -47,6 +47,7 @@ func (w *AgentWorkflow) Run(restateCtx restate.WorkflowContext, input *WorkflowI
 		Namespace:     input.Namespace,
 		RunID:         input.RunID,
 		ThreadID:      input.ThreadID,
+		SessionID:     input.SessionID,
 		PreviousRunID: input.PreviousRunID,
 		Message:       input.Message,
 		RunContext:    input.RunContext,

@@ -21,7 +21,7 @@ type testStore struct {
 	fail    atomic.Bool
 }
 
-func (s *testStore) Lookup(_ context.Context, namespace string, ref Ref) (Descriptor, error) {
+func (s *testStore) Lookup(_ context.Context, namespace, sessionID string, ref Ref) (Descriptor, error) {
 	s.lookups.Add(1)
 	if s.denied.Load() {
 		return Descriptor{}, ErrDenied
@@ -47,7 +47,7 @@ func TestCacheAuthorizationTenantVersionAndEviction(t *testing.T) {
 	r := NewResolver(s, Config{CacheBytes: 3})
 	ctx := context.Background()
 	for range 2 {
-		b, err := r.Resolve(ctx, "a", Ref{ID: "one"})
+		b, err := r.Resolve(ctx, "a", "thread", Ref{ID: "one"})
 		require.NoError(t, err)
 		var dst bytes.Buffer
 		_, err = b.WriteTo(&dst)
@@ -57,15 +57,15 @@ func TestCacheAuthorizationTenantVersionAndEviction(t *testing.T) {
 	require.EqualValues(t, 1, s.loads.Load())
 	require.EqualValues(t, 2, s.lookups.Load())
 	s.denied.Store(true)
-	_, err := r.Resolve(ctx, "a", Ref{ID: "one"})
+	_, err := r.Resolve(ctx, "a", "thread", Ref{ID: "one"})
 	require.ErrorIs(t, err, ErrDenied)
 	require.EqualValues(t, 1, s.loads.Load())
 	s.denied.Store(false)
-	_, err = r.Resolve(ctx, "b", Ref{ID: "one"})
+	_, err = r.Resolve(ctx, "b", "thread", Ref{ID: "one"})
 	require.NoError(t, err)
-	_, err = r.Resolve(ctx, "a", Ref{ID: "one"})
+	_, err = r.Resolve(ctx, "a", "thread", Ref{ID: "one"})
 	require.NoError(t, err) // evicted by tenant b
-	_, err = r.Resolve(ctx, "a", Ref{ID: "one", Version: "v2"})
+	_, err = r.Resolve(ctx, "a", "thread", Ref{ID: "one", Version: "v2"})
 	require.NoError(t, err)
 	require.EqualValues(t, 4, s.loads.Load())
 }
@@ -75,13 +75,13 @@ func TestConcurrentMissesShareLoadAndCancelledWaiterDoesNotPoisonIt(t *testing.T
 	ctx := context.Background()
 	first, cancel := context.WithCancel(ctx)
 	firstDone := make(chan error, 1)
-	go func() { _, err := r.Resolve(first, "a", Ref{ID: "x"}); firstDone <- err }()
+	go func() { _, err := r.Resolve(first, "a", "thread", Ref{ID: "x"}); firstDone <- err }()
 	require.Eventually(t, func() bool { return s.loads.Load() == 1 }, time.Second, time.Millisecond)
 	var wg sync.WaitGroup
 	errs := make(chan error, 10)
 	for range 10 {
 		wg.Add(1)
-		go func() { defer wg.Done(); _, err := r.Resolve(ctx, "a", Ref{ID: "x"}); errs <- err }()
+		go func() { defer wg.Done(); _, err := r.Resolve(ctx, "a", "thread", Ref{ID: "x"}); errs <- err }()
 	}
 	require.Eventually(t, func() bool { return s.lookups.Load() == 11 }, time.Second, time.Millisecond)
 	cancel()
@@ -99,13 +99,13 @@ func TestFailedLoadsAreNotCachedAndLimitsApplyBeforeOpen(t *testing.T) {
 	s.fail.Store(true)
 	r := NewResolver(s, Config{})
 	ctx := context.Background()
-	_, err := r.Resolve(ctx, "a", Ref{ID: "x"})
+	_, err := r.Resolve(ctx, "a", "thread", Ref{ID: "x"})
 	require.Error(t, err)
 	s.fail.Store(false)
-	_, err = r.Resolve(ctx, "a", Ref{ID: "x"})
+	_, err = r.Resolve(ctx, "a", "thread", Ref{ID: "x"})
 	require.NoError(t, err)
 	require.EqualValues(t, 2, s.loads.Load())
-	_, err = NewResolver(s, Config{MaxFileBytes: 2}).Resolve(ctx, "a", Ref{ID: "x"})
+	_, err = NewResolver(s, Config{MaxFileBytes: 2}).Resolve(ctx, "a", "thread", Ref{ID: "x"})
 	require.ErrorIs(t, err, ErrTooLarge)
 	require.EqualValues(t, 2, s.loads.Load())
 }

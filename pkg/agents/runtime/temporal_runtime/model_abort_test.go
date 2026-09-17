@@ -31,7 +31,7 @@ func (p *failingProvider) NewStreamingResponses(context.Context, *responses.Requ
 }
 
 func missingAttachmentRequest() *responses.Request {
-	fileID := "attachment://0123456789abcdef0123456789abcdef"
+	fileID := "attachment://cc2c80ea-e99f-41bb-9b5f-de9f6441b9de"
 	return &responses.Request{Input: responses.InputUnion{OfInputMessageList: responses.InputMessageList{{
 		OfInputMessage: &responses.InputMessage{Content: responses.InputContent{{OfInputImage: &responses.InputImageContent{FileID: utils.Ptr(fileID)}}}},
 	}}}}
@@ -52,7 +52,7 @@ func TestTemporalLLMActivityDoesNotRetryAMiddlewaresOwnError(t *testing.T) {
 	var suite testsuite.WorkflowTestSuite
 	env := suite.NewTestActivityEnvironment()
 	env.RegisterActivity(worker.NewStreamingResponsesActivity)
-	_, err = env.ExecuteActivity(worker.NewStreamingResponsesActivity, missingAttachmentRequest(), &agents.ModelCall{Namespace: "test"})
+	_, err = env.ExecuteActivity(worker.NewStreamingResponsesActivity, missingAttachmentRequest(), &agents.ModelCall{ThreadID: "thread", SessionID: "thread", Namespace: "test"})
 
 	var appErr *temporal.ApplicationError
 	require.True(t, errors.As(err, &appErr))

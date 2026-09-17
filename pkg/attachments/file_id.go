@@ -7,7 +7,7 @@ import "strings"
 // Attachment middleware resolves it before dispatch; ordinary provider IDs
 // are left untouched. The storage backend remains an implementation detail.
 func FileID(ref Ref) string {
-	return "attachment://" + strings.TrimPrefix(URL(ref), "/attachments/")
+	return "attachment://" + ref.ID
 }
 
 // IsFileID recognizes the reserved attachment scheme, including malformed
@@ -21,5 +21,9 @@ func RefFromFileID(id string) (Ref, error) {
 	if !strings.HasPrefix(id, "attachment://") {
 		return Ref{}, ErrInvalid
 	}
-	return RefFromURL("/attachments/" + strings.TrimPrefix(id, "attachment://"))
+	value := strings.TrimPrefix(id, "attachment://")
+	if !validScopePart(value) || strings.ContainsAny(value, "?#%") {
+		return Ref{}, ErrInvalid
+	}
+	return Ref{ID: value}, nil
 }

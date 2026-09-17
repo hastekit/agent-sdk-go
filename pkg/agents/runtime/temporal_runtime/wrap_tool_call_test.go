@@ -89,7 +89,7 @@ func TestTemporalResultsAreTransformedBeforeActivitySerialization(t *testing.T) 
 			require.True(t, ok, name)
 			env.RegisterActivity(fn)
 			// Every activity stores under the namespace the call carries.
-			call := &agents.ToolCall{FunctionCallMessage: &responses.FunctionCallMessage{ID: "id", CallID: "call", Name: "media"}, Namespace: "test"}
+			call := &agents.ToolCall{ThreadID: "thread", SessionID: "thread", FunctionCallMessage: &responses.FunctionCallMessage{ID: "id", CallID: "call", Name: "media"}, Namespace: "test"}
 			var args []interface{}
 			switch name {
 			case "A_media_ExecuteToolActivity":
@@ -97,7 +97,7 @@ func TestTemporalResultsAreTransformedBeforeActivitySerialization(t *testing.T) 
 			case "A_media_server_ExecuteMCPToolActivity":
 				args = []interface{}{tool.BaseTool, call, map[string]any{}}
 			case "A_media_AwaitTaskActivity":
-				args = []interface{}{agents.BackgroundTaskRef{CallID: "call", ToolName: "media", Namespace: "test"}}
+				args = []interface{}{agents.BackgroundTaskRef{ThreadID: "thread", SessionID: "thread", CallID: "call", ToolName: "media", Namespace: "test"}}
 			}
 			value, err := env.ExecuteActivity(fn, args...)
 			require.NoError(t, err)

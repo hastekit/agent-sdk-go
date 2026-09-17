@@ -6,7 +6,7 @@ import { uploadAttachment, type UploadedAttachment } from "./api";
 
 // Only uploaded references enter messages; File objects live in the browser
 // until upload completes. An input slot is remounted when its thread changes.
-export function AttachmentInput({ onSteer, attachmentsEnabled, ...props }: any) {
+export function AttachmentInput({ onSteer, attachmentsEnabled, sessionId, ...props }: any) {
   const [files, setFiles] = useState<UploadedAttachment[]>([]);
   const [uploading, setUploading] = useState(false);
   const [sending, setSending] = useState(false);
@@ -43,7 +43,7 @@ export function AttachmentInput({ onSteer, attachmentsEnabled, ...props }: any) 
           setUploading(true); setError("");
           try {
             for (const file of selected) {
-              const uploaded = await uploadAttachment(file);
+              const uploaded = await uploadAttachment(file, sessionId);
               setFiles(old => [...old, uploaded]);
             }
           } catch (e) { setError(String(e)); }

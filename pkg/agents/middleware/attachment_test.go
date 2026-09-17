@@ -43,7 +43,7 @@ func attachmentResult() *agents.ToolCallResponse {
 func externalized(middleware agents.ToolCallMiddleware, ctx context.Context, result *agents.ToolCallResponse) (*agents.ToolCallResponse, error) {
 	return middleware.WrapToolCall(func(context.Context, *agents.BaseTool, *agents.ToolCall) (*agents.ToolCallResponse, error) {
 		return result, nil
-	})(ctx, nil, &agents.ToolCall{Namespace: "test"})
+	})(ctx, nil, &agents.ToolCall{ThreadID: "forked-thread", SessionID: "thread", Namespace: "test"})
 }
 
 // prepared runs request through the middleware's wrap and reports what the wrap
@@ -54,7 +54,7 @@ func prepared(t *testing.T, middleware agents.ModelCallMiddleware, ctx context.C
 	_, err := middleware.WrapModelCall(func(_ context.Context, _ *agents.ModelCall, req *responses.Request) (*responses.Response, error) {
 		got = req
 		return &responses.Response{}, nil
-	})(ctx, &agents.ModelCall{Namespace: "test"}, request)
+	})(ctx, &agents.ModelCall{ThreadID: "forked-thread", SessionID: "thread", Namespace: "test"}, request)
 	return got, err
 }
 
@@ -63,7 +63,7 @@ func prepared(t *testing.T, middleware agents.ModelCallMiddleware, ctx context.C
 func processedModelResponse(middleware agents.ModelCallMiddleware, ctx context.Context, response *responses.Response) (*responses.Response, error) {
 	return middleware.WrapModelCall(func(context.Context, *agents.ModelCall, *responses.Request) (*responses.Response, error) {
 		return response, nil
-	})(ctx, &agents.ModelCall{Namespace: "test"}, &responses.Request{})
+	})(ctx, &agents.ModelCall{ThreadID: "forked-thread", SessionID: "thread", Namespace: "test"}, &responses.Request{})
 }
 
 type generatedStreamProvider struct {
@@ -83,7 +83,7 @@ func (p *generatedStreamProvider) NewStreamingResponses(context.Context, *respon
 }
 
 func executeGeneratedStream(ctx context.Context, middlewares []agents.ModelCallMiddleware, provider llm.Provider, published *[]*responses.ResponseChunk) (*responses.Response, error) {
-	return agents.ExecuteModelCallWithMiddleware(ctx, middlewares, &agents.ModelCall{Namespace: "test"}, &responses.Request{}, func(ctx context.Context, call *agents.ModelCall, request *responses.Request) (*responses.Response, error) {
+	return agents.ExecuteModelCallWithMiddleware(ctx, middlewares, &agents.ModelCall{ThreadID: "forked-thread", SessionID: "thread", Namespace: "test"}, &responses.Request{}, func(ctx context.Context, call *agents.ModelCall, request *responses.Request) (*responses.Response, error) {
 		return agents.InvokeModelCall(ctx, provider, call, request, func(chunk *responses.ResponseChunk) {
 			*published = append(*published, chunk)
 		})
@@ -112,9 +112,9 @@ func pngBytes(t *testing.T) []byte {
 // references, which is the shape everything durable holds them in.
 func uploadedRefs(t *testing.T, store attachments.UploadStore) (image, file attachments.Ref) {
 	t.Helper()
-	image, err := store.Put(t.Context(), "test", attachments.Upload{Filename: "pixel.png", MediaType: "image/png", Content: bytes.NewReader(pngBytes(t))})
+	image, err := store.Put(t.Context(), "test", "thread", attachments.Upload{Filename: "pixel.png", MediaType: "image/png", Content: bytes.NewReader(pngBytes(t))})
 	require.NoError(t, err)
-	file, err = store.Put(t.Context(), "test", attachments.Upload{Filename: "report.pdf", MediaType: "application/pdf", Content: strings.NewReader("%PDF-1.7\nexample\n%%EOF")})
+	file, err = store.Put(t.Context(), "test", "thread", attachments.Upload{Filename: "report.pdf", MediaType: "application/pdf", Content: strings.NewReader("%PDF-1.7\nexample\n%%EOF")})
 	require.NoError(t, err)
 	return image, file
 }
@@ -159,7 +159,7 @@ func TestAttachmentMiddlewareRoundTrip(t *testing.T) {
 	after, err := json.Marshal(original)
 	require.NoError(t, err)
 	require.Equal(t, string(before), string(after), "middleware must not mutate the tool's result")
-	hydrated, err := agentmiddleware.PrepareAttachments(t.Context(), "test", &responses.Request{Input: responses.InputUnion{OfInputMessageList: msgs}}, attachments.NewResolver(store, attachments.Config{}), 0)
+	hydrated, err := agentmiddleware.PrepareAttachments(t.Context(), "test", "thread", &responses.Request{Input: responses.InputUnion{OfInputMessageList: msgs}}, attachments.NewResolver(store, attachments.Config{}), 0)
 	require.NoError(t, err)
 	content := hydrated.Input.OfInputMessageList[0].OfFunctionCallOutput.Output.OfList
 	require.Equal(t, *original.Output.OfList[1].OfInputImage.ImageURL, *content[1].OfInputImage.ImageURL)
@@ -171,7 +171,7 @@ func TestAttachmentMiddlewareRoundTrip(t *testing.T) {
 
 type rejectedUpload struct{ attachments.UploadStore }
 
-func (rejectedUpload) Put(context.Context, string, attachments.Upload) (attachments.Ref, error) {
+func (rejectedUpload) Put(context.Context, string, string, attachments.Upload) (attachments.Ref, error) {
 	return attachments.Ref{}, attachments.ErrDenied
 }
 
@@ -194,7 +194,7 @@ func TestAttachmentMiddlewareFailsClosed(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			result := attachmentResult()
 			result.Output.OfList[1].OfInputImage.ImageURL = &tc.source
-			call := &agents.ToolCall{FunctionCallMessage: &responses.FunctionCallMessage{ID: "id", CallID: "call", Name: "media"}, Namespace: "test"}
+			call := &agents.ToolCall{ThreadID: "forked-thread", SessionID: "thread", FunctionCallMessage: &responses.FunctionCallMessage{ID: "id", CallID: "call", Name: "media"}, Namespace: "test"}
 			out, err := agents.ExecuteToolWithMiddleware(t.Context(), []agents.ToolCallMiddleware{agentmiddleware.NewAttachmentMiddleware(tc.cfg)}, agents.ExecutableToolCall{ToolCall: call}, func(context.Context, *agents.ToolCall) (*agents.ToolCallResponse, error) { return result, nil })
 			require.Nil(t, out)
 			require.True(t, agents.IsToolCallAborted(err))
@@ -217,9 +217,9 @@ type countingUploads struct {
 	puts int
 }
 
-func (s *countingUploads) Put(ctx context.Context, namespace string, in attachments.Upload) (attachments.Ref, error) {
+func (s *countingUploads) Put(ctx context.Context, namespace, threadID string, in attachments.Upload) (attachments.Ref, error) {
 	s.puts++
-	return s.UploadStore.Put(ctx, namespace, in)
+	return s.UploadStore.Put(ctx, namespace, threadID, in)
 }
 
 // The same bytes under the same name within one result are stored once.
@@ -239,7 +239,7 @@ func TestAttachmentMiddlewareDeduplicatesWithinResult(t *testing.T) {
 // duplicate payloads share a reference, and already-owned results stay owned.
 func TestAttachmentMiddlewareExternalizesGeneratedImages(t *testing.T) {
 	base := middlewareStore(t)
-	owned, err := base.Put(t.Context(), "test", attachments.Upload{
+	owned, err := base.Put(t.Context(), "test", "thread", attachments.Upload{
 		Filename: "owned.png", MediaType: "image/png", Content: bytes.NewReader(pngBytes(t)),
 	})
 	require.NoError(t, err)
@@ -282,7 +282,7 @@ func TestAttachmentMiddlewareExternalizesGeneratedImages(t *testing.T) {
 
 	ref, err := attachments.RefFromFileID(got.Output[0].OfImageGenerationCall.Result)
 	require.NoError(t, err)
-	blob, err := attachments.NewResolver(base, attachments.Config{}).Resolve(t.Context(), "test", ref)
+	blob, err := attachments.NewResolver(base, attachments.Config{}).Resolve(t.Context(), "test", "thread", ref)
 	require.NoError(t, err)
 	var stored bytes.Buffer
 	_, err = blob.WriteTo(&stored)
@@ -429,7 +429,7 @@ type cancellationUpload struct {
 	started chan struct{}
 }
 
-func (s *cancellationUpload) Put(ctx context.Context, _ string, _ attachments.Upload) (attachments.Ref, error) {
+func (s *cancellationUpload) Put(ctx context.Context, _ string, _ string, _ attachments.Upload) (attachments.Ref, error) {
 	close(s.started)
 	<-ctx.Done()
 	return attachments.Ref{}, ctx.Err()
@@ -491,7 +491,7 @@ func TestAttachmentMiddlewareStreamUploadCancellationCancelsAndDrainsProvider(t 
 
 func TestAttachmentMiddlewareHydratesGeneratedImageHistory(t *testing.T) {
 	store := middlewareStore(t)
-	ref, err := store.Put(t.Context(), "test", attachments.Upload{
+	ref, err := store.Put(t.Context(), "test", "thread", attachments.Upload{
 		Filename: "generated.png", MediaType: "image/png", Content: bytes.NewReader(pngBytes(t)),
 	})
 	require.NoError(t, err)
@@ -503,19 +503,35 @@ func TestAttachmentMiddlewareHydratesGeneratedImageHistory(t *testing.T) {
 		},
 	}}}}
 
-	sent, err := prepared(t, agentmiddleware.NewAttachmentMiddleware(agentmiddleware.AttachmentMiddlewareConfig{InlineAttachments: true, Store: store}), t.Context(), request)
+	sent, err := prepared(t, agentmiddleware.NewAttachmentMiddleware(agentmiddleware.AttachmentMiddlewareConfig{Store: store}), t.Context(), request)
 	require.NoError(t, err)
 	require.NotSame(t, request, sent)
-	require.Equal(t, base64.StdEncoding.EncodeToString(pngBytes(t)), sent.Input.OfInputMessageList[0].OfImageGenerationCall.Result)
-	require.Equal(t, "ig_history", sent.Input.OfInputMessageList[0].OfImageGenerationCall.ID)
-	require.Equal(t, "opaque", sent.Input.OfInputMessageList[0].OfImageGenerationCall.Background)
-	require.Equal(t, "medium", sent.Input.OfInputMessageList[0].OfImageGenerationCall.Quality)
-	require.Equal(t, "1024x1024", sent.Input.OfInputMessageList[0].OfImageGenerationCall.Size)
+	require.Nil(t, sent.Input.OfInputMessageList[0].OfImageGenerationCall)
+	message := sent.Input.OfInputMessageList[0].OfEasyInput
+	require.NotNil(t, message)
+	require.Equal(t, constants.RoleUser, message.Role)
+	require.Contains(t, message.Content.OfInputMessageList[0].OfInputText.Text, fileID)
+	require.Equal(t, "data:image/png;base64,"+base64.StdEncoding.EncodeToString(pngBytes(t)), *message.Content.OfInputMessageList[1].OfInputImage.ImageURL)
+	for _, wire := range []any{sent, anthropic.NativeRequestToRequest(sent), gemini.ResponsesInputToGeminiResponsesInput(sent), bedrock.NativeRequestToConverseRequest(sent)} {
+		encoded, err := json.Marshal(wire)
+		require.NoError(t, err)
+		require.NotContains(t, string(encoded), "ig_history")
+		require.NotContains(t, string(encoded), "image_generation_call")
+		require.Contains(t, string(encoded), base64.StdEncoding.EncodeToString(pngBytes(t)))
+	}
+	encoded, err := json.Marshal(sent.Input.OfInputMessageList[0])
+	require.NoError(t, err)
+	var wire map[string]any
+	require.NoError(t, json.Unmarshal(encoded, &wire))
+	require.NotContains(t, wire, "id")
+	require.Equal(t, "ig_history", request.Input.OfInputMessageList[0].OfImageGenerationCall.ID, "history keeps its original ID")
+	require.Equal(t, "opaque", request.Input.OfInputMessageList[0].OfImageGenerationCall.Background)
+
 	require.Equal(t, fileID, request.Input.OfInputMessageList[0].OfImageGenerationCall.Result, "history stays referenced")
 
-	_, err = agentmiddleware.PrepareAttachments(t.Context(), "another-namespace", request, attachments.NewResolver(store, attachments.Config{}), 0)
+	_, err = agentmiddleware.PrepareAttachments(t.Context(), "another-namespace", "thread", request, attachments.NewResolver(store, attachments.Config{}), 0)
 	require.ErrorIs(t, err, attachments.ErrNotFound)
-	_, err = agentmiddleware.PrepareAttachments(t.Context(), "test", request, attachments.NewResolver(store, attachments.Config{}), 8)
+	_, err = agentmiddleware.PrepareAttachments(t.Context(), "test", "thread", request, attachments.NewResolver(store, attachments.Config{}), 8)
 	require.ErrorIs(t, err, attachments.ErrTooLarge)
 }
 
@@ -542,7 +558,7 @@ func TestAttachmentMiddlewareGeneratedImageFailuresStayInsideModelCall(t *testin
 			}}}
 			out, err := agents.ExecuteModelCallWithMiddleware(t.Context(), []agents.ModelCallMiddleware{
 				agentmiddleware.NewAttachmentMiddleware(tc.cfg),
-			}, &agents.ModelCall{Namespace: "test"}, &responses.Request{}, func(context.Context, *agents.ModelCall, *responses.Request) (*responses.Response, error) {
+			}, &agents.ModelCall{ThreadID: "forked-thread", SessionID: "thread", Namespace: "test"}, &responses.Request{}, func(context.Context, *agents.ModelCall, *responses.Request) (*responses.Response, error) {
 				return response, nil
 			})
 			require.Nil(t, out)
@@ -650,9 +666,9 @@ func TestPrepareCopiesEveryContentContainerAndTranslatesInline(t *testing.T) {
 	defer store.Close()
 	png, err := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a6xkAAAAASUVORK5CYII=")
 	require.NoError(t, err)
-	ref, err := store.Put(ctx, "a", attachments.Upload{Filename: "a.png", MediaType: "image/png", Content: bytes.NewReader(png)})
+	ref, err := store.Put(ctx, "a", "thread", attachments.Upload{Filename: "a.png", MediaType: "image/png", Content: bytes.NewReader(png)})
 	require.NoError(t, err)
-	pdf, err := store.Put(ctx, "a", attachments.Upload{Filename: "a.pdf", MediaType: "application/pdf", Content: bytes.NewBufferString("%PDF-1.7\n")})
+	pdf, err := store.Put(ctx, "a", "thread", attachments.Upload{Filename: "a.pdf", MediaType: "application/pdf", Content: bytes.NewBufferString("%PDF-1.7\n")})
 	require.NoError(t, err)
 	content := responses.InputContent{{OfInputImage: &responses.InputImageContent{FileID: utils.Ptr(attachments.FileID(ref))}}, {OfInputFile: &responses.InputFileContent{FileID: utils.Ptr(attachments.FileID(pdf))}}}
 	in := &responses.Request{Input: responses.InputUnion{OfInputMessageList: []responses.InputMessageUnion{
@@ -663,7 +679,7 @@ func TestPrepareCopiesEveryContentContainerAndTranslatesInline(t *testing.T) {
 	original, err := sonic.Marshal(in)
 	require.NoError(t, err)
 	resolver := attachments.NewResolver(store, attachments.Config{})
-	out, err := agentmiddleware.PrepareAttachments(ctx, "a", in, resolver, 0)
+	out, err := agentmiddleware.PrepareAttachments(ctx, "a", "thread", in, resolver, 0)
 	require.NoError(t, err)
 	after, err := sonic.Marshal(in)
 	require.NoError(t, err)
@@ -689,13 +705,13 @@ func TestPrepareCopiesEveryContentContainerAndTranslatesInline(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, string(b), `"bytes"`)
 	require.NotContains(t, string(b), "attachment://")
-	_, err = agentmiddleware.PrepareAttachments(ctx, "a", in, nil, 0)
+	_, err = agentmiddleware.PrepareAttachments(ctx, "a", "thread", in, nil, 0)
 	require.ErrorIs(t, err, attachments.ErrUnresolved)
-	_, err = agentmiddleware.PrepareAttachments(ctx, "a", in, resolver, 10)
+	_, err = agentmiddleware.PrepareAttachments(ctx, "a", "thread", in, resolver, 10)
 	require.ErrorIs(t, err, attachments.ErrTooLarge)
 	url := "https://example.invalid/image"
 	content[0].OfInputImage.ImageURL = &url
-	_, err = agentmiddleware.PrepareAttachments(ctx, "a", in, resolver, 0)
+	_, err = agentmiddleware.PrepareAttachments(ctx, "a", "thread", in, resolver, 0)
 	require.ErrorIs(t, err, attachments.ErrInvalid)
 }
 
@@ -707,7 +723,7 @@ func TestPreparationPreservesEmptyAndTextOnlyInputs(t *testing.T) {
 	} {
 		before, err := sonic.Marshal(in)
 		require.NoError(t, err)
-		out, err := agentmiddleware.PrepareAttachments(context.Background(), "a", in, nil, 0)
+		out, err := agentmiddleware.PrepareAttachments(context.Background(), "a", "thread", in, nil, 0)
 		require.NoError(t, err)
 		after, err := sonic.Marshal(out)
 		require.NoError(t, err)
@@ -719,18 +735,18 @@ func TestPreparationCountsRepeatedInlineContent(t *testing.T) {
 	data := "data:image/png;base64,AAAA"
 	content := responses.InputContent{{OfInputImage: &responses.InputImageContent{ImageURL: &data}}, {OfInputImage: &responses.InputImageContent{ImageURL: &data}}}
 	in := &responses.Request{Input: responses.InputUnion{OfInputMessageList: []responses.InputMessageUnion{{OfInputMessage: &responses.InputMessage{Content: content}}}}}
-	_, err := agentmiddleware.PrepareAttachments(context.Background(), "a", in, nil, int64(len(data)))
+	_, err := agentmiddleware.PrepareAttachments(context.Background(), "a", "thread", in, nil, int64(len(data)))
 	require.ErrorIs(t, err, attachments.ErrTooLarge)
 }
 
-func TestAttachmentMiddlewareDefaultsToTextReferencesWithoutOpeningFiles(t *testing.T) {
+func TestAttachmentMiddlewareImagesDisabledUsesTextReferencesWithoutOpeningFiles(t *testing.T) {
 	// Open and Put remain nil and panic if called. A huge descriptor must not
 	// trigger byte limits or populate the resolver's byte cache.
 	metadata := &metadataOnlyStore{}
 	for _, cfg := range []agentmiddleware.AttachmentMiddlewareConfig{
-		{},
-		{Store: metadata, MaxFileBytes: 1, MaxInlineBytes: 1},
-		{Resolver: attachments.NewResolver(metadata, attachments.Config{MaxFileBytes: 1}), MaxInlineBytes: 1},
+		{InlineImages: utils.Ptr(false)},
+		{InlineImages: utils.Ptr(false), Store: metadata, MaxFileBytes: 1, MaxInlineBytes: 1},
+		{InlineImages: utils.Ptr(false), Resolver: attachments.NewResolver(metadata, attachments.Config{MaxFileBytes: 1}), MaxInlineBytes: 1},
 	} {
 		metadata.lookups = 0
 		id := "attachment://missing-file"
@@ -753,10 +769,11 @@ func TestAttachmentMiddlewareDefaultsToTextReferencesWithoutOpeningFiles(t *test
 		if cfg.Store != nil || cfg.Resolver != nil {
 			require.Equal(t, 1, metadata.lookups)
 			require.Equal(t, "test", metadata.namespace)
+			require.Equal(t, "thread", metadata.threadID)
 			text := sent.Input.OfInputMessageList[0].OfEasyInput.Content.OfInputMessageList[1].OfInputText.Text
-			require.Contains(t, text, `Filename: "large.pdf"`)
-			require.Contains(t, text, `MIME type: "application/pdf"`)
-			require.Contains(t, text, "size: 1073741824 bytes")
+			require.Contains(t, text, `"original_filename":"large.pdf"`)
+			require.Contains(t, text, `"mime_type":"application/pdf"`)
+			require.Contains(t, text, `"size_bytes":1073741824`)
 		}
 
 		for _, parts := range []responses.InputContent{
@@ -768,15 +785,16 @@ func TestAttachmentMiddlewareDefaultsToTextReferencesWithoutOpeningFiles(t *test
 			for _, part := range parts[1:] {
 				require.Nil(t, part.OfInputImage)
 				require.Nil(t, part.OfInputFile)
-				require.Contains(t, part.OfInputText.Text, id)
+				require.Contains(t, part.OfInputText.Text, `"file_id":"attachment://missing-file"`)
 				require.Contains(t, part.OfInputText.Text, "File contents are not included")
+				require.Contains(t, part.OfInputText.Text, "Pass file_id to attachment tools")
 			}
 		}
 		require.Equal(t, "call", sent.Input.OfInputMessageList[2].OfFunctionCallOutput.CallID)
 		generated := sent.Input.OfInputMessageList[3]
 		require.Nil(t, generated.OfImageGenerationCall)
 		require.Equal(t, constants.RoleAssistant, generated.OfEasyInput.Role)
-		require.Contains(t, *generated.OfEasyInput.Content.OfString, id)
+		require.Contains(t, *generated.OfEasyInput.Content.OfString, `"file_id":"attachment://missing-file"`)
 		after, err := json.Marshal(request)
 		require.NoError(t, err)
 		require.JSONEq(t, string(before), string(after))
@@ -785,8 +803,11 @@ func TestAttachmentMiddlewareDefaultsToTextReferencesWithoutOpeningFiles(t *test
 		} {
 			encoded, err := json.Marshal(wire)
 			require.NoError(t, err)
-			require.Contains(t, string(encoded), id)
+			require.Contains(t, string(encoded), "missing-file")
 			require.NotContains(t, string(encoded), "base64")
+			require.Contains(t, string(encoded), "attachment://")
+			require.NotContains(t, string(encoded), "thread_id=")
+			require.NotContains(t, string(encoded), "version=")
 		}
 	}
 }
@@ -810,12 +831,14 @@ type metadataOnlyStore struct {
 	attachments.UploadStore
 	lookups   int
 	namespace string
+	threadID  string
 	err       error
 }
 
-func (s *metadataOnlyStore) Lookup(_ context.Context, namespace string, ref attachments.Ref) (attachments.Descriptor, error) {
+func (s *metadataOnlyStore) Lookup(_ context.Context, namespace, threadID string, ref attachments.Ref) (attachments.Descriptor, error) {
 	s.lookups++
 	s.namespace = namespace
+	s.threadID = threadID
 	return attachments.Descriptor{Filename: "large.pdf", MediaType: "application/pdf", Size: 1 << 30}, s.err
 }
 
@@ -827,4 +850,87 @@ func TestAttachmentMiddlewareMetadataLookupFailure(t *testing.T) {
 		require.ErrorIs(t, err, failure)
 		require.Nil(t, sent)
 	}
+}
+
+func TestAttachmentModelReferenceAndConfiguredMountPath(t *testing.T) {
+	for _, mount := range []string{"", "/mnt/user-data/uploads"} {
+		store, err := attachments.NewFileStore(t.TempDir(), attachments.FileStoreConfig{MountPath: mount})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = store.Close() })
+		image, file := uploadedRefs(t, store)
+		sent, err := prepared(t, agentmiddleware.NewAttachmentMiddleware(agentmiddleware.AttachmentMiddlewareConfig{Store: store, InlineImages: utils.Ptr(false)}), t.Context(), referencedRequest(image, file))
+		require.NoError(t, err)
+		text := sent.Input.OfInputMessageList[0].OfInputMessage.Content[1].OfInputText.Text
+		require.Contains(t, text, `"file_id":"`+attachments.FileID(image)+`"`)
+		require.NotContains(t, text, image.Version)
+		require.NotContains(t, text, "thread_id")
+		if mount == "" {
+			require.NotContains(t, text, `"mount_path":`)
+		} else {
+			require.Contains(t, text, `"mount_path":"/mnt/user-data/uploads/pixel.png"`)
+		}
+		ref, err := attachments.ParseRef(attachments.FileID(image))
+		require.NoError(t, err)
+		descriptor, err := store.Lookup(t.Context(), "test", "thread", ref)
+		require.NoError(t, err)
+		require.Equal(t, "pixel.png", descriptor.StoredFilename)
+	}
+}
+
+func TestAttachmentMiddlewareIndependentImageAndFileOptions(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		images *bool
+		files  bool
+	}{
+		{"defaults", nil, false},
+		{"images explicitly enabled", utils.Ptr(true), false},
+		{"both disabled", utils.Ptr(false), false},
+		{"files only", utils.Ptr(false), true},
+		{"both enabled", nil, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := middlewareStore(t)
+			image, file := uploadedRefs(t, store)
+			request := referencedRequest(image, file)
+			before, err := json.Marshal(request)
+			require.NoError(t, err)
+			sent, err := prepared(t, agentmiddleware.NewAttachmentMiddleware(agentmiddleware.AttachmentMiddlewareConfig{
+				Store: store, InlineImages: tc.images, InlineAttachments: tc.files,
+			}), t.Context(), request)
+			require.NoError(t, err)
+			img := sent.Input.OfInputMessageList[0].OfInputMessage.Content[1]
+			if tc.images == nil || *tc.images {
+				require.NotNil(t, img.OfInputImage)
+				require.Contains(t, *img.OfInputImage.ImageURL, "data:image/png;base64,")
+				require.Nil(t, img.OfInputImage.FileID)
+			} else {
+				require.NotNil(t, img.OfInputText)
+				require.Contains(t, img.OfInputText.Text, attachments.FileID(image))
+			}
+			doc := sent.Input.OfInputMessageList[1].OfFunctionCallOutput.Output.OfList[0]
+			if tc.files {
+				require.NotNil(t, doc.OfInputFile)
+				require.Contains(t, *doc.OfInputFile.FileData, "data:application/pdf;base64,")
+			} else {
+				require.NotNil(t, doc.OfInputText)
+				require.Contains(t, doc.OfInputText.Text, attachments.FileID(file))
+			}
+			after, err := json.Marshal(request)
+			require.NoError(t, err)
+			require.JSONEq(t, string(before), string(after))
+		})
+	}
+}
+
+func TestAttachmentMiddlewareDefaultDoesNotOpenLargeFiles(t *testing.T) {
+	store := &metadataOnlyStore{}
+	request := referencedRequest(attachments.Ref{ID: "unused"}, attachments.Ref{ID: "large"})
+	request.Input.OfInputMessageList = request.Input.OfInputMessageList[1:]
+	sent, err := prepared(t, agentmiddleware.NewAttachmentMiddleware(agentmiddleware.AttachmentMiddlewareConfig{
+		Store: store, MaxFileBytes: 1, MaxInlineBytes: 1,
+	}), t.Context(), request)
+	require.NoError(t, err)
+	require.Equal(t, 1, store.lookups)
+	require.Contains(t, sent.Input.OfInputMessageList[0].OfFunctionCallOutput.Output.OfList[0].OfInputText.Text, `"size_bytes":1073741824`)
 }

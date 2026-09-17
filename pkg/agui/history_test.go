@@ -262,7 +262,7 @@ func TestHistoryToMessagesReasoningEmptySkipped(t *testing.T) {
 }
 
 func TestHistoryToMessagesImageGeneration(t *testing.T) {
-	ref := "attachment://0123456789abcdef0123456789abcdef?version=sha256"
+	ref := "attachment://0123456789abcdef0123456789abcdef"
 	rows := []history.ConversationMessage{{
 		Messages: []history.Message{
 			messages.New("agent", []responses.InputMessageUnion{
@@ -276,7 +276,7 @@ func TestHistoryToMessagesImageGeneration(t *testing.T) {
 	out := HistoryToMessages(rows)
 	require.Len(t, out, 1)
 	assert.Equal(t, RoleAssistant, out[0].Role)
-	assert.Equal(t, "![generated image](/attachments/0123456789abcdef0123456789abcdef?version=sha256)", out[0].Content)
+	assert.Equal(t, "![generated image](/attachments/0123456789abcdef0123456789abcdef)", out[0].Content)
 	assert.NotContains(t, out[0].Content, "attachment://", "clients receive the authorized HTTP route")
 }
 

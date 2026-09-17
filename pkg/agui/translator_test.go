@@ -310,11 +310,11 @@ func TestImageGenerationEmitsOneMarkdownMessage(t *testing.T) {
 	// Replayed/internal completed chunks may already carry the durable
 	// reference; expose the same authorized route history uses.
 	refEvents := NewTranslator("thread-1", "run-2").Translate(imageDone(
-		"ig_2", "png", "attachment://0123456789abcdef0123456789abcdef?version=sha256",
+		"ig_2", "png", "attachment://0123456789abcdef0123456789abcdef",
 	))
 	require.Len(t, refEvents, 3)
 	assert.Equal(t,
-		"![generated image](/attachments/0123456789abcdef0123456789abcdef?version=sha256)",
+		"![generated image](/attachments/0123456789abcdef0123456789abcdef)",
 		refEvents[1].(*TextMessageContentEvent).Delta,
 	)
 }

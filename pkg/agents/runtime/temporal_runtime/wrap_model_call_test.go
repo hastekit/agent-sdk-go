@@ -62,9 +62,9 @@ type countingStore struct {
 	puts int
 }
 
-func (s *countingStore) Put(ctx context.Context, namespace string, upload attachments.Upload) (attachments.Ref, error) {
+func (s *countingStore) Put(ctx context.Context, namespace, threadID string, upload attachments.Upload) (attachments.Ref, error) {
 	s.puts++
-	return s.UploadStore.Put(ctx, namespace, upload)
+	return s.UploadStore.Put(ctx, namespace, threadID, upload)
 }
 
 type recordingBroker struct {
@@ -106,7 +106,7 @@ func referencedRequest(t *testing.T, store attachments.UploadStore) *responses.R
 	t.Helper()
 	png, err := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a6xkAAAAASUVORK5CYII=")
 	require.NoError(t, err)
-	ref, err := store.Put(t.Context(), "test", attachments.Upload{Filename: "pixel.png", MediaType: "image/png", Content: bytes.NewReader(png)})
+	ref, err := store.Put(t.Context(), "test", "thread", attachments.Upload{Filename: "pixel.png", MediaType: "image/png", Content: bytes.NewReader(png)})
 	require.NoError(t, err)
 	return &responses.Request{Input: responses.InputUnion{OfInputMessageList: []responses.InputMessageUnion{{
 		OfInputMessage: &responses.InputMessage{Role: constants.RoleUser, Content: responses.InputContent{
@@ -148,7 +148,7 @@ func TestTemporalLLMActivityResolvesReferencesInsideTheActivity(t *testing.T) {
 	require.Contains(t, string(journaled), "attachment://")
 	require.NotContains(t, string(journaled), "base64", "what the workflow schedules carries no bytes")
 
-	_, err = env.ExecuteActivity(fn, request, &agents.ModelCall{AgentName: "A", Namespace: "test"})
+	_, err = env.ExecuteActivity(fn, request, &agents.ModelCall{ThreadID: "thread", SessionID: "thread", AgentName: "A", Namespace: "test"})
 	require.NoError(t, err)
 
 	require.NotNil(t, provider.seen)
@@ -178,7 +178,7 @@ func TestTemporalLLMActivityReturnsOnlyGeneratedImageReference(t *testing.T) {
 	var suite testsuite.WorkflowTestSuite
 	env := suite.NewTestActivityEnvironment()
 	env.RegisterActivity(fn)
-	value, err := env.ExecuteActivity(fn, &responses.Request{}, &agents.ModelCall{AgentName: "image-agent", Namespace: "tenant"})
+	value, err := env.ExecuteActivity(fn, &responses.Request{}, &agents.ModelCall{ThreadID: "thread", SessionID: "thread", AgentName: "image-agent", Namespace: "tenant"})
 	require.NoError(t, err)
 	var got responses.Response
 	require.NoError(t, value.Get(&got))
@@ -204,7 +204,7 @@ func TestTemporalLLMActivityReturnsOnlyGeneratedImageReference(t *testing.T) {
 
 	ref, err := attachments.RefFromFileID(result)
 	require.NoError(t, err)
-	blob, err := attachments.NewResolver(base, attachments.Config{}).Resolve(t.Context(), "tenant", ref)
+	blob, err := attachments.NewResolver(base, attachments.Config{}).Resolve(t.Context(), "tenant", "thread", ref)
 	require.NoError(t, err)
 	var persisted bytes.Buffer
 	_, err = blob.WriteTo(&persisted)

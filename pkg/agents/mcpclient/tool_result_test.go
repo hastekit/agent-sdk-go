@@ -16,7 +16,7 @@ import (
 func TestMCPMediaResultReachesAttachmentMiddleware(t *testing.T) {
 	png, err := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a6xkAAAAASUVORK5CYII=")
 	require.NoError(t, err)
-	call := &agents.ToolCall{FunctionCallMessage: &responses.FunctionCallMessage{ID: "id", CallID: "call"}, Namespace: "test"}
+	call := &agents.ToolCall{ThreadID: "thread", SessionID: "thread", FunctionCallMessage: &responses.FunctionCallMessage{ID: "id", CallID: "call"}, Namespace: "test"}
 	result, err := mcpToolResult(call, []mcp.Content{
 		&mcp.TextContent{Text: "Image and document:"},
 		&mcp.ImageContent{MIMEType: "image/png", Data: png},

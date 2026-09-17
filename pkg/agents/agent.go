@@ -369,7 +369,8 @@ type AgentInput struct {
 	// and to poll IsStopped. Execute generates one if empty.
 	StreamID string `json:"stream_id,omitempty"`
 
-	// This is the conversation ID shared by the parent agent and the sub-agent.
+	// SessionID is the conversation ID shared by parent agents, sub-agents and
+	// forked threads. When provided, it also seeds new conversation history.
 	SessionID string `json:"shared_session_id"`
 
 	// owner is the agent the run entered at, set by ExecuteLocal.
@@ -424,7 +425,7 @@ func (e *Agent) ExecuteLocal(ctx context.Context, in *AgentInput) (*AgentOutput,
 		defer e.streamBroker.Close(context.Background(), in.StreamID)
 	}
 
-	run, err := history.NewRun(ctx, e.history, in.Namespace, in.ThreadID, in.PreviousRunID, history.WithRunContext(in.RunContext), history.WithRunID(in.RunID))
+	run, err := history.NewRun(ctx, e.history, in.Namespace, in.ThreadID, in.PreviousRunID, history.WithRunContext(in.RunContext), history.WithRunID(in.RunID), history.WithDefaultConversationID(in.SessionID))
 	if err != nil {
 		return &AgentOutput{Status: agentstate.RunStatusError, RunID: ""}, err
 	}

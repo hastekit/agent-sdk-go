@@ -81,7 +81,7 @@ export async function fetchMessages(
   threadId: string,
   cursor?: string,
   limit = 50
-): Promise<{ messages: AGUIMessage[]; run: ThreadRunState | null; nextCursor: string }> {
+): Promise<{ messages: AGUIMessage[]; run: ThreadRunState | null; nextCursor: string; sessionId: string }> {
   const r = await fetch(
     `${API}/agents/${encodeURIComponent(agent)}/threads/${encodeURIComponent(
       threadId
@@ -89,7 +89,7 @@ export async function fetchMessages(
   );
   if (!r.ok) throw new Error(`messages → ${r.status}`);
   const body = await r.json();
-  return { messages: body.messages ?? [], run: body.run ?? null, nextCursor: body.nextCursor ?? "" };
+  return { sessionId: body.sessionId ?? threadId, messages: body.messages ?? [], run: body.run ?? null, nextCursor: body.nextCursor ?? "" };
 }
 
 export function runUrl(agent: string): string {
@@ -204,9 +204,10 @@ export interface UploadedAttachment {
   size: number;
 }
 
-export async function uploadAttachment(file: File): Promise<UploadedAttachment> {
+export async function uploadAttachment(file: File, sessionId: string): Promise<UploadedAttachment> {
   if (file.size > 20 * 1024 * 1024) throw new Error("Files must be 20 MiB or smaller.");
   const body = new FormData(); body.append("file", file);
+  body.append("session_id", sessionId);
   const response = await fetch("/attachments/", { method: "POST", body });
   if (!response.ok) throw new Error(`Upload failed (${response.status}). Please try again.`);
   return response.json();

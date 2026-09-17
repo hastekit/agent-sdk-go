@@ -26,34 +26,44 @@ var (
 	ErrUnresolved = errors.New("attachment resolver is not configured")
 )
 
-// Ref identifies immutable content. Version may be empty if ID is immutable.
+// Ref identifies immutable content. Built-in stores assign a UUID; thread and
+// version are internal metadata and are not encoded in the canonical file ID.
 // It deliberately contains neither a URL nor storage credentials.
 type Ref struct {
-	ID      string `json:"id"`
-	Version string `json:"version,omitempty"`
+	ID        string `json:"id"`
+	SessionID string `json:"session_id,omitempty"`
+	Version   string `json:"version,omitempty"`
 }
 
 // Descriptor is authoritative metadata returned after authorization. Namespace
 // MUST partition storage and tenants. Key and Version MUST identify immutable
 // bytes; neither may be taken unchecked from client input. SHA256 is optional.
 type Descriptor struct {
-	Namespace string
-	Key       string
-	Version   string
-	MediaType string
-	Size      int64
-	Filename  string
-	SHA256    string
+	Namespace      string
+	Key            string
+	Version        string
+	MediaType      string
+	Size           int64
+	Filename       string // original basename
+	StoredFilename string // collision-safe name on disk
+	MountPath      string // optional model-visible path, not the host path
+	SHA256         string
 }
 
-// Store is supplied by the host application and partitioned by namespace: the
-// agent namespace, the same one AgentInput.Namespace names. Lookup must
-// authorize the namespace on EVERY call, including cache hits. Open must return
+// Store is supplied by the host application and partitioned by namespace and
+// session ID, from AgentInput.Namespace and AgentInput.SessionID. Lookup must
+// authorize the namespace/session on EVERY call, including cache hits. Open must return
 // exactly the immutable object described by Lookup and honor context
 // cancellation. Credentials belong in trusted server context, never in Ref.
 type Store interface {
-	Lookup(ctx context.Context, namespace string, ref Ref) (Descriptor, error)
+	Lookup(ctx context.Context, namespace, sessionID string, ref Ref) (Descriptor, error)
 	Open(context.Context, Descriptor) (io.ReadCloser, error)
+}
+
+// ReferenceStore supports UUID-only browser download URLs within an authorized
+// namespace. Agent calls continue to use Store.Lookup with explicit session scope.
+type ReferenceStore interface {
+	LookupReference(context.Context, string, Ref) (Descriptor, error)
 }
 
 type Config struct {
@@ -119,7 +129,7 @@ func (b *Blob) WriteTo(w io.Writer) (int64, error) {
 
 // Lookup returns authorized metadata without opening the file or populating the
 // byte cache. File size limits apply only when Resolve loads the contents.
-func (r *Resolver) Lookup(ctx context.Context, namespace string, ref Ref) (Descriptor, error) {
+func (r *Resolver) Lookup(ctx context.Context, namespace, sessionID string, ref Ref) (Descriptor, error) {
 	if err := ctx.Err(); err != nil {
 		return Descriptor{}, err
 	}
@@ -129,11 +139,11 @@ func (r *Resolver) Lookup(ctx context.Context, namespace string, ref Ref) (Descr
 	if ref.ID == "" {
 		return Descriptor{}, fmt.Errorf("%w: empty reference", ErrInvalid)
 	}
-	return r.store.Lookup(ctx, namespace, ref)
+	return r.store.Lookup(ctx, namespace, sessionID, ref)
 }
 
 // Resolve returns the bytes behind ref as namespace may read them.
-func (r *Resolver) Resolve(ctx context.Context, namespace string, ref Ref) (*Blob, error) {
+func (r *Resolver) Resolve(ctx context.Context, namespace, sessionID string, ref Ref) (*Blob, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -143,7 +153,7 @@ func (r *Resolver) Resolve(ctx context.Context, namespace string, ref Ref) (*Blo
 	if ref.ID == "" {
 		return nil, fmt.Errorf("%w: empty reference", ErrInvalid)
 	}
-	d, err := r.store.Lookup(ctx, namespace, ref)
+	d, err := r.store.Lookup(ctx, namespace, sessionID, ref)
 	if err != nil {
 		return nil, err
 	}

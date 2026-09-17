@@ -41,6 +41,7 @@ type BackgroundTaskRef struct {
 
 	Namespace string `json:"namespace"`
 	ThreadID  string `json:"thread_id"`
+	SessionID string `json:"session_id"`
 
 	// TaskStreamID is the task's own broker channel, where its progress is
 	// published. Nothing else writes to it and no run resets it, so progress
@@ -364,6 +365,7 @@ func (s *backgroundSupervisor) deliver(ctx context.Context, agent *Agent, ref Ba
 	handle, err := agent.Execute(ctx, &AgentInput{
 		Namespace:  ref.Namespace,
 		ThreadID:   ref.ThreadID,
+		SessionID:  ref.SessionID,
 		StreamID:   ref.ThreadStreamID,
 		RunContext: ref.RunContext,
 		Skills:     ref.Skills,
@@ -470,6 +472,7 @@ func (e *Agent) startBackgroundTask(ctx context.Context, in *AgentInput, runID s
 		AgentName:      owner.Name,
 		Namespace:      in.Namespace,
 		ThreadID:       in.ThreadID,
+		SessionID:      in.SessionID,
 		TaskStreamID:   StreamIDForTask(in.Namespace, in.ThreadID, taskID),
 		ThreadStreamID: in.StreamID,
 		RunID:          runID,

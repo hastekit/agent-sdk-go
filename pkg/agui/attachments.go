@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/hastekit/agent-sdk-go/pkg/agents"
+	"github.com/hastekit/agent-sdk-go/pkg/agents/history"
 	"strings"
 
 	"github.com/hastekit/agent-sdk-go/pkg/attachments"
@@ -72,7 +74,7 @@ func attachmentSourceRef(value string) (attachments.Ref, error) {
 	return attachments.RefFromURL(value)
 }
 
-func validateMessageAttachments(ctx context.Context, namespace string, msgs []Message, store attachments.Store) error {
+func validateMessageAttachments(ctx context.Context, namespace, sessionID string, msgs []Message, store attachments.Store) error {
 	for _, m := range msgs {
 		if m.ContentParts != nil && m.Role != RoleUser {
 			return fmt.Errorf("multipart content requires user role")
@@ -95,7 +97,7 @@ func validateMessageAttachments(ctx context.Context, namespace string, msgs []Me
 			if err != nil {
 				return err
 			}
-			d, err := store.Lookup(ctx, namespace, ref)
+			d, err := store.Lookup(ctx, namespace, sessionID, ref)
 			if err != nil {
 				return err
 			}
@@ -174,4 +176,27 @@ func historyContentParts(content responses.InputContent) []ContentPart {
 		return nil
 	}
 	return parts
+}
+
+// New AG-UI conversations use their initial thread ID as the session ID, allowing
+// uploads before the first run. Existing threads (including forks) use history.
+func attachmentSessionID(ctx context.Context, agent *agents.Agent, namespace, threadID string) (string, error) {
+	manager := agent.History()
+	if manager == nil || manager.ConversationPersistenceAdapter == nil {
+		return threadID, nil
+	}
+	rows, err := manager.ConversationPersistenceAdapter.LoadMessages(ctx, namespace, threadID, "")
+	if err != nil {
+		return "", err
+	}
+	return sessionIDFromRows(threadID, rows), nil
+}
+
+func sessionIDFromRows(fallback string, rows []history.ConversationMessage) string {
+	for i := len(rows) - 1; i >= 0; i-- {
+		if rows[i].ConversationID != "" {
+			return rows[i].ConversationID
+		}
+	}
+	return fallback
 }

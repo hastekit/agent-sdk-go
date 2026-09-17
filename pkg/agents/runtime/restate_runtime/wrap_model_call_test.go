@@ -55,9 +55,9 @@ type countingStore struct {
 	puts int
 }
 
-func (s *countingStore) Put(ctx context.Context, namespace string, upload attachments.Upload) (attachments.Ref, error) {
+func (s *countingStore) Put(ctx context.Context, namespace, threadID string, upload attachments.Upload) (attachments.Ref, error) {
 	s.puts++
-	return s.UploadStore.Put(ctx, namespace, upload)
+	return s.UploadStore.Put(ctx, namespace, threadID, upload)
 }
 
 func (p *capturingProvider) NewStreamingResponses(_ context.Context, in *responses.Request) (chan *responses.ResponseChunk, error) {
@@ -77,7 +77,7 @@ func TestRestateLLMStepResolvesReferencesUnderTheTrustedScope(t *testing.T) {
 	defer store.Close()
 	png, err := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a6xkAAAAASUVORK5CYII=")
 	require.NoError(t, err)
-	ref, err := store.Put(t.Context(), "tenant", attachments.Upload{Filename: "pixel.png", MediaType: "image/png", Content: bytes.NewReader(png)})
+	ref, err := store.Put(t.Context(), "tenant", "thread", attachments.Upload{Filename: "pixel.png", MediaType: "image/png", Content: bytes.NewReader(png)})
 	require.NoError(t, err)
 	request := &responses.Request{Input: responses.InputUnion{OfInputMessageList: []responses.InputMessageUnion{{
 		OfInputMessage: &responses.InputMessage{Role: constants.RoleUser, Content: responses.InputContent{
@@ -89,7 +89,7 @@ func TestRestateLLMStepResolvesReferencesUnderTheTrustedScope(t *testing.T) {
 	provider := &capturingProvider{}
 	step := NewRestateLLM(nil, provider, "", nil, "stream", middleware).(*RestateLLM)
 	// The namespace comes from the call the loop hands the step.
-	_, err = step.invoke(context.Background(), &agents.ModelCall{Namespace: "tenant"}, request, func(*responses.ResponseChunk) {})
+	_, err = step.invoke(context.Background(), &agents.ModelCall{ThreadID: "thread", SessionID: "thread", Namespace: "tenant"}, request, func(*responses.ResponseChunk) {})
 	require.NoError(t, err)
 
 	sent, err := json.Marshal(provider.seen)
@@ -104,7 +104,7 @@ func TestRestateLLMStepResolvesReferencesUnderTheTrustedScope(t *testing.T) {
 
 	other := &capturingProvider{}
 	stranger := NewRestateLLM(nil, other, "", nil, "stream", middleware).(*RestateLLM)
-	_, err = stranger.invoke(context.Background(), &agents.ModelCall{Namespace: "other-tenant"}, request, func(*responses.ResponseChunk) {})
+	_, err = stranger.invoke(context.Background(), &agents.ModelCall{ThreadID: "thread", SessionID: "thread", Namespace: "other-tenant"}, request, func(*responses.ResponseChunk) {})
 	require.Error(t, err)
 	require.Nil(t, other.seen, "the provider is never contacted for a reference the step may not read")
 }
@@ -122,7 +122,7 @@ func TestRestateLLMStepReturnsOnlyGeneratedImageReference(t *testing.T) {
 	step := NewRestateLLM(nil, provider, "", nil, "stream", middleware).(*RestateLLM)
 
 	var published []*responses.ResponseChunk
-	got, err := step.invoke(context.Background(), &agents.ModelCall{Namespace: "tenant"}, &responses.Request{}, func(chunk *responses.ResponseChunk) {
+	got, err := step.invoke(context.Background(), &agents.ModelCall{ThreadID: "thread", SessionID: "thread", Namespace: "tenant"}, &responses.Request{}, func(chunk *responses.ResponseChunk) {
 		published = append(published, chunk)
 	})
 	require.NoError(t, err)
@@ -148,7 +148,7 @@ func TestRestateLLMStepReturnsOnlyGeneratedImageReference(t *testing.T) {
 
 	ref, err := attachments.RefFromFileID(result)
 	require.NoError(t, err)
-	blob, err := attachments.NewResolver(base, attachments.Config{}).Resolve(t.Context(), "tenant", ref)
+	blob, err := attachments.NewResolver(base, attachments.Config{}).Resolve(t.Context(), "tenant", "thread", ref)
 	require.NoError(t, err)
 	var persisted bytes.Buffer
 	_, err = blob.WriteTo(&persisted)

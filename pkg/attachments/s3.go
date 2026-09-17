@@ -12,7 +12,6 @@ import (
 	"math"
 	"mime"
 	"net/http"
-	"path/filepath"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -29,6 +28,8 @@ type S3API interface {
 }
 
 type S3StoreConfig struct {
+	// MountPath advertises the container directory populated by the host.
+	MountPath    string
 	Bucket       string
 	Prefix       string // optional object key prefix
 	MaxFileBytes int64  // zero: 20 MiB; uploads are buffered up to this limit
@@ -41,9 +42,13 @@ type S3Store struct {
 	client                   S3API
 	bucket, prefix, identity string
 	maxBytes                 int64
+	mountPath                string
 }
 
 func NewS3Store(client S3API, cfg S3StoreConfig) (*S3Store, error) {
+	if err := validateMountPath(cfg.MountPath); err != nil {
+		return nil, err
+	}
 	if client == nil || strings.TrimSpace(cfg.Bucket) == "" {
 		return nil, fmt.Errorf("%w: S3 client and bucket are required", ErrInvalid)
 	}
@@ -57,22 +62,21 @@ func NewS3Store(client S3API, cfg S3StoreConfig) (*S3Store, error) {
 	if prefix != "" {
 		prefix += "/"
 	}
-	return &S3Store{client: client, bucket: cfg.Bucket, prefix: prefix, identity: "s3:" + uuid.NewString(), maxBytes: cfg.MaxFileBytes}, nil
+	return &S3Store{client: client, bucket: cfg.Bucket, prefix: prefix, identity: "s3:" + uuid.NewString(), maxBytes: cfg.MaxFileBytes, mountPath: cfg.MountPath}, nil
 }
 
-func (s *S3Store) namespace(ctx context.Context, namespace string) (string, error) {
+func (s *S3Store) namespace(ctx context.Context, namespace, sessionID string) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	if namespace == "" {
+	if namespace == ".metadata" || !validScopePart(namespace) || !validScopePart(sessionID) {
 		return "", ErrDenied
 	}
-	hash := sha256.Sum256([]byte(namespace))
-	return hex.EncodeToString(hash[:]), nil
+	return namespace + "/" + sessionID, nil
 }
 
-func (s *S3Store) Put(ctx context.Context, namespace string, upload Upload) (Ref, error) {
-	ns, err := s.namespace(ctx, namespace)
+func (s *S3Store) Put(ctx context.Context, namespace, sessionID string, upload Upload) (Ref, error) {
+	ns, err := s.namespace(ctx, namespace, sessionID)
 	if err != nil {
 		return Ref{}, err
 	}
@@ -96,37 +100,90 @@ func (s *S3Store) Put(ctx context.Context, namespace string, upload Upload) (Ref
 	if err := ctx.Err(); err != nil {
 		return Ref{}, err
 	}
-	id := strings.ReplaceAll(uuid.NewString(), "-", "")
 	hash := sha256.Sum256(data)
 	version := hex.EncodeToString(hash[:])
-	_, err = s.client.PutObject(ctx, &s3.PutObjectInput{
-		Bucket: aws.String(s.bucket), Key: aws.String(s.prefix + ns + "/" + id),
-		Body: bytes.NewReader(data), ContentLength: aws.Int64(int64(len(data))), ContentType: aws.String(media),
-		IfNoneMatch: aws.String("*"),
-		Metadata:    map[string]string{"sha256": version, "filename": base64.RawURLEncoding.EncodeToString([]byte(filepath.Base(upload.Filename)))},
-	})
-	if err != nil {
+	base := attachmentFilename(upload.Filename)
+	uuidID := uuid.NewString()
+	for number := 1; ; number++ {
+		if err := ctx.Err(); err != nil {
+			return Ref{}, err
+		}
+		id := numberedFilename(base, number)
+		_, err = s.client.PutObject(ctx, &s3.PutObjectInput{
+			Bucket: aws.String(s.bucket), Key: aws.String(s.prefix + ns + "/" + id),
+			Body: bytes.NewReader(data), ContentLength: aws.Int64(int64(len(data))), ContentType: aws.String(media),
+			IfNoneMatch: aws.String("*"),
+			Metadata:    map[string]string{"sha256": version, "filename": base64.RawURLEncoding.EncodeToString([]byte(originalFilename(upload.Filename)))},
+		})
+		if err == nil {
+			_, indexErr := s.client.PutObject(ctx, &s3.PutObjectInput{
+				Bucket: aws.String(s.bucket), Key: aws.String(s.prefix + ".metadata/" + namespace + "/" + uuidID),
+				Body: strings.NewReader("\n"), ContentLength: aws.Int64(1), IfNoneMatch: aws.String("*"),
+				Metadata: map[string]string{"session": base64.RawURLEncoding.EncodeToString([]byte(sessionID)), "stored-filename": base64.RawURLEncoding.EncodeToString([]byte(id))},
+			})
+			if indexErr != nil {
+				return Ref{}, s3StoreError(indexErr)
+			}
+			return Ref{ID: uuidID, SessionID: sessionID, Version: version}, nil
+		}
+		var api smithy.APIError
+		if errors.As(err, &api) && (api.ErrorCode() == "PreconditionFailed" || api.ErrorCode() == "ConditionalRequestConflict") {
+			continue
+		}
 		return Ref{}, s3StoreError(err)
 	}
-	return Ref{ID: id, Version: version}, nil
+
 }
 
-func (s *S3Store) Lookup(ctx context.Context, namespace string, ref Ref) (Descriptor, error) {
-	ns, err := s.namespace(ctx, namespace)
+func (s *S3Store) Lookup(ctx context.Context, namespace, sessionID string, ref Ref) (Descriptor, error) {
+	_, err := s.namespace(ctx, namespace, sessionID)
 	if err != nil {
 		return Descriptor{}, err
+	}
+	if ref.SessionID != "" && ref.SessionID != sessionID {
+		return Descriptor{}, ErrDenied
 	}
 	if !validID(ref.ID) {
 		return Descriptor{}, ErrInvalid
 	}
-	key := s.prefix + ns + "/" + ref.ID
+	return s.lookupReference(ctx, namespace, sessionID, ref)
+}
+
+func (s *S3Store) LookupReference(ctx context.Context, namespace string, ref Ref) (Descriptor, error) {
+	return s.lookupReference(ctx, namespace, "", ref)
+}
+
+func (s *S3Store) lookupReference(ctx context.Context, namespace, sessionID string, ref Ref) (Descriptor, error) {
+	if err := ctx.Err(); err != nil {
+		return Descriptor{}, err
+	}
+	if !validScopePart(namespace) || namespace == ".metadata" {
+		return Descriptor{}, ErrDenied
+	}
+	if !validID(ref.ID) {
+		return Descriptor{}, ErrInvalid
+	}
+	index, err := s.client.HeadObject(ctx, &s3.HeadObjectInput{Bucket: aws.String(s.bucket), Key: aws.String(s.prefix + ".metadata/" + namespace + "/" + ref.ID)})
+	if err != nil {
+		return Descriptor{}, s3StoreError(err)
+	}
+	storedSession, sessionErr := base64.RawURLEncoding.DecodeString(index.Metadata["session"])
+	filename, filenameErr := base64.RawURLEncoding.DecodeString(index.Metadata["stored-filename"])
+	if sessionErr != nil || filenameErr != nil || !validScopePart(string(storedSession)) || !validFilename(string(filename)) {
+		return Descriptor{}, ErrInvalid
+	}
+	if (sessionID != "" && sessionID != string(storedSession)) || (ref.SessionID != "" && ref.SessionID != string(storedSession)) {
+		return Descriptor{}, ErrDenied
+	}
+	ns := namespace + "/" + string(storedSession)
+	key := s.prefix + ns + "/" + string(filename)
 	out, err := s.client.HeadObject(ctx, &s3.HeadObjectInput{Bucket: aws.String(s.bucket), Key: aws.String(key)})
 	if err != nil {
 		return Descriptor{}, s3StoreError(err)
 	}
 	hash := out.Metadata["sha256"]
 	rawHash, hashErr := hex.DecodeString(hash)
-	filename, nameErr := base64.RawURLEncoding.DecodeString(out.Metadata["filename"])
+	original, nameErr := base64.RawURLEncoding.DecodeString(out.Metadata["filename"])
 	media, _, mediaErr := mime.ParseMediaType(aws.ToString(out.ContentType))
 	if hashErr != nil || len(rawHash) != sha256.Size || nameErr != nil || mediaErr != nil || aws.ToInt64(out.ContentLength) <= 0 || aws.ToString(out.ETag) == "" {
 		return Descriptor{}, fmt.Errorf("%w: invalid S3 attachment metadata", ErrInvalid)
@@ -134,7 +191,7 @@ func (s *S3Store) Lookup(ctx context.Context, namespace string, ref Ref) (Descri
 	if ref.Version != "" && ref.Version != hash {
 		return Descriptor{}, ErrNotFound
 	}
-	return Descriptor{Namespace: s.identity + ":" + ns, Key: key, Version: aws.ToString(out.ETag), SHA256: hash, Filename: string(filename), MediaType: media, Size: aws.ToInt64(out.ContentLength)}, nil
+	return Descriptor{Namespace: s.identity + ":" + ns, Key: key, Version: aws.ToString(out.ETag), SHA256: hash, Filename: string(original), StoredFilename: string(filename), MountPath: mountedPath(s.mountPath, string(filename)), MediaType: media, Size: aws.ToInt64(out.ContentLength)}, nil
 }
 
 // Open uses the ETag from Lookup to reject an object changed between metadata
@@ -144,9 +201,9 @@ func (s *S3Store) Open(ctx context.Context, d Descriptor) (io.ReadCloser, error)
 		return nil, err
 	}
 	ns, ok := strings.CutPrefix(d.Namespace, s.identity+":")
-	raw, err := hex.DecodeString(ns)
+	parts := strings.Split(ns, "/")
 	prefix := s.prefix + ns + "/"
-	if !ok || err != nil || len(raw) != sha256.Size || !strings.HasPrefix(d.Key, prefix) || !validID(strings.TrimPrefix(d.Key, prefix)) || d.Version == "" {
+	if !ok || len(parts) != 2 || !validScopePart(parts[0]) || !validScopePart(parts[1]) || !strings.HasPrefix(d.Key, prefix) || !validFilename(strings.TrimPrefix(d.Key, prefix)) || d.Version == "" {
 		return nil, ErrDenied
 	}
 	out, err := s.client.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(s.bucket), Key: aws.String(d.Key), IfMatch: aws.String(d.Version)})

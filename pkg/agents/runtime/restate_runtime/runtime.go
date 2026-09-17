@@ -21,6 +21,7 @@ type WorkflowInput struct {
 
 	Namespace     string
 	ThreadID      string
+	SessionID     string
 	PreviousRunID string
 	Message       history.Message
 	RunContext    map[string]any
@@ -68,6 +69,7 @@ func (r *RestateRuntime) Run(ctx context.Context, agent *agents.Agent, in *agent
 		RunID:             in.RunID,
 		Namespace:         in.Namespace,
 		ThreadID:          in.ThreadID,
+		SessionID:         in.SessionID,
 		PreviousRunID:     in.PreviousRunID,
 		Message:           in.Message,
 		RunContext:        in.RunContext,

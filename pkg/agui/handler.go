@@ -287,6 +287,7 @@ func serveThreadMessages(w http.ResponseWriter, r *http.Request, agent *agents.A
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"threadId":   threadID,
+		"sessionId":  sessionIDFromRows(threadID, latest),
 		"messages":   HistoryToMessages(page.Rows),
 		"run":        threadRunState(latest),
 		"nextCursor": nextMessageCursor(namespace, threadID, page.NextBeforeRunID),
@@ -507,7 +508,12 @@ func serveRun(w http.ResponseWriter, r *http.Request, agent *agents.Agent, o opt
 		return
 	}
 
-	if err := validateMessageAttachments(r.Context(), requestNamespace(r), input.Messages, o.attachmentStore); err != nil {
+	sessionID, err := attachmentSessionID(r.Context(), agent, requestNamespace(r), input.ThreadID)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "unable to resolve conversation")
+		return
+	}
+	if err := validateMessageAttachments(r.Context(), requestNamespace(r), sessionID, input.Messages, o.attachmentStore); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid or inaccessible message attachments")
 		return
 	}
@@ -563,6 +569,7 @@ func serveRun(w http.ResponseWriter, r *http.Request, agent *agents.Agent, o opt
 		Namespace: requestNamespace(r),
 		RunID:     runID,
 		ThreadID:  input.ThreadID,
+		SessionID: sessionID,
 		StreamID:  streamID,
 		Message:   turn,
 		// Fold AG-UI context into the prompt RunContext. forwardedProps

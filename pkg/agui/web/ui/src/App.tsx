@@ -52,9 +52,10 @@ const FEED_RETRY_MS = 2000;
 // parses back into a tool-approval response.
 
 // Active is the chat surface's state: the thread we POST to plus the
-// history to hydrate it with. conversationId is informational.
+// history to hydrate it with. sessionId selects the shared attachment directory.
 interface Active {
   threadId: string;
+  sessionId: string;
   initialMessages: AGUIMessage[];
   nextCursor?: string;
   // What the thread's last run left outstanding — a decision it is waiting
@@ -63,7 +64,8 @@ interface Active {
 }
 
 function newActive(): Active {
-  return { threadId: crypto.randomUUID(), initialMessages: [], run: null };
+  const id = crypto.randomUUID();
+  return { threadId: id, sessionId: id, initialMessages: [], run: null };
 }
 
 // What is on screen, in the address bar: the agent and the conversation.
@@ -480,14 +482,14 @@ export default function App() {
   // whatever it is handed. This wrapper only changes behaviour and renders
   // the real composer, so it has none of them and needs none.
   const inputSlot = useMemo(
-    () => ((p: any) => <SteerableInput {...p} onSteer={steer} attachmentsEnabled={attachmentsEnabled} />) as any,
-    [steer, attachmentsEnabled]
+    () => ((p: any) => <SteerableInput {...p} onSteer={steer} attachmentsEnabled={attachmentsEnabled} sessionId={active.sessionId} />) as any,
+    [steer, attachmentsEnabled, active.sessionId]
   );
 
   const openThread = useCallback(
     async (threadId: string) => {
       try {
-        let { messages, run, nextCursor } = await fetchMessages(agentName, threadId);
+        let { messages, run, nextCursor, sessionId } = await fetchMessages(agentName, threadId);
         // Full-history mode sends the transcript back to a stateless backend.
         // Preserve that contract even though the history API is paginated.
         if (fullHistory) {
@@ -497,7 +499,7 @@ export default function App() {
             nextCursor = page.nextCursor;
           }
         }
-        setActive({ threadId, initialMessages: messages, run, nextCursor });
+        setActive({ threadId, sessionId, initialMessages: messages, run, nextCursor });
       } catch (e) {
         setError(String(e));
       }

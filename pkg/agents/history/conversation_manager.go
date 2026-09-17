@@ -260,6 +260,16 @@ func WithRunID(id string) RunOption {
 	return func(cr *ConversationRunManager) { cr.requestedRunID = id }
 }
 
+// WithDefaultConversationID selects the conversation ID only for a new conversation.
+// Restored threads and forks retain the conversation they already belong to.
+func WithDefaultConversationID(id string) RunOption {
+	return func(cm *ConversationRunManager) {
+		if cm.conversationId == "" {
+			cm.conversationId = id
+		}
+	}
+}
+
 func WithConversationID(cid string) RunOption {
 	return func(cm *ConversationRunManager) {
 		cm.conversationId = cid

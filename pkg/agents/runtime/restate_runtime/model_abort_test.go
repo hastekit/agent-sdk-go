@@ -14,7 +14,7 @@ import (
 )
 
 func missingAttachmentRequest() *responses.Request {
-	fileID := "attachment://0123456789abcdef0123456789abcdef"
+	fileID := "attachment://cc2c80ea-e99f-41bb-9b5f-de9f6441b9de"
 	return &responses.Request{Input: responses.InputUnion{OfInputMessageList: responses.InputMessageList{{
 		OfInputMessage: &responses.InputMessage{Content: responses.InputContent{{OfInputImage: &responses.InputImageContent{FileID: utils.Ptr(fileID)}}}},
 	}}}}
@@ -32,7 +32,7 @@ func TestRestateLLMStepDoesNotRetryAMiddlewaresOwnError(t *testing.T) {
 	worker := NewRestateLLM(nil, provider, "", nil, "stream",
 		agentmiddleware.NewAttachmentMiddleware(agentmiddleware.AttachmentMiddlewareConfig{InlineAttachments: true, Store: store})).(*RestateLLM)
 
-	_, err = worker.invoke(t.Context(), &agents.ModelCall{Namespace: "test"}, missingAttachmentRequest(), func(*responses.ResponseChunk) {})
+	_, err = worker.invoke(t.Context(), &agents.ModelCall{ThreadID: "thread", SessionID: "thread", Namespace: "test"}, missingAttachmentRequest(), func(*responses.ResponseChunk) {})
 
 	require.Error(t, err)
 	require.True(t, restate.IsTerminalError(err), "a refusal must not be retried")

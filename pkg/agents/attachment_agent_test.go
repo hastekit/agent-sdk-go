@@ -52,7 +52,7 @@ func uploadedImage(t *testing.T, store attachments.UploadStore) attachments.Ref 
 	uri := *attachmentResult().Output.OfList[1].OfInputImage.ImageURL
 	png, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(uri, "data:image/png;base64,"))
 	require.NoError(t, err)
-	ref, err := store.Put(t.Context(), "ns", attachments.Upload{Filename: "pixel.png", MediaType: "image/png", Content: bytes.NewReader(png)})
+	ref, err := store.Put(t.Context(), "ns", "thread", attachments.Upload{Filename: "pixel.png", MediaType: "image/png", Content: bytes.NewReader(png)})
 	require.NoError(t, err)
 	return ref
 }
@@ -73,7 +73,7 @@ func TestAttachmentMiddlewareAgentHistoryKeepsReferences(t *testing.T) {
 	model := &scriptedLLM{script: []*responses.Response{toolCallResponse("call", "media", "{}"), textResponse("done")}}
 	tool := &mediaResultTool{BaseTool: &agents.BaseTool{ToolUnion: responses.ToolUnion{OfFunction: &responses.FunctionTool{Name: "media"}}}}
 	agent := agents.NewAgent(&agents.AgentOptions{Name: "media-agent", Tools: []agents.Tool{tool}, History: manager, Middlewares: []agents.Middleware{agentmiddleware.NewAttachmentMiddleware(agentmiddleware.AttachmentMiddlewareConfig{Store: store})}}).WithLLM(model)
-	out := runAgent(t, agent, &agents.AgentInput{Namespace: "ns", ThreadID: "thread", Message: userMessage("make files")})
+	out := runAgent(t, agent, &agents.AgentInput{Namespace: "ns", ThreadID: "thread", SessionID: "thread", Message: userMessage("make files")})
 	requireStatus(t, out, agentstate.RunStatusCompleted)
 	rows, err := manager.LoadTranscript(t.Context(), "ns", "thread")
 	require.NoError(t, err)
@@ -82,14 +82,15 @@ func TestAttachmentMiddlewareAgentHistoryKeepsReferences(t *testing.T) {
 	require.Contains(t, string(raw), "attachment://")
 	require.NotContains(t, string(raw), "base64")
 	require.Equal(t, 2, model.callCount())
-	// The next model call sees the tool's stored files only as text references.
+	// The next model call sees image bytes and file metadata; history retains references.
 	parts := model.request(1).Input.OfInputMessageList[2].OfFunctionCallOutput.Output.OfList
-	for _, part := range parts[1:] {
-		require.NotNil(t, part.OfInputText)
-		require.Contains(t, part.OfInputText.Text, "attachment://")
-		require.Nil(t, part.OfInputImage)
-		require.Nil(t, part.OfInputFile)
-	}
+	require.NotNil(t, parts[1].OfInputImage)
+	require.Contains(t, *parts[1].OfInputImage.ImageURL, "data:image/png;base64,")
+	require.Nil(t, parts[1].OfInputImage.FileID)
+	require.NotNil(t, parts[2].OfInputText)
+	require.Contains(t, parts[2].OfInputText.Text, `"file_id":`)
+	require.Contains(t, parts[2].OfInputText.Text, "attachment://")
+	require.Nil(t, parts[2].OfInputFile)
 
 }
 
@@ -123,15 +124,17 @@ func TestAttachmentMiddlewareAgentGeneratedImageKeepsOnlyReference(t *testing.T)
 	require.NotContains(t, string(serializedOutput), raw)
 	require.Contains(t, string(serializedOutput), "attachment://")
 	require.Equal(t, 2, model.callCount())
-	require.Equal(t, raw, model.request(1).Input.OfInputMessageList[1].OfImageGenerationCall.Result,
-		"the subsequent provider request receives the original base64")
+	require.Equal(t, "data:image/png;base64,"+raw, *model.request(1).Input.OfInputMessageList[1].OfEasyInput.Content.OfInputMessageList[1].OfInputImage.ImageURL,
+		"the subsequent provider request receives ordinary image content")
 
 	rows, err := manager.LoadTranscript(t.Context(), "ns", "generated")
 	require.NoError(t, err)
 	serializedHistory, err := json.Marshal(rows)
 	require.NoError(t, err)
 	require.NotContains(t, string(serializedHistory), raw)
-	require.Contains(t, string(serializedHistory), result)
+	encodedReference, err := json.Marshal(result)
+	require.NoError(t, err)
+	require.Contains(t, string(serializedHistory), string(encodedReference))
 }
 
 // A background task's result goes through the middleware before the local runner
@@ -177,7 +180,7 @@ func TestAttachmentMiddleware_AgentSendsBytesAndKeepsReferences(t *testing.T) {
 		{OfInputText: &responses.InputTextContent{Text: "describe this, then make files"}},
 		{OfInputImage: &responses.InputImageContent{FileID: utils.Ptr(attachments.FileID(image))}},
 	}}}})
-	out := runAgent(t, agent, &agents.AgentInput{Namespace: "ns", ThreadID: "thread", Message: turn})
+	out := runAgent(t, agent, &agents.AgentInput{Namespace: "ns", ThreadID: "thread", SessionID: "thread", Message: turn})
 	requireStatus(t, out, agentstate.RunStatusCompleted)
 	require.Equal(t, 2, model.callCount())
 
