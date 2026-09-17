@@ -8,7 +8,7 @@ import (
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/history"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/runtime/temporal_runtime"
-	"github.com/hastekit/agent-sdk-go/pkg/skills"
+	"github.com/hastekit/agent-sdk-go/pkg/agents/skills"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.temporal.io/sdk/converter"

@@ -6,10 +6,10 @@ import (
 	"testing"
 
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
+	"github.com/hastekit/agent-sdk-go/pkg/agents/attachments"
 	agentmiddleware "github.com/hastekit/agent-sdk-go/pkg/agents/middleware"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/runtime/temporal_runtime"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/streambroker"
-	"github.com/hastekit/agent-sdk-go/pkg/attachments"
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm"
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
 	"github.com/hastekit/agent-sdk-go/pkg/utils"

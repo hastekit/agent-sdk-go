@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hastekit/agent-sdk-go/pkg/skills"
+	"github.com/hastekit/agent-sdk-go/pkg/agents/skills"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

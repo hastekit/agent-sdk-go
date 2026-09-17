@@ -10,9 +10,9 @@ import (
 	"testing"
 
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
+	"github.com/hastekit/agent-sdk-go/pkg/agents/attachments"
+	"github.com/hastekit/agent-sdk-go/pkg/agents/skills"
 	"github.com/hastekit/agent-sdk-go/pkg/agui"
-	"github.com/hastekit/agent-sdk-go/pkg/attachments"
-	"github.com/hastekit/agent-sdk-go/pkg/skills"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

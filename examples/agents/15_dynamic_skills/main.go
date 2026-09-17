@@ -11,9 +11,9 @@ import (
 
 	hastekit "github.com/hastekit/agent-sdk-go"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/prompts"
+	"github.com/hastekit/agent-sdk-go/pkg/agents/skills"
 	"github.com/hastekit/agent-sdk-go/pkg/agui"
 	"github.com/hastekit/agent-sdk-go/pkg/agui/web"
-	"github.com/hastekit/agent-sdk-go/pkg/skills"
 )
 
 func main() {

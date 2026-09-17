@@ -6,8 +6,8 @@ import (
 	"testing"
 
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
+	"github.com/hastekit/agent-sdk-go/pkg/agents/attachments"
 	agentmiddleware "github.com/hastekit/agent-sdk-go/pkg/agents/middleware"
-	"github.com/hastekit/agent-sdk-go/pkg/attachments"
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/require"

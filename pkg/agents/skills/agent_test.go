@@ -5,8 +5,8 @@ import (
 	"testing"
 
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
+	"github.com/hastekit/agent-sdk-go/pkg/agents/skills"
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
-	"github.com/hastekit/agent-sdk-go/pkg/skills"
 	"github.com/stretchr/testify/require"
 )
 

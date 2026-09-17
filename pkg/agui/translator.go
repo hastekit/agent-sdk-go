@@ -5,7 +5,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/hastekit/agent-sdk-go/pkg/attachments"
+	"github.com/hastekit/agent-sdk-go/pkg/agents/attachments"
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
 )
 

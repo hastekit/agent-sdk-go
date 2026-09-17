@@ -10,11 +10,11 @@ import (
 
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/agentstate"
+	"github.com/hastekit/agent-sdk-go/pkg/agents/attachments"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/history"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/messages"
 	agentmiddleware "github.com/hastekit/agent-sdk-go/pkg/agents/middleware"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/streambroker"
-	"github.com/hastekit/agent-sdk-go/pkg/attachments"
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/constants"
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
 	"github.com/hastekit/agent-sdk-go/pkg/utils"

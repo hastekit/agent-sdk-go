@@ -2,8 +2,9 @@ package agents
 
 import (
 	"fmt"
-	"github.com/hastekit/agent-sdk-go/pkg/attachments"
 	"strings"
+
+	"github.com/hastekit/agent-sdk-go/pkg/agents/attachments"
 
 	"github.com/hastekit/agent-sdk-go/pkg/agents/history"
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/constants"

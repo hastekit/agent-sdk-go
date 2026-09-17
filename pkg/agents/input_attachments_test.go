@@ -1,13 +1,14 @@
 package agents
 
 import (
+	"testing"
+
+	"github.com/hastekit/agent-sdk-go/pkg/agents/attachments"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/history"
-	"github.com/hastekit/agent-sdk-go/pkg/attachments"
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/constants"
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
 	"github.com/hastekit/agent-sdk-go/pkg/utils"
 	"github.com/stretchr/testify/require"
-	"testing"
 )
 
 func TestPublishAttachmentOnlyInput(t *testing.T) {

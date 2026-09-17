@@ -10,12 +10,12 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
+	"github.com/hastekit/agent-sdk-go/pkg/agents/attachments"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/history"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/messages"
-	"github.com/hastekit/agent-sdk-go/pkg/attachments"
+	"github.com/hastekit/agent-sdk-go/pkg/agents/skills"
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/constants"
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
-	"github.com/hastekit/agent-sdk-go/pkg/skills"
 )
 
 // Registry is the minimal view of an SDK client the AG-UI handler

@@ -4,10 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"github.com/hastekit/agent-sdk-go/pkg/skills"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/hastekit/agent-sdk-go/pkg/agents/skills"
 
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
 	"github.com/stretchr/testify/require"

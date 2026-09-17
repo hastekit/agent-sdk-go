@@ -2,7 +2,7 @@ package sdk
 
 import (
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
-	"github.com/hastekit/agent-sdk-go/pkg/skills"
+	"github.com/hastekit/agent-sdk-go/pkg/agents/skills"
 )
 
 // Skill is one folder of instructions the agent can pull in on demand — see

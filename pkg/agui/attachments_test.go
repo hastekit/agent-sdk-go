@@ -5,14 +5,15 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"github.com/hastekit/agent-sdk-go/pkg/utils"
 	"strings"
 	"testing"
 
+	"github.com/hastekit/agent-sdk-go/pkg/utils"
+
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
+	"github.com/hastekit/agent-sdk-go/pkg/agents/attachments"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/history"
 	agentmiddleware "github.com/hastekit/agent-sdk-go/pkg/agents/middleware"
-	"github.com/hastekit/agent-sdk-go/pkg/attachments"
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/constants"
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
 	"github.com/stretchr/testify/require"

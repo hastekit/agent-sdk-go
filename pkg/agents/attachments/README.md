@@ -26,7 +26,7 @@ No changes to message references or the embedded UI are required.
 ```go
 import (
     "github.com/aws/aws-sdk-go-v2/service/s3"
-    "github.com/hastekit/agent-sdk-go/pkg/attachments"
+    "github.com/hastekit/agent-sdk-go/pkg/agents/attachments"
 )
 
 // awsConfig is your application's aws.Config, with region and credentials set
@@ -72,7 +72,7 @@ import (
     "github.com/hastekit/agent-sdk-go/pkg/agents"
     "github.com/hastekit/agent-sdk-go/pkg/agents/history"
     "github.com/hastekit/agent-sdk-go/pkg/agents/middleware"
-    "github.com/hastekit/agent-sdk-go/pkg/attachments"
+    "github.com/hastekit/agent-sdk-go/pkg/agents/attachments"
     "github.com/hastekit/agent-sdk-go/pkg/gateway/llm/constants"
     "github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
     "github.com/hastekit/agent-sdk-go/pkg/utils"
