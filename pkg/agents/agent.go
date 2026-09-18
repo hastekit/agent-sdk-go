@@ -354,6 +354,8 @@ func (e *Agent) ToolExecutor() ToolExecutor {
 }
 
 type AgentInput struct {
+	// GroupID groups new conversations within a namespace (for example a routine or project). Empty selects "default".
+	GroupID string `json:"group_id,omitempty"`
 	// Skills selects opt-in skills by name for this execution, including resumes.
 	Skills SkillSelection `json:"skills,omitempty"`
 	// RunID optionally identifies this execution. History generates one when omitted.
@@ -425,7 +427,7 @@ func (e *Agent) ExecuteLocal(ctx context.Context, in *AgentInput) (*AgentOutput,
 		defer e.streamBroker.Close(context.Background(), in.StreamID)
 	}
 
-	run, err := history.NewRun(ctx, e.history, in.Namespace, in.ThreadID, in.PreviousRunID, history.WithRunContext(in.RunContext), history.WithRunID(in.RunID), history.WithDefaultConversationID(in.SessionID))
+	run, err := history.NewRun(ctx, e.history, in.Namespace, in.ThreadID, in.PreviousRunID, history.WithGroupID(in.GroupID), history.WithRunContext(in.RunContext), history.WithRunID(in.RunID), history.WithDefaultConversationID(in.SessionID))
 	if err != nil {
 		return &AgentOutput{Status: agentstate.RunStatusError, RunID: ""}, err
 	}
@@ -456,7 +458,7 @@ func (e *Agent) ExecuteLocal(ctx context.Context, in *AgentInput) (*AgentOutput,
 	e.durableStep.Do(func() {
 		e.runCreated(ctx, in.StreamID, runId, traceid)
 		publishInputMessages(e.publisher(in.StreamID), in.Message)
-		e.publishRunEvent(ctx, RunEventStarted, in, runId)
+		e.publishRunEvent(ctx, RunEventStarted, in, runId, run.GetGroupID())
 	})
 
 	// And its end, however it ends. In the defer rather than beside
@@ -468,7 +470,7 @@ func (e *Agent) ExecuteLocal(ctx context.Context, in *AgentInput) (*AgentOutput,
 	// the same run finishing once per replay.
 	defer func() {
 		e.durableStep.Do(func() {
-			e.publishRunEvent(context.WithoutCancel(ctx), RunEventFinished, in, runId)
+			e.publishRunEvent(context.WithoutCancel(ctx), RunEventFinished, in, runId, run.GetGroupID())
 		})
 	}()
 

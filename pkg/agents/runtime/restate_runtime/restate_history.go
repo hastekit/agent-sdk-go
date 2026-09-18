@@ -50,9 +50,9 @@ func (t *RestateHistory) LoadMessages(ctx context.Context, namespace string, thr
 	}, restate.WithName("LoadMessages"))
 }
 
-func (t *RestateHistory) SaveMessages(ctx context.Context, namespace, runId, previousRunId, threadId, conversationId string, messages []history.Message, meta map[string]any) error {
+func (t *RestateHistory) SaveMessages(ctx context.Context, namespace, groupID, runId, previousRunId, threadId, conversationId string, messages []history.Message, meta map[string]any) error {
 	_, err := restate.Run(t.restateCtx, func(ctx restate.RunContext) (any, error) {
-		return nil, t.wrappedPersistence.SaveMessages(ctx, namespace, runId, previousRunId, threadId, conversationId, messages, meta)
+		return nil, t.wrappedPersistence.SaveMessages(ctx, namespace, groupID, runId, previousRunId, threadId, conversationId, messages, meta)
 	}, restate.WithName("SaveMessages"))
 	return err
 }

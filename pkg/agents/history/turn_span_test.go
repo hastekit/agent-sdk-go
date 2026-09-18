@@ -146,7 +146,7 @@ func TestAResumeWithNoRecordedStartOpensOne(t *testing.T) {
 	cm := NewConversationManager(p)
 
 	// A row written by an older version: messages and state, no span.
-	require.NoError(t, p.SaveMessages(ctx, "ns", "run-old", "", "thread-1", "conv-1",
+	require.NoError(t, p.SaveMessages(ctx, "ns", "default", "run-old", "", "thread-1", "conv-1",
 		[]Message{userBundle("ada", "asked before this existed")}, map[string]any{}))
 
 	resumed, err := NewRun(ctx, cm, "ns", "thread-1", "")

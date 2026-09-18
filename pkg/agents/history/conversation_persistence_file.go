@@ -37,6 +37,7 @@ type fileRecord struct {
 // branching save mints a new thread ID), so replay rebuilds the indexes
 // without re-running the branching logic.
 type fileMessageRecord struct {
+	GroupID        string         `json:"group_id,omitempty"`
 	RunID          string         `json:"run_id"`
 	PreviousRunID  string         `json:"previous_run_id,omitempty"`
 	ThreadID       string         `json:"thread_id"`
@@ -117,7 +118,7 @@ func (p *FileConversationPersistence) LoadMessages(ctx context.Context, namespac
 
 // SaveMessages saves messages in memory and appends them to the
 // conversation's JSONL file
-func (p *FileConversationPersistence) SaveMessages(ctx context.Context, namespace, runId, previousRunId, threadId, conversationId string, messages []Message, meta map[string]any) error {
+func (p *FileConversationPersistence) SaveMessages(ctx context.Context, namespace, groupID, runId, previousRunId, threadId, conversationId string, messages []Message, meta map[string]any) error {
 	ctx, span := tracer.Start(ctx, "FileConversationPersistence.SaveMessages")
 	defer span.End()
 
@@ -132,7 +133,7 @@ func (p *FileConversationPersistence) SaveMessages(ctx context.Context, namespac
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	if err := p.mem.SaveMessages(ctx, namespace, runId, previousRunId, threadId, conversationId, messages, meta); err != nil {
+	if err := p.mem.SaveMessages(ctx, namespace, groupID, runId, previousRunId, threadId, conversationId, messages, meta); err != nil {
 		return err
 	}
 
@@ -156,6 +157,7 @@ func (p *FileConversationPersistence) SaveMessages(ctx context.Context, namespac
 			PreviousRunID:  stored.PreviousRunID,
 			ThreadID:       stored.ThreadID,
 			ConversationID: stored.ConversationID,
+			GroupID:        stored.GroupID,
 			Namespace:      stored.Namespace,
 			// Persist this save's increment, not the in-memory readback:
 			// a run saved more than once under the same run id merges its
@@ -312,6 +314,7 @@ func (p *FileConversationPersistence) applyRecord(rec *fileRecord) error {
 // branches off the middle of an existing thread.
 func (p *FileConversationPersistence) applyMessageRecord(rec *fileMessageRecord) {
 	m := p.mem
+	rec.GroupID = NormalizeGroupID(rec.GroupID)
 
 	// Incremental save replayed: a run saved more than once under the
 	// same run id writes one record per increment. Append to the existing
@@ -346,6 +349,7 @@ func (p *FileConversationPersistence) applyMessageRecord(rec *fileMessageRecord)
 		thread = &inMemoryThread{
 			ThreadID:       rec.ThreadID,
 			ConversationID: rec.ConversationID,
+			GroupID:        rec.GroupID,
 			OriginRunID:    rec.RunID,
 			Namespace:      rec.Namespace,
 			CreatedAt:      rec.CreatedAt,
@@ -360,6 +364,7 @@ func (p *FileConversationPersistence) applyMessageRecord(rec *fileMessageRecord)
 		PreviousRunID:  rec.PreviousRunID,
 		ThreadID:       rec.ThreadID,
 		ConversationID: rec.ConversationID,
+		GroupID:        rec.GroupID,
 		Namespace:      rec.Namespace,
 		Messages:       rec.Messages,
 		Meta:           rec.Meta,

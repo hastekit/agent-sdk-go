@@ -11,7 +11,7 @@ import (
 
 func saveTurn(t *testing.T, p ConversationPersistenceAdapter, namespace, runID, prevID, threadID string) {
 	t.Helper()
-	err := p.SaveMessages(context.Background(), namespace, runID, prevID, threadID, "", []Message{messages.New("user", nil)}, nil)
+	err := p.SaveMessages(context.Background(), namespace, "default", runID, prevID, threadID, "", []Message{messages.New("user", nil)}, nil)
 	require.NoError(t, err)
 }
 
@@ -23,7 +23,7 @@ func TestInMemoryListThreads(t *testing.T) {
 	saveTurn(t, p, "default", "m3", "", "thread-b")
 	saveTurn(t, p, "other", "m4", "", "thread-c")
 
-	threads, err := p.ListThreads(context.Background(), "default")
+	threads, err := p.ListThreads(context.Background(), "default", "default")
 	require.NoError(t, err)
 	require.Len(t, threads, 2)
 
@@ -36,7 +36,7 @@ func TestInMemoryListThreads(t *testing.T) {
 	assert.Equal(t, "m2", byID["thread-a"].LastRunID)
 
 	// Empty namespace lists across all namespaces.
-	all, err := p.ListThreads(context.Background(), "")
+	all, err := p.ListThreads(context.Background(), "", "default")
 	require.NoError(t, err)
 	assert.Len(t, all, 3)
 }
@@ -54,9 +54,39 @@ func TestFileListThreadsSurvivesRestart(t *testing.T) {
 	require.NoError(t, err)
 	defer p2.Close()
 
-	threads, err := p2.ListThreads(context.Background(), "default")
+	threads, err := p2.ListThreads(context.Background(), "default", "default")
 	require.NoError(t, err)
 	require.Len(t, threads, 1)
 	assert.Equal(t, "thread-a", threads[0].ThreadID)
 	assert.Equal(t, 2, threads[0].MessageCount)
+}
+
+func TestRoutineAttributionSurvivesFollowupsAndRestart(t *testing.T) {
+	dir := t.TempDir()
+	p, err := NewFileConversationPersistence(dir)
+	require.NoError(t, err)
+	ctx := context.Background()
+	require.NoError(t, p.SaveMessages(ctx, "tenant",
+
+		"routine-1", "run-1", "", "scheduled", "", nil, map[string]any{
+			RunContextMetaKey: map[string]any{RoutineAgentContextKey: "assistant"},
+		}))
+	saveTurn(t, p, "tenant", "followup", "run-1", "scheduled")
+	saveTurn(t, p, "tenant", "normal-run", "", "normal")
+	require.NoError(t, p.Close())
+	reopened, err := NewFileConversationPersistence(dir)
+	require.NoError(t, err)
+	defer reopened.Close()
+	threads, err := reopened.ListThreads(ctx, "tenant", "routine-1")
+	require.NoError(t, err)
+	require.Len(t, threads, 1)
+	for _, thread := range threads {
+		if thread.ThreadID == "scheduled" {
+			require.Equal(t, "routine-1", thread.GroupID)
+			require.Equal(t, "assistant", thread.AgentName)
+			require.Equal(t, 2, thread.MessageCount)
+		} else {
+			require.Empty(t, thread.GroupID)
+		}
+	}
 }

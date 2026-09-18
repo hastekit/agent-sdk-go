@@ -19,6 +19,7 @@ var (
 
 // ConversationMessage represents a turn within a thread.
 type ConversationMessage struct {
+	GroupID        string         `json:"group_id,omitempty" db:"group_id"`
 	RunID          string         `json:"run_id" db:"run_id"`
 	ThreadID       string         `json:"thread_id" db:"thread_id"`
 	ConversationID string         `json:"conversation_id" db:"conversation_id"`
@@ -44,7 +45,9 @@ type ConversationPersistenceAdapter interface {
 	NewRunID(ctx context.Context) string
 	Now(ctx context.Context) time.Time
 	LoadMessages(ctx context.Context, namespace string, threadID string, previousRunID string) ([]ConversationMessage, error)
-	SaveMessages(ctx context.Context, namespace, runId, previousRunId, threadID string, conversationId string, messages []Message, meta map[string]any) error
+	// SaveMessages assigns the group (empty selects DefaultGroupID) to a new conversation. Implementations
+	// must preserve its group on continuations, incremental saves, and forks.
+	SaveMessages(ctx context.Context, namespace, groupID, runId, previousRunId, threadID string, conversationId string, messages []Message, meta map[string]any) error
 	SaveSummary(ctx context.Context, namespace string, summary Summary) error
 }
 
@@ -121,6 +124,7 @@ func WithoutSteeringNotices() ConversationManagerOptions {
 type ConversationRunManager struct {
 	ConversationPersistenceAdapter
 
+	groupID        string
 	namespace      string
 	conversationId string
 	runId          string
@@ -173,6 +177,7 @@ func NewRun(ctx context.Context, cm *CommonConversationManager, namespace string
 		messageAttribution:             cm.MessageAttribution,
 		steeringNotices:                cm.SteeringNotices,
 		msgIdToRunId:                   make(map[string]string),
+		groupID:                        DefaultGroupID,
 		State:                          make(map[string]string),
 	}
 
@@ -253,6 +258,27 @@ func NewRun(ctx context.Context, cm *CommonConversationManager, namespace string
 }
 
 type RunOption func(manager *ConversationRunManager)
+
+// WithGroupID assigns a group to a new conversation. Restored threads and forks
+// retain their original group. Empty selects DefaultGroupID.
+func WithGroupID(id string) RunOption {
+	return func(cm *ConversationRunManager) {
+		if cm.previousRunId == "" {
+			cm.groupID = NormalizeGroupID(id)
+		}
+	}
+}
+
+// DefaultGroupID is the group used for ordinary conversations.
+const DefaultGroupID = "default"
+
+// NormalizeGroupID selects the default group when no ID is supplied.
+func NormalizeGroupID(id string) string {
+	if id == "" {
+		return DefaultGroupID
+	}
+	return id
+}
 
 // WithRunID selects a caller-provided execution ID. It must be new in this
 // namespace. Omit it to retain generated IDs and legacy paused-run continuation.
@@ -513,6 +539,7 @@ func (cm *ConversationRunManager) LoadMessages(ctx context.Context, namespace st
 		}
 		cm.threadId = msg.ThreadID
 		cm.conversationId = msg.ConversationID
+		cm.groupID = NormalizeGroupID(msg.GroupID)
 		cm.previousRunId = msg.RunID
 
 		oldMessages = append(oldMessages, msg.Messages...)
@@ -543,7 +570,12 @@ func (cm *ConversationRunManager) GetMeta() map[string]any {
 	return cm.lastMessageMeta
 }
 
-// GetMessageID returns the current run id
+// GetGroupID returns the group of the new or restored conversation.
+func (cm *ConversationRunManager) GetGroupID() string {
+	return cm.groupID
+}
+
+// GetRunID returns the current run ID.
 func (cm *ConversationRunManager) GetRunID() string {
 	return cm.runId
 }
@@ -595,7 +627,7 @@ func (cm *ConversationRunManager) SaveMessages(ctx context.Context) error {
 	}
 
 	if cm.ConversationPersistenceAdapter != nil {
-		err := cm.ConversationPersistenceAdapter.SaveMessages(ctx, cm.namespace, cm.runId, cm.previousRunId, cm.threadId, cm.conversationId, cm.newMessages, meta)
+		err := cm.ConversationPersistenceAdapter.SaveMessages(ctx, cm.namespace, cm.groupID, cm.runId, cm.previousRunId, cm.threadId, cm.conversationId, cm.newMessages, meta)
 		if err != nil {
 			return err
 		}

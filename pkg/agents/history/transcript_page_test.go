@@ -24,7 +24,7 @@ func TestTranscriptPages(t *testing.T) {
 			ids := []string{"z", "a", "m", "b", "x"}
 			previous := ""
 			for _, id := range ids {
-				require.NoError(t, p.SaveMessages(ctx, "ns", id, previous, "thread", "conversation", []Message{userBundle("user", id)}, nil))
+				require.NoError(t, p.SaveMessages(ctx, "ns", "default", id, previous, "thread", "conversation", []Message{userBundle("user", id)}, nil))
 				previous = id
 			}
 			page, err := LoadTranscriptPage(ctx, p, "ns", "thread", TranscriptPageOptions{Limit: 2})
@@ -34,7 +34,7 @@ func TestTranscriptPages(t *testing.T) {
 			require.Equal(t, "b", page.NextBeforeRunID)
 			require.Equal(t, "x", page.Latest.RunID)
 			// A concurrent append doesn't shift the older-page boundary.
-			require.NoError(t, p.SaveMessages(ctx, "ns", "new", "x", "thread", "conversation", nil, nil))
+			require.NoError(t, p.SaveMessages(ctx, "ns", "default", "new", "x", "thread", "conversation", nil, nil))
 			page, err = LoadTranscriptPage(ctx, p, "ns", "thread", TranscriptPageOptions{Limit: 2, BeforeRunID: page.NextBeforeRunID})
 			require.NoError(t, err)
 			require.Equal(t, []string{"a", "m"}, []string{page.Rows[0].RunID, page.Rows[1].RunID})

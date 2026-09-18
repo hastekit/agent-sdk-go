@@ -16,6 +16,7 @@ require (
 	github.com/qdrant/go-client v1.17.1
 	github.com/redis/go-redis/v9 v9.17.3
 	github.com/restatedev/sdk-go v0.23.0
+	github.com/robfig/cron/v3 v3.0.1
 	github.com/stretchr/testify v1.11.1
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.65.0
 	go.opentelemetry.io/otel v1.45.0
@@ -30,6 +31,7 @@ require (
 	go.temporal.io/sdk/contrib/opentelemetry v0.7.0
 	golang.org/x/oauth2 v0.36.0
 	golang.org/x/sync v0.20.0
+	golang.org/x/sys v0.47.0
 	google.golang.org/protobuf v1.36.11
 	gopkg.in/yaml.v3 v3.0.1
 )
@@ -82,7 +84,6 @@ require (
 	golang.org/x/arch v0.17.0 // indirect
 	golang.org/x/mod v0.35.0 // indirect
 	golang.org/x/net v0.55.0 // indirect
-	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.37.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260427160629-7cedc36a6bc4 // indirect

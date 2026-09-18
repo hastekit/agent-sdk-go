@@ -45,6 +45,7 @@ func (w *AgentWorkflow) Run(restateCtx restate.WorkflowContext, input *WorkflowI
 	// stream's lifecycle (subscribe + close), so we don't close here.
 	return agent.ExecuteWithoutTrace(restateCtx, &agents.AgentInput{
 		Namespace:     input.Namespace,
+		GroupID:       input.GroupID,
 		RunID:         input.RunID,
 		ThreadID:      input.ThreadID,
 		SessionID:     input.SessionID,

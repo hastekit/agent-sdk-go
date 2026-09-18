@@ -12,6 +12,7 @@ import (
 type RunEvent struct {
 	Event     string    `json:"event"`
 	Namespace string    `json:"namespace"`
+	GroupID   string    `json:"groupId"`
 	ThreadID  string    `json:"threadId"`
 	RunID     string    `json:"runId,omitempty"`
 	AgentName string    `json:"agentName,omitempty"`

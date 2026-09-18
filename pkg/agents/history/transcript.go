@@ -67,6 +67,7 @@ func (p *InMemoryConversationPersistence) LoadTranscript(ctx context.Context, na
 			RunID:          m.RunID,
 			ThreadID:       m.ThreadID,
 			ConversationID: m.ConversationID,
+			GroupID:        m.GroupID,
 			Messages:       m.Messages,
 			Meta:           m.Meta,
 		})

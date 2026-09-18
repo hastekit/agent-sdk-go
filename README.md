@@ -16,6 +16,7 @@ A powerful Golang SDK for building AI agents and making LLM calls across multipl
 - **🔧 Tool Calling** - Function calling and MCP (Model Context Protocol) tool integration
 - **🪝 Middlewares** - Intercept tool calls and model calls for auth, budgets, and audit
 - **🏷️ Tool Annotations** - MCP-style behavioural hints on both MCP and function tools
+- **⏰ Routines** - Persistent datetime/cron agent tasks with HTTP APIs and agent tools ([setup](pkg/routines/README.md))
 - **💾 Conversation History** - Maintain context across interactions with built-in persistence
 - **🧩 Sub-Agents & Handoffs** - Call a specialist as a tool, or transfer the conversation to it
 - **🎚️ Steering** - Send a correction into a run already in flight

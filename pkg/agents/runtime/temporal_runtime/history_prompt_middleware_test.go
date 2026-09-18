@@ -56,7 +56,7 @@ func TestTemporalHistoryAndPromptMiddlewareUseExistingActivities(t *testing.T) {
 	for _, name := range []string{"agent_LoadMessagesActivity", "agent_SaveMessagesActivity", "agent_GetPromptActivity"} {
 		env.RegisterActivityWithOptions(activities[name], activity.RegisterOptions{Name: name})
 	}
-	_, err := env.ExecuteActivity("agent_SaveMessagesActivity", "tenant", "run", "", "thread", "conversation", []history.Message{}, map[string]any{"source": "original"})
+	_, err := env.ExecuteActivity("agent_SaveMessagesActivity", "tenant", "default", "run", "", "thread", "conversation", []history.Message{}, map[string]any{"source": "original"})
 	require.NoError(t, err)
 	value, err := env.ExecuteActivity("agent_LoadMessagesActivity", "tenant", "thread", "")
 	require.NoError(t, err)
@@ -70,4 +70,27 @@ func TestTemporalHistoryAndPromptMiddlewareUseExistingActivities(t *testing.T) {
 	var prompt string
 	require.NoError(t, value.Get(&prompt))
 	require.Equal(t, "cached prompt inside activity", prompt)
+}
+
+func TestGroupedHistoryActivity(t *testing.T) {
+	store := history.NewInMemoryConversationPersistence()
+	a := temporal_runtime.NewTemporalAgent(nil, &agents.AgentOptions{
+		Name: "agent", History: history.NewConversationManager(store),
+		Middlewares: []agents.Middleware{activityPersistenceMiddleware{t: t}},
+	}, nil)
+	var suite testsuite.WorkflowTestSuite
+	env := suite.NewTestActivityEnvironment()
+	name := "agent_SaveMessagesActivity"
+	env.RegisterActivityWithOptions(a.GetActivities()[name], activity.RegisterOptions{Name: name})
+	_, err := env.ExecuteActivity(name, "tenant", "project-1", "run", "", "thread", "conversation", []history.Message{}, map[string]any{"source": "original"})
+	require.NoError(t, err)
+	normal, err := store.ListThreads(context.Background(), "tenant", "default")
+	require.NoError(t, err)
+	require.Empty(t, normal)
+	grouped, err := store.ListThreads(context.Background(), "tenant", "project-1")
+	require.NoError(t, err)
+	require.Len(t, grouped, 1)
+	rows, err := store.LoadMessages(context.Background(), "tenant", "thread", "")
+	require.NoError(t, err)
+	require.Equal(t, "project-1", rows[0].GroupID)
 }

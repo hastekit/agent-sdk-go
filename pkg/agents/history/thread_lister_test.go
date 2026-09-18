@@ -19,16 +19,16 @@ func TestListThreadsInMemory(t *testing.T) {
 	ctx := context.Background()
 	p := NewInMemoryConversationPersistence()
 
-	require.NoError(t, p.SaveMessages(ctx, "ns", "m1", "", "thread-a", "conv-a",
+	require.NoError(t, p.SaveMessages(ctx, "ns", "default", "m1", "", "thread-a", "conv-a",
 		[]Message{userBundle("user", "first question about Go")}, nil))
-	require.NoError(t, p.SaveMessages(ctx, "ns", "m2", "m1", "thread-a", "conv-a",
+	require.NoError(t, p.SaveMessages(ctx, "ns", "default", "m2", "m1", "thread-a", "conv-a",
 		[]Message{userBundle("user", "follow-up")}, nil))
-	require.NoError(t, p.SaveMessages(ctx, "ns", "m3", "", "thread-b", "conv-b",
+	require.NoError(t, p.SaveMessages(ctx, "ns", "default", "m3", "", "thread-b", "conv-b",
 		[]Message{userBundle("user", "another topic")}, nil))
-	require.NoError(t, p.SaveMessages(ctx, "other-ns", "m4", "", "thread-c", "conv-c",
+	require.NoError(t, p.SaveMessages(ctx, "other-ns", "default", "m4", "", "thread-c", "conv-c",
 		[]Message{userBundle("user", "hidden")}, nil))
 
-	threads, err := p.ListThreads(ctx, "ns")
+	threads, err := p.ListThreads(ctx, "ns", "default")
 	require.NoError(t, err)
 	require.Len(t, threads, 2)
 
@@ -50,7 +50,7 @@ func TestListThreadsInMemory(t *testing.T) {
 	assert.False(t, hidden)
 
 	// Empty namespace lists everything.
-	all, err := p.ListThreads(ctx, "")
+	all, err := p.ListThreads(ctx, "", "default")
 	require.NoError(t, err)
 	assert.Len(t, all, 3)
 }
@@ -61,13 +61,13 @@ func TestListThreadsFilePersistenceSurvivesRestart(t *testing.T) {
 
 	p, err := NewFileConversationPersistence(dir)
 	require.NoError(t, err)
-	require.NoError(t, p.SaveMessages(ctx, "ns", "m1", "", "thread-a", "conv-a",
+	require.NoError(t, p.SaveMessages(ctx, "ns", "default", "m1", "", "thread-a", "conv-a",
 		[]Message{userBundle("user", "persisted question")}, nil))
 	require.NoError(t, p.Close())
 
 	reopened, err := NewFileConversationPersistence(dir)
 	require.NoError(t, err)
-	threads, err := reopened.ListThreads(ctx, "ns")
+	threads, err := reopened.ListThreads(ctx, "ns", "default")
 	require.NoError(t, err)
 	require.Len(t, threads, 1)
 	assert.Equal(t, "thread-a", threads[0].ThreadID)
@@ -90,13 +90,13 @@ func TestListThreadsOrderedByUpdatedAtDesc(t *testing.T) {
 	ctx := context.Background()
 	p := NewInMemoryConversationPersistence()
 
-	require.NoError(t, p.SaveMessages(ctx, "ns", "m1", "", "thread-a", "conv-a",
+	require.NoError(t, p.SaveMessages(ctx, "ns", "default", "m1", "", "thread-a", "conv-a",
 		[]Message{userBundle("user", "older")}, nil))
 	time.Sleep(5 * time.Millisecond)
-	require.NoError(t, p.SaveMessages(ctx, "ns", "m2", "", "thread-b", "conv-b",
+	require.NoError(t, p.SaveMessages(ctx, "ns", "default", "m2", "", "thread-b", "conv-b",
 		[]Message{userBundle("user", "newer")}, nil))
 
-	threads, err := p.ListThreads(ctx, "ns")
+	threads, err := p.ListThreads(ctx, "ns", "default")
 	require.NoError(t, err)
 	require.Len(t, threads, 2)
 	assert.Equal(t, "thread-b", threads[0].ThreadID)
@@ -147,13 +147,13 @@ func TestSaveMessagesMergesSameRunID(t *testing.T) {
 	p := NewInMemoryConversationPersistence()
 
 	// Turn 1: run A completes.
-	require.NoError(t, p.SaveMessages(ctx, "ns", "runA", "", "T", "C",
+	require.NoError(t, p.SaveMessages(ctx, "ns", "default", "runA", "", "T", "C",
 		[]Message{userBundle("user", "how are you")}, map[string]any{}))
 	// Turn 2: run B, first incremental save (opens with the user turn).
-	require.NoError(t, p.SaveMessages(ctx, "ns", "runB", "runA", "T", "C",
+	require.NoError(t, p.SaveMessages(ctx, "ns", "default", "runB", "runA", "T", "C",
 		[]Message{userBundle("user", "tell me a joke")}, map[string]any{}))
 	// Turn 2: run B continues under the SAME id (tool/approval round).
-	require.NoError(t, p.SaveMessages(ctx, "ns", "runB", "runB", "T", "C",
+	require.NoError(t, p.SaveMessages(ctx, "ns", "default", "runB", "runB", "T", "C",
 		[]Message{userBundle("agent", "here is a joke")}, map[string]any{}))
 
 	rows, err := p.LoadMessages(ctx, "ns", "T", "")
@@ -174,11 +174,11 @@ func TestFileReplayMergesSameRunID(t *testing.T) {
 
 	p, err := NewFileConversationPersistence(dir)
 	require.NoError(t, err)
-	require.NoError(t, p.SaveMessages(ctx, "ns", "runA", "", "T", "C",
+	require.NoError(t, p.SaveMessages(ctx, "ns", "default", "runA", "", "T", "C",
 		[]Message{userBundle("user", "how are you")}, map[string]any{}))
-	require.NoError(t, p.SaveMessages(ctx, "ns", "runB", "runA", "T", "C",
+	require.NoError(t, p.SaveMessages(ctx, "ns", "default", "runB", "runA", "T", "C",
 		[]Message{userBundle("user", "tell me a joke")}, map[string]any{}))
-	require.NoError(t, p.SaveMessages(ctx, "ns", "runB", "runB", "T", "C",
+	require.NoError(t, p.SaveMessages(ctx, "ns", "default", "runB", "runB", "T", "C",
 		[]Message{userBundle("agent", "here is a joke")}, map[string]any{}))
 	require.NoError(t, p.Close())
 

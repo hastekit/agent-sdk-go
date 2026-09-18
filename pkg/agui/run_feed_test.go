@@ -65,6 +65,7 @@ func TestRunFeedReportsAConversationTheClientIsNotIn(t *testing.T) {
 	assert.Equal(t, agents.RunEventStarted, out.Events[0].Event)
 	assert.Equal(t, "conversation-a", out.Events[0].ThreadID, "the thread it happened in")
 	assert.Equal(t, "default", out.Events[0].Namespace)
+	assert.Equal(t, "default", out.Events[0].GroupID)
 	assert.Equal(t, "Helper", out.Events[0].AgentName)
 	assert.Equal(t, agents.StreamIDForThread("default", "conversation-a"), out.Events[0].StreamID,
 		"so a client can attach without deriving anything")

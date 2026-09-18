@@ -56,10 +56,10 @@ func TestFileConversationPersistenceRoundtrip(t *testing.T) {
 	}
 
 	meta := map[string]any{"step": "complete"}
-	if err := p.SaveMessages(ctx, "ns", "msg-1", "", "thread-1", "conv-1", []Message{newTestMessage(t, "alice", "hello")}, meta); err != nil {
+	if err := p.SaveMessages(ctx, "ns", "default", "msg-1", "", "thread-1", "conv-1", []Message{newTestMessage(t, "alice", "hello")}, meta); err != nil {
 		t.Fatalf("failed to save msg-1: %v", err)
 	}
-	if err := p.SaveMessages(ctx, "ns", "msg-2", "msg-1", "thread-1", "conv-1", []Message{newTestMessage(t, "bob", "hi back")}, meta); err != nil {
+	if err := p.SaveMessages(ctx, "ns", "default", "msg-2", "msg-1", "thread-1", "conv-1", []Message{newTestMessage(t, "bob", "hi back")}, meta); err != nil {
 		t.Fatalf("failed to save msg-2: %v", err)
 	}
 
@@ -115,14 +115,14 @@ func TestFileConversationPersistenceBranchReplay(t *testing.T) {
 		t.Fatalf("failed to create persistence: %v", err)
 	}
 
-	if err := p.SaveMessages(ctx, "ns", "msg-1", "", "thread-1", "conv-1", []Message{newTestMessage(t, "alice", "first")}, nil); err != nil {
+	if err := p.SaveMessages(ctx, "ns", "default", "msg-1", "", "thread-1", "conv-1", []Message{newTestMessage(t, "alice", "first")}, nil); err != nil {
 		t.Fatalf("failed to save msg-1: %v", err)
 	}
-	if err := p.SaveMessages(ctx, "ns", "msg-2", "msg-1", "thread-1", "conv-1", []Message{newTestMessage(t, "alice", "second")}, nil); err != nil {
+	if err := p.SaveMessages(ctx, "ns", "default", "msg-2", "msg-1", "thread-1", "conv-1", []Message{newTestMessage(t, "alice", "second")}, nil); err != nil {
 		t.Fatalf("failed to save msg-2: %v", err)
 	}
 	// Branch off msg-1: SaveMessages mints a new thread containing msg-1 + msg-3
-	if err := p.SaveMessages(ctx, "ns", "msg-3", "msg-1", "thread-1", "conv-1", []Message{newTestMessage(t, "alice", "branched")}, nil); err != nil {
+	if err := p.SaveMessages(ctx, "ns", "default", "msg-3", "msg-1", "thread-1", "conv-1", []Message{newTestMessage(t, "alice", "branched")}, nil); err != nil {
 		t.Fatalf("failed to save msg-3: %v", err)
 	}
 
@@ -175,17 +175,17 @@ func TestFileConversationPersistenceMultipleConversations(t *testing.T) {
 		t.Fatalf("failed to create persistence: %v", err)
 	}
 
-	if err := p.SaveMessages(ctx, "ns", "msg-a1", "", "thread-a", "conv-a", []Message{newTestMessage(t, "alice", "a1")}, nil); err != nil {
+	if err := p.SaveMessages(ctx, "ns", "default", "msg-a1", "", "thread-a", "conv-a", []Message{newTestMessage(t, "alice", "a1")}, nil); err != nil {
 		t.Fatalf("failed to save msg-a1: %v", err)
 	}
-	if err := p.SaveMessages(ctx, "ns", "msg-a2", "msg-a1", "thread-a", "conv-a", []Message{newTestMessage(t, "alice", "a2")}, nil); err != nil {
+	if err := p.SaveMessages(ctx, "ns", "default", "msg-a2", "msg-a1", "thread-a", "conv-a", []Message{newTestMessage(t, "alice", "a2")}, nil); err != nil {
 		t.Fatalf("failed to save msg-a2: %v", err)
 	}
-	if err := p.SaveMessages(ctx, "ns", "msg-b1", "", "thread-b", "conv-b", []Message{newTestMessage(t, "bob", "b1")}, nil); err != nil {
+	if err := p.SaveMessages(ctx, "ns", "default", "msg-b1", "", "thread-b", "conv-b", []Message{newTestMessage(t, "bob", "b1")}, nil); err != nil {
 		t.Fatalf("failed to save msg-b1: %v", err)
 	}
 	// Empty conversation ID resolves to a generated one at save time
-	if err := p.SaveMessages(ctx, "ns", "msg-c1", "", "", "", []Message{newTestMessage(t, "carol", "c1")}, nil); err != nil {
+	if err := p.SaveMessages(ctx, "ns", "default", "msg-c1", "", "", "", []Message{newTestMessage(t, "carol", "c1")}, nil); err != nil {
 		t.Fatalf("failed to save msg-c1: %v", err)
 	}
 
@@ -239,7 +239,7 @@ func TestFileConversationPersistenceSummaryReplay(t *testing.T) {
 	}
 
 	for _, ids := range [][2]string{{"msg-1", ""}, {"msg-2", "msg-1"}, {"msg-3", "msg-2"}} {
-		if err := p.SaveMessages(ctx, "ns", ids[0], ids[1], "thread-1", "conv-1", []Message{newTestMessage(t, "alice", ids[0])}, nil); err != nil {
+		if err := p.SaveMessages(ctx, "ns", "default", ids[0], ids[1], "thread-1", "conv-1", []Message{newTestMessage(t, "alice", ids[0])}, nil); err != nil {
 			t.Fatalf("failed to save %s: %v", ids[0], err)
 		}
 	}
@@ -289,7 +289,7 @@ func TestFileConversationPersistenceSkipsPartialTrailingLine(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create persistence: %v", err)
 	}
-	if err := p.SaveMessages(ctx, "ns", "msg-1", "", "thread-1", "conv-1", []Message{newTestMessage(t, "alice", "hello")}, nil); err != nil {
+	if err := p.SaveMessages(ctx, "ns", "default", "msg-1", "", "thread-1", "conv-1", []Message{newTestMessage(t, "alice", "hello")}, nil); err != nil {
 		t.Fatalf("failed to save msg-1: %v", err)
 	}
 	if err := p.Close(); err != nil {

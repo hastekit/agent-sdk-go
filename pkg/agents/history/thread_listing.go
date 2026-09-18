@@ -7,8 +7,16 @@ import (
 	"time"
 )
 
+// Routine context keys are persisted with each scheduler-triggered turn.
+const (
+	RoutineIDContextKey    = "routine_id"
+	RoutineAgentContextKey = "routine_agent"
+)
+
 // ThreadInfo summarizes a stored thread for listing UIs.
 type ThreadInfo struct {
+	GroupID        string    `json:"group_id,omitempty"`
+	AgentName      string    `json:"agent_name,omitempty"`
 	ThreadID       string    `json:"thread_id"`
 	ConversationID string    `json:"conversation_id"`
 	Namespace      string    `json:"namespace"`
@@ -21,23 +29,25 @@ type ThreadInfo struct {
 
 // ThreadLister is an optional capability of persistence adapters that
 // can enumerate stored threads. Pass namespace "" to list across all
-// namespaces.
+// namespaces. An empty group ID selects DefaultGroupID (normal conversations);
+// a nonempty group ID matches that group exactly.
 type ThreadLister interface {
-	ListThreads(ctx context.Context, namespace string) ([]ThreadInfo, error)
+	ListThreads(ctx context.Context, namespace, groupID string) ([]ThreadInfo, error)
 }
 
 // ListThreads returns the stored threads, newest first.
-func (p *InMemoryConversationPersistence) ListThreads(ctx context.Context, namespace string) ([]ThreadInfo, error) {
+func (p *InMemoryConversationPersistence) ListThreads(ctx context.Context, namespace, groupID string) ([]ThreadInfo, error) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
 	threads := make([]ThreadInfo, 0, len(p.threads))
 	for _, t := range p.threads {
-		if namespace != "" && t.Namespace != namespace {
+		if (namespace != "" && t.Namespace != namespace) || t.GroupID != NormalizeGroupID(groupID) {
 			continue
 		}
 
 		info := ThreadInfo{
+			GroupID:        t.GroupID,
 			ThreadID:       t.ThreadID,
 			ConversationID: t.ConversationID,
 			Namespace:      t.Namespace,
@@ -57,6 +67,11 @@ func (p *InMemoryConversationPersistence) ListThreads(ctx context.Context, names
 			}
 			if m.CreatedAt.After(info.UpdatedAt) {
 				info.UpdatedAt = m.CreatedAt
+			}
+			if info.AgentName == "" {
+				if rc, ok := m.Meta[RunContextMetaKey].(map[string]any); ok {
+					info.AgentName, _ = rc[RoutineAgentContextKey].(string)
+				}
 			}
 			if info.Title == "" {
 				info.Title = titleFromBundles(m.Messages)
@@ -121,6 +136,6 @@ func truncateTitle(s string) string {
 }
 
 // ListThreads returns the stored threads, newest first.
-func (p *FileConversationPersistence) ListThreads(ctx context.Context, namespace string) ([]ThreadInfo, error) {
-	return p.mem.ListThreads(ctx, namespace)
+func (p *FileConversationPersistence) ListThreads(ctx context.Context, namespace, groupID string) ([]ThreadInfo, error) {
+	return p.mem.ListThreads(ctx, namespace, groupID)
 }

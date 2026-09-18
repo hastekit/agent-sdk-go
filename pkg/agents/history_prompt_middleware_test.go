@@ -110,7 +110,7 @@ func TestHistoryAndPromptMiddlewareErrors(t *testing.T) {
 	p := agents.WrapHistoryPersistence(nil, m)
 	_, err := p.LoadMessages(t.Context(), "tenant", "thread", "")
 	require.ErrorIs(t, err, failure)
-	err = p.SaveMessages(t.Context(), "tenant", "run", "", "thread", "conversation", nil, nil)
+	err = p.SaveMessages(t.Context(), "tenant", "default", "run", "", "thread", "conversation", nil, nil)
 	require.ErrorIs(t, err, failure)
 	_, err = agents.WrapPromptProvider(nil, m).GetPrompt(t.Context(), nil)
 	require.ErrorIs(t, err, failure)

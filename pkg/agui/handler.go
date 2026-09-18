@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 	"github.com/hastekit/agent-sdk-go/pkg/agents/skills"
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/constants"
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
+	"github.com/hastekit/agent-sdk-go/pkg/routines"
 )
 
 // Registry is the minimal view of an SDK client the AG-UI handler
@@ -27,6 +29,8 @@ type Registry interface {
 }
 
 type options struct {
+	routineService     *routines.Service
+	routineScheduler   routines.Scheduler
 	a2aBaseURL         string
 	a2aHandlerOptions  func(agentName, namespace string) []a2asrv.RequestHandlerOption
 	a2aAuthorizer      agents.A2AAuthorizer
@@ -37,6 +41,20 @@ type options struct {
 	senderID           string
 	fullHistory        bool
 	keepalive          time.Duration
+}
+
+// WithRoutines enables routine management APIs and the embedded UI. The optional
+// scheduler exposes execution status; callers own its startup and shutdown.
+// Routines use WithNamespaceResolver, like agent runs. Protect management routes
+// with application authorization middleware.
+func WithRoutines(service *routines.Service, schedulers ...routines.Scheduler) Option {
+	return func(o *options) {
+		o.routineService = service
+		o.routineScheduler = nil
+		if len(schedulers) > 0 {
+			o.routineScheduler = schedulers[0]
+		}
+	}
 }
 
 // WithSkillStore enables namespace-scoped skill management APIs and the embedded
@@ -141,6 +159,14 @@ func NewHandler(registry Registry, opts ...Option) http.Handler {
 	o := buildOptions(opts)
 	mux := http.NewServeMux()
 	o.mountA2A(mux, registry)
+	if o.routineService != nil {
+		h := routines.NewHTTPHandler(o.routineService, routines.HTTPConfig{
+			Scheduler:         o.routineScheduler,
+			NamespaceResolver: o.namespaceResolver,
+		})
+		mux.Handle("/routines", h)
+		mux.Handle("/routines/", h)
+	}
 	handleFunc := func(pattern string, fn http.HandlerFunc) {
 		mux.Handle(pattern, o.withNamespace(fn))
 	}
@@ -156,6 +182,74 @@ func NewHandler(registry Registry, opts ...Option) http.Handler {
 			func(r *http.Request) (string, error) { return requestNamespace(r), nil })))
 	}
 
+	if o.routineService != nil {
+		handleFunc("GET /routines/{id}/threads", func(w http.ResponseWriter, r *http.Request) {
+			routine, err := o.routineService.Get(r.Context(), requestNamespace(r), r.PathValue("id"))
+			if err != nil {
+				if errors.Is(err, routines.ErrNotFound) {
+					writeJSONError(w, 404, "routine not found")
+				} else {
+					writeJSONError(w, 500, "unable to load routine")
+				}
+				return
+			}
+			result := []history.ThreadInfo{}
+			seen := map[string]bool{}
+			supported := false
+			// Try the current agent first for legacy rows without agent attribution.
+			names := append([]string{routine.Agent}, registry.AgentNames()...)
+			visited := map[string]bool{}
+			for _, name := range names {
+				if visited[name] {
+					continue
+				}
+				visited[name] = true
+				agent, ok := registry.Agent(name)
+				if !ok {
+					continue
+				}
+				lister := threadLister(agent)
+				if lister == nil {
+					continue
+				}
+				supported = true
+				threads, err := lister.ListThreads(r.Context(), requestNamespace(r), routine.ID)
+				if err != nil {
+					writeJSONError(w, 500, "unable to list routine conversations")
+					return
+				}
+				for _, thread := range threads {
+					if thread.GroupID != routine.ID {
+						continue
+					}
+					if thread.AgentName != "" && thread.AgentName != name {
+						continue
+					}
+					if seen[thread.ThreadID] {
+						continue
+					}
+					seen[thread.ThreadID] = true
+					thread.AgentName = name
+					result = append(result, thread)
+				}
+			}
+			if !supported {
+				writeJSONError(w, 501, "conversation history is not available")
+				return
+			}
+			// Latest occurrence, not most recently edited conversation.
+			sort.Slice(result, func(i, j int) bool {
+				if result[i].CreatedAt.Equal(result[j].CreatedAt) {
+					return result[i].ThreadID > result[j].ThreadID
+				}
+				return result[i].CreatedAt.After(result[j].CreatedAt)
+			})
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Cache-Control", "no-store")
+			_ = json.NewEncoder(w).Encode(map[string]any{"threads": result})
+		})
+	}
+
 	handleFunc("GET /agents", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		// full_history tells a client whether this server needs the whole
@@ -169,6 +263,7 @@ func NewHandler(registry Registry, opts ...Option) http.Handler {
 			"full_history": o.fullHistory,
 			"attachments":  o.attachmentStore != nil,
 			"skill_store":  o.skillStore != nil,
+			"routines":     o.routineService != nil,
 		})
 	})
 
@@ -256,7 +351,7 @@ func serveThreads(w http.ResponseWriter, r *http.Request, agent *agents.Agent, o
 		writeJSONError(w, http.StatusNotImplemented, "the agent's persistence adapter does not support thread listing")
 		return
 	}
-	threads, err := lister.ListThreads(r.Context(), requestNamespace(r))
+	threads, err := lister.ListThreads(r.Context(), requestNamespace(r), history.NormalizeGroupID(r.URL.Query().Get("group_id")))
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "unable to list threads: "+err.Error())
 		return
@@ -584,6 +679,7 @@ func serveRun(w http.ResponseWriter, r *http.Request, agent *agents.Agent, o opt
 		// Fold AG-UI context into the prompt RunContext. forwardedProps
 		// and state land at top-level keys so prompt templates can
 		// reach them via {{State.x}} / {{ForwardedProps.y}}.
+		GroupID: history.DefaultGroupID,
 		RunContext: map[string]any{
 			"Context":        contextFromAGUI(input.Context),
 			"ForwardedProps": input.ForwardedProps,

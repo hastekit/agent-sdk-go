@@ -94,7 +94,7 @@ func (p *InMemoryConversationPersistence) LoadTranscriptPage(ctx context.Context
 	}
 	row := func(id string) ConversationMessage {
 		m := p.messages[historyKey(namespace, id)]
-		return ConversationMessage{RunID: m.RunID, ThreadID: m.ThreadID, ConversationID: m.ConversationID, Messages: m.Messages, Meta: m.Meta}
+		return ConversationMessage{RunID: m.RunID, ThreadID: m.ThreadID, ConversationID: m.ConversationID, GroupID: m.GroupID, Messages: m.Messages, Meta: m.Meta}
 	}
 	page := &TranscriptPage{Rows: make([]ConversationMessage, 0, end-start)}
 	for _, id := range ids[start:end] {

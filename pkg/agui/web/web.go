@@ -82,6 +82,8 @@ const APIPrefix = "/api/agui"
 // the registry, with the AG-UI protocol endpoints mounted under
 // APIPrefix. *hastekit.SDK satisfies agui.Registry.
 // Use agui.WithSkillStore to enable the skill library.
+// Use agui.WithRoutines(service, scheduler) to enable routine management at
+// /api/agui/routines and the Routines panel. The caller runs the scheduler.
 func Handler(registry agui.Registry, opts ...agui.Option) http.Handler {
 	mux := http.NewServeMux()
 	api := agui.NewHandler(registry, opts...)
@@ -100,6 +102,8 @@ func Handler(registry agui.Registry, opts ...agui.Option) http.Handler {
 // Serve runs the embedded AG-UI chat client on addr, blocking like
 // http.ListenAndServe. Use agui.WithSkillStore with the same store used by
 // skills.NewSkillSet to enable skill management in the UI.
+// Use agui.WithRoutines(service, scheduler) to enable routines APIs and UI.
+// The application remains responsible for running and stopping the scheduler.
 func Serve(addr string, registry agui.Registry, opts ...agui.Option) error {
 	return http.ListenAndServe(addr, Handler(registry, opts...))
 }

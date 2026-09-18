@@ -19,8 +19,8 @@ func TestPersistenceNamespaceIsolation(t *testing.T) {
 				p = f
 			}
 			for _, ns := range []string{"tenant-a", "tenant-b", ""} {
-				require.NoError(t, p.SaveMessages(ctx, ns, "run1", "", "thread", "conv", []Message{{ID: ns + "-first"}}, nil))
-				require.NoError(t, p.SaveMessages(ctx, ns, "run2", "run1", "thread", "conv", []Message{{ID: ns + "-second"}}, nil))
+				require.NoError(t, p.SaveMessages(ctx, ns, "default", "run1", "", "thread", "conv", []Message{{ID: ns + "-first"}}, nil))
+				require.NoError(t, p.SaveMessages(ctx, ns, "default", "run2", "run1", "thread", "conv", []Message{{ID: ns + "-second"}}, nil))
 				require.NoError(t, p.SaveSummary(ctx, ns, Summary{ID: "summary", ThreadID: "thread", LastSummarizedRunID: "run1", SummaryMessage: Message{ID: ns + "-summary"}}))
 			}
 			check := func() {
@@ -34,7 +34,7 @@ func TestPersistenceNamespaceIsolation(t *testing.T) {
 					require.NoError(t, err)
 					require.Len(t, transcript, 2)
 					require.Equal(t, ns+"-first", transcript[0].Messages[0].ID)
-					threads, err := p.(ThreadLister).ListThreads(ctx, ns)
+					threads, err := p.(ThreadLister).ListThreads(ctx, ns, "default")
 					require.NoError(t, err)
 					if ns != "" {
 						require.Len(t, threads, 1)
@@ -64,8 +64,8 @@ func TestPersistenceNamespaceIsolation(t *testing.T) {
 func TestNamespaceCannotContinueAnotherNamespacesRun(t *testing.T) {
 	ctx := context.Background()
 	p := NewInMemoryConversationPersistence()
-	require.NoError(t, p.SaveMessages(ctx, "a", "secret-run", "", "secret-thread", "secret-conv", []Message{{ID: "secret"}}, nil))
-	require.NoError(t, p.SaveMessages(ctx, "b", "new-run", "secret-run", "secret-thread", "new-conv", []Message{{ID: "public"}}, nil))
+	require.NoError(t, p.SaveMessages(ctx, "a", "default", "secret-run", "", "secret-thread", "secret-conv", []Message{{ID: "secret"}}, nil))
+	require.NoError(t, p.SaveMessages(ctx, "b", "default", "new-run", "secret-run", "secret-thread", "new-conv", []Message{{ID: "public"}}, nil))
 	saved := p.getMessage("b", "new-run")
 	require.Equal(t, "new-conv", saved.ConversationID)
 	got, err := p.LoadMessages(ctx, "b", saved.ThreadID, "new-run")

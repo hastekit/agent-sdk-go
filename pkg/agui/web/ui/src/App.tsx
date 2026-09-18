@@ -14,6 +14,7 @@ import {
   useInterrupt,
 } from "@copilotkit/react-core/v2";
 import { ComposerSkillsContext } from "./composer-menu";
+import { RoutineLibrary } from "./routine-library";
 import { SkillLibrary } from "./skill-library";
 import { AttachmentMessageView } from "./attachment-message";
 import { AttachmentInput } from "./attachment-input";
@@ -22,6 +23,10 @@ import { StoppableHttpAgent } from "./stoppable-agent";
 import type { Message as AGUIMessage } from "@ag-ui/core";
 import {
   fetchAgents,
+  fetchRoutines,
+  fetchRoutine,
+  fetchRoutineThreads,
+  type Routine,
   fetchSkills,
   type SkillInfo,
   fetchThreads,
@@ -117,6 +122,53 @@ interface TrayInterrupt {
 const TrayContext = createContext<Tray>({ tasks: [], interrupt: null });
 
 export default function App() {
+  const [routinesEnabled, setRoutinesEnabled] = useState(false);
+  const [routinesOpen, setRoutinesOpen] = useState(false);
+  const [selectedRoutine, setSelectedRoutine] = useState<Routine | null>(null);
+  const [routineThreads, setRoutineThreads] = useState<ThreadInfo[]>([]);
+  const [routineHistoryError, setRoutineHistoryError] = useState("");
+  const [routineHistoryLoading, setRoutineHistoryLoading] = useState(false);
+  const [routineThreadReady, setRoutineThreadReady] = useState(false);
+  const routineHistoryRefresh = useRef<{ id: string; refresh: () => Promise<void> } | null>(null);
+  const navigation = useRef(0);
+  const restoreRoutine = useRef(paramFromURL("routine"));
+  const restoreRoutineThread = useRef(paramFromURL(THREAD_PARAM));
+  const [enabledRoutines, setEnabledRoutines] = useState<Routine[]>([]);
+  const [routineRevision, setRoutineRevision] = useState(0);
+  const [routineListError, setRoutineListError] = useState("");
+  const [routinesLoading, setRoutinesLoading] = useState(true);
+  const routinesChanged = useCallback(() => setRoutineRevision(value => value + 1), []);
+
+  useEffect(() => {
+    if (!routinesEnabled) return;
+    let cancelled = false;
+    let pending = false;
+    async function refresh() {
+      if (pending) return;
+      pending = true;
+      try {
+        const routines = await fetchRoutines();
+        if (!cancelled) {
+          setEnabledRoutines(routines.filter(routine => routine.enabled));
+          setRoutineListError("");
+        }
+      } catch (err) {
+        if (!cancelled) setRoutineListError(String(err));
+      } finally {
+        pending = false;
+        if (!cancelled) setRoutinesLoading(false);
+      }
+    }
+    void refresh();
+    // Agent tools and other clients can change definitions too.
+    const interval = window.setInterval(() => { if (!document.hidden) void refresh(); }, 30_000);
+    window.addEventListener("focus", refresh);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+      window.removeEventListener("focus", refresh);
+    };
+  }, [routinesEnabled, routineRevision]);
   const [skillStoreEnabled, setSkillStoreEnabled] = useState(false);
   const [libraryOpen, setLibraryOpen] = useState(false);
   const [skillRevision, setSkillRevision] = useState(0);
@@ -125,6 +177,8 @@ export default function App() {
   const [skillChoices, setSkillChoices] = useState<Record<string, boolean>>({});
   const [agents, setAgents] = useState<string[]>([]);
   const [agentName, setAgentName] = useState<string>("");
+  const listingAgent = useRef(agentName);
+  listingAgent.current = agentName;
   // Whether the server needs the full message list posted on every run.
   // Reported by GET /agents; false is both the default and the common case.
   const [fullHistory, setFullHistory] = useState(false);
@@ -169,8 +223,9 @@ export default function App() {
   // Load the agent list once.
   useEffect(() => {
     fetchAgents()
-      .then(({ agents: names, fullHistory, attachmentsEnabled, skillStoreEnabled }) => {
+      .then(({ agents: names, fullHistory, attachmentsEnabled, skillStoreEnabled, routinesEnabled }) => {
         setSkillStoreEnabled(skillStoreEnabled);
+        setRoutinesEnabled(routinesEnabled);
  setAttachmentsEnabled(attachmentsEnabled);
         setAgents(names);
         setFullHistory(fullHistory);
@@ -191,6 +246,7 @@ export default function App() {
     if (!agentName) return;
     try {
       const res = await fetchThreads(agentName);
+      if (listingAgent.current !== agentName) return;
       setListingSupported(res.supported);
       setThreads(res.threads);
     } catch (e) {
@@ -331,6 +387,16 @@ export default function App() {
   // something here you have not seen", not "this ran recently".
   const [unseen, setUnseen] = useState<Set<string>>(() => new Set());
 
+  const [threadGroups, setThreadGroups] = useState<Map<string, string>>(() => new Map());
+  const unseenRoutines = useMemo(() => {
+    const groups = new Set<string>();
+    for (const threadId of unseen) {
+      const group = threadGroups.get(threadId);
+      if (group && group !== "default") groups.add(group);
+    }
+    return groups;
+  }, [unseen, threadGroups]);
+
   // Watch every conversation in the namespace, not just the open one.
   //
   // The per-thread watch below covers the conversation on screen. This covers
@@ -366,6 +432,10 @@ export default function App() {
           // title and timestamp are written server-side as the run saves.
           if (seen.events.some((e) => e.event === "RUN_FINISHED")) {
             refreshThreads();
+            const history = routineHistoryRefresh.current;
+            if (history && seen.events.some(e => e.event === "RUN_FINISHED" && e.groupId === history.id)) {
+              void history.refresh();
+            }
           }
 
           // A run on the conversation the user is reading is one to join, not
@@ -374,6 +444,13 @@ export default function App() {
             void agentRef.current?.joinIfIdle();
           }
 
+          setThreadGroups(current => {
+            const next = new Map(current);
+            for (const event of seen.events) {
+              if (event.groupId) next.set(event.threadId, event.groupId);
+            }
+            return next;
+          });
           setUnseen((current) => {
             const next = new Set(current);
             let changed = false;
@@ -487,21 +564,27 @@ export default function App() {
   );
 
   const openThread = useCallback(
-    async (threadId: string) => {
+    async (threadId: string, targetAgent = agentName) => {
+      const request = ++navigation.current;
       try {
-        let { messages, run, nextCursor, sessionId } = await fetchMessages(agentName, threadId);
+        let { messages, run, nextCursor, sessionId } = await fetchMessages(targetAgent, threadId);
         // Full-history mode sends the transcript back to a stateless backend.
         // Preserve that contract even though the history API is paginated.
         if (fullHistory) {
           while (nextCursor) {
-            const page = await fetchMessages(agentName, threadId, nextCursor);
+            const page = await fetchMessages(targetAgent, threadId, nextCursor);
             messages = [...page.messages, ...messages];
             nextCursor = page.nextCursor;
           }
         }
+        if (request !== navigation.current) return;
+        setAgentName(targetAgent);
         setActive({ threadId, sessionId, initialMessages: messages, run, nextCursor });
+        setRoutineThreadReady(true);
       } catch (e) {
+        if (request !== navigation.current) return;
         setError(String(e));
+        setRoutineHistoryError(String(e));
       }
     },
     [agentName, fullHistory]
@@ -509,6 +592,10 @@ export default function App() {
 
   const selectThread = useCallback(
     async (t: ThreadInfo) => {
+      restoreRoutine.current = "";
+      opened.current.thread = "";
+      setSelectedRoutine(null);
+      navigation.current++;
       if (t.thread_id === active.threadId) return;
       await openThread(t.thread_id);
     },
@@ -519,7 +606,7 @@ export default function App() {
   // against. Runs on load and on an agent change; a thread already open is
   // left alone so this cannot fight the sidebar.
   useEffect(() => {
-    if (!agentName) return;
+    if (!agentName || restoreRoutine.current) return;
     const wanted = opened.current.thread;
     opened.current.thread = "";
     if (!wanted || wanted === active.threadId) return;
@@ -533,13 +620,94 @@ export default function App() {
   useEffect(() => rememberParam(AGENT_PARAM, agentName), [agentName]);
   useEffect(() => rememberParam(THREAD_PARAM, active.threadId), [active.threadId]);
 
-  const startNewChat = useCallback(() => setActive(newActive()), []);
+  const startNewChat = useCallback(() => {
+    navigation.current++;
+    restoreRoutine.current = "";
+    opened.current.thread = "";
+    setSelectedRoutine(null);
+    setActive(newActive());
+  }, []);
 
   const onAgentChange = useCallback((name: string) => {
+    navigation.current++;
+    restoreRoutine.current = "";
+    opened.current.thread = "";
+    setSelectedRoutine(null);
     setAgentName(name);
     setListingSupported(true);
     setActive(newActive());
   }, []);
+
+  const openThreadRef = useRef(openThread);
+  openThreadRef.current = openThread;
+  const selectRoutine = (routine: Routine) => {
+    navigation.current++;
+    restoreRoutine.current = "";
+    opened.current.thread = "";
+    setRoutineThreadReady(false);
+    setRoutineThreads([]);
+    setRoutineHistoryError("");
+    setRoutineHistoryLoading(true);
+    // A fresh object also reopens the latest run when this routine is clicked again.
+    setSelectedRoutine({ ...routine });
+  };
+
+  useEffect(() => {
+    if (!selectedRoutine) return;
+    let cancelled = false;
+    let pending = false;
+    let initial = true;
+    let refreshAgain = false;
+    const request = navigation.current;
+    async function refresh() {
+      if (cancelled) return;
+      // A completion arriving during a fetch must trigger another read;
+      // the in-flight response may predate the newly saved conversation.
+      if (pending) { refreshAgain = true; return; }
+      pending = true;
+      try {
+        const threads = await fetchRoutineThreads(selectedRoutine!.id);
+        if (cancelled) return;
+        setRoutineThreads(threads);
+        setRoutineHistoryError("");
+        if (initial && threads.length && request === navigation.current) {
+          initial = false;
+          const restored = restoreRoutine.current ? threads.find(t => t.thread_id === restoreRoutineThread.current) : undefined;
+          restoreRoutine.current = "";
+          opened.current.thread = "";
+          const latest = restored || threads[0];
+          await openThreadRef.current(latest.thread_id, latest.agent_name || selectedRoutine!.agent);
+        }
+      } catch (err) { if (!cancelled) setRoutineHistoryError(String(err)); }
+      finally {
+        pending = false;
+        if (!cancelled) {
+          setRoutineHistoryLoading(false);
+          if (refreshAgain) { refreshAgain = false; void refresh(); }
+        }
+      }
+    }
+    routineHistoryRefresh.current = { id: selectedRoutine.id, refresh };
+    void refresh();
+    return () => { cancelled = true; routineHistoryRefresh.current = null; };
+  }, [selectedRoutine]);
+
+  useEffect(() => {
+    const id = restoreRoutine.current;
+    if (!routinesEnabled || !id) return;
+    let cancelled = false;
+    const request = navigation.current;
+    fetchRoutine(id).then(routine => {
+      if (!cancelled && request === navigation.current) {
+        setRoutineHistoryLoading(true);
+        setSelectedRoutine(routine);
+      }
+    }).catch(() => { restoreRoutine.current = ""; });
+    return () => { cancelled = true; };
+  }, [routinesEnabled]);
+  useEffect(() => {
+    if (!restoreRoutine.current) rememberParam("routine", selectedRoutine?.id || "");
+  }, [selectedRoutine, routineThreadReady]);
 
   return (
     // data-copilotkit + .dark put this whole tree in CopilotKit v2's
@@ -551,19 +719,30 @@ export default function App() {
       className={"dark app" + (sidebarOpen ? "" : " sidebar-hidden")}
       data-copilotkit
     >
+      {routinesOpen && <RoutineLibrary initialAgent={agentName} onChanged={routinesChanged} onClose={() => setRoutinesOpen(false)} />}
       {libraryOpen && <SkillLibrary agentNames={agents} onClose={() => setLibraryOpen(false)} onSaved={() => setSkillRevision(v => v + 1)} />}
       <Sidebar
         threads={threads}
         activeThreadId={active.threadId}
         unseen={unseen}
+        unseenRoutines={unseenRoutines}
         onSelect={selectThread}
         onNew={startNewChat}
+        selectedRoutineId={selectedRoutine?.id}
+        onSelectRoutine={selectRoutine}
+        routines={enabledRoutines}
+        routinesLoading={routinesLoading}
+        routineError={routineListError}
+        onManageRoutines={routinesEnabled ? () => setRoutinesOpen(true) : undefined}
         onManageSkills={skillStoreEnabled ? () => setLibraryOpen(true) : undefined}
         onCollapse={() => setSidebarOpen(false)}
         listingSupported={listingSupported}
         error={error}
       />
-      {agent && (
+      {selectedRoutine && !routineThreadReady ? <main className="chat-pane routine-empty">
+        <h2>{selectedRoutine.name}</h2>
+        <p>{routineHistoryLoading ? "Loading latest conversation…" : routineHistoryError || "This routine has no conversations yet. Its first run will appear here."}</p>
+      </main> : agent && (
         <CopilotKitProvider
           key={active.threadId}
           selfManagedAgents={{ [agentName]: agent }}
@@ -580,6 +759,7 @@ export default function App() {
                   <PanelIcon />
                 </button>
               )}
+              {selectedRoutine && <span className="routine-chat-title">{selectedRoutine.name}</span>}
               <AgentMenu
                 agents={agents}
                 agentName={agentName}
@@ -622,6 +802,23 @@ export default function App() {
           </div>
         </CopilotKitProvider>
       )}
+      {selectedRoutine && <aside className="routine-history" aria-label="Routine conversation history">
+        <div className="routine-history-heading"><h2>Run history</h2><button className="icon-btn" aria-label="Manage routines" onClick={() => setRoutinesOpen(true)}>⚙</button></div>
+        <p className="hint">{selectedRoutine.name}</p>
+        {routineHistoryError && <p className="hint error" role="alert">{routineHistoryError}</p>}
+        {routineHistoryLoading && <p className="hint">Loading conversations…</p>}
+        {!routineHistoryLoading && !routineHistoryError && !routineThreads.length && <p className="hint">No runs yet.</p>}
+        {routineThreads.map((thread, index) => <button key={`${thread.agent_name}:${thread.thread_id}`}
+          className={"thread-item routine-history-item" + (routineThreadReady && thread.thread_id === active.threadId ? " selected" : "") + (unseen.has(thread.thread_id) ? " unseen" : "")}
+          aria-current={routineThreadReady && thread.thread_id === active.threadId ? "true" : undefined}
+          onClick={() => { setRoutineThreadReady(false); void openThread(thread.thread_id, thread.agent_name || selectedRoutine.agent); }}>
+          <span className="routine-history-title">
+            <span>{new Date(thread.created_at).toLocaleString()}{index === 0 ? " · Latest" : ""}</span>
+            {unseen.has(thread.thread_id) && <span className="thread-dot" aria-label="New activity" />}
+          </span>
+          <small>{thread.agent_name || selectedRoutine.agent} · {thread.title || "Routine run"}</small>
+        </button>)}
+      </aside>}
     </div>
   );
 }
@@ -732,9 +929,16 @@ function Sidebar({
   threads,
   activeThreadId,
   unseen,
+  unseenRoutines,
   onSelect,
   onNew,
   onManageSkills,
+  onManageRoutines,
+  routines,
+  routinesLoading,
+  routineError,
+  selectedRoutineId,
+  onSelectRoutine,
   onCollapse,
   listingSupported,
   error,
@@ -742,9 +946,16 @@ function Sidebar({
   threads: ThreadInfo[];
   activeThreadId: string;
   unseen: Set<string>;
+  unseenRoutines: Set<string>;
   onSelect: (t: ThreadInfo) => void;
   onNew: () => void;
   onManageSkills?: () => void;
+  onManageRoutines?: () => void;
+  routines: Routine[];
+  selectedRoutineId?: string;
+  onSelectRoutine: (routine: Routine) => void;
+  routinesLoading: boolean;
+  routineError: string;
   onCollapse: () => void;
   listingSupported: boolean;
   error: string | null;
@@ -771,6 +982,23 @@ function Sidebar({
       </nav>
 
       <div className="thread-list">
+        {onManageRoutines && <section aria-label="Routines" className="sidebar-routines">
+          <div className="section-label routine-section-heading">
+            <span>Routines</span>
+            <button className="icon-btn" onClick={onManageRoutines} aria-label="Manage routines" title="Create and manage routines">+</button>
+          </div>
+          {routineError && <div className="hint error" role="alert">{routineError}</div>}
+          {routinesLoading && <div className="hint">Loading routines…</div>}
+          {!routinesLoading && !routineError && routines.length === 0 && <div className="hint">No enabled routines.</div>}
+          {routines.map(routine => {
+            const hasUnseen = unseenRoutines.has(routine.id);
+            return <button key={routine.id} className={"thread-item" + (selectedRoutineId === routine.id ? " selected" : "") + (hasUnseen ? " unseen" : "")} onClick={() => onSelectRoutine(routine)}
+              title={`${routine.name} · ${routine.agent}${hasUnseen ? " · new activity" : ""}`}>
+              <span className="thread-title">{routine.name}</span>
+              {hasUnseen && <span className="thread-dot" aria-label="New activity" />}
+            </button>;
+          })}
+        </section>}
         <div className="section-label">Recents</div>
         {error && <div className="hint error">{error}</div>}
         {!listingSupported && (

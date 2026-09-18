@@ -45,7 +45,7 @@ func TestRestateHistoryAndPromptBindMiddlewareToRunBodies(t *testing.T) {
 	h := NewRestateConversationPersistence(nil, store, m)
 	p := NewRestatePrompt(nil, nil, m).(*RestatePrompt)
 	require.Empty(t, operations)
-	require.NoError(t, h.wrappedPersistence.SaveMessages(t.Context(), "tenant", "run", "", "thread", "conversation", nil, nil))
+	require.NoError(t, h.wrappedPersistence.SaveMessages(t.Context(), "tenant", "default", "run", "", "thread", "conversation", nil, nil))
 	rows, err := h.wrappedPersistence.LoadMessages(t.Context(), "tenant", "thread", "")
 	require.NoError(t, err)
 	require.Len(t, rows, 2)

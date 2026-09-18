@@ -14,6 +14,8 @@ import type { Message as AGUIMessage } from "@ag-ui/core";
 const API = "/api/agui";
 
 export interface ThreadInfo {
+  group_id?: string;
+  agent_name?: string;
   thread_id: string;
   conversation_id: string;
   namespace: string;
@@ -32,20 +34,22 @@ export async function fetchAgents(): Promise<{
   fullHistory: boolean;
   attachmentsEnabled: boolean;
   skillStoreEnabled: boolean;
+  routinesEnabled: boolean;
 }> {
   const r = await fetch(`${API}/agents`);
   if (!r.ok) throw new Error(`agents → ${r.status}`);
   const body = await r.json();
-  return { agents: body.agents ?? [], fullHistory: body.full_history === true, attachmentsEnabled: body.attachments === true, skillStoreEnabled: body.skill_store === true };
+  return { routinesEnabled: body.routines === true, agents: body.agents ?? [], fullHistory: body.full_history === true, attachmentsEnabled: body.attachments === true, skillStoreEnabled: body.skill_store === true };
 }
 
 // fetchThreads returns supported=false when the agent's persistence
 // adapter can't enumerate threads (the endpoint answers 501), so the
 // caller can hide the conversation picker.
 export async function fetchThreads(
-  agent: string
+  agent: string,
+  groupId = "default"
 ): Promise<{ supported: boolean; threads: ThreadInfo[] }> {
-  const r = await fetch(`${API}/agents/${encodeURIComponent(agent)}/threads`);
+  const r = await fetch(`${API}/agents/${encodeURIComponent(agent)}/threads?${new URLSearchParams({ group_id: groupId })}`);
   if (r.status === 501) return { supported: false, threads: [] };
   if (!r.ok) throw new Error(`threads → ${r.status}`);
   return { supported: true, threads: (await r.json()).threads ?? [] };
@@ -158,6 +162,7 @@ export function relativeTime(iso: string): string {
 export interface RunFeedEvent {
   event: "RUN_STARTED" | "RUN_FINISHED";
   namespace: string;
+  groupId?: string;
   threadId: string;
   runId?: string;
   agentName?: string;
@@ -253,4 +258,43 @@ export async function uploadSkill(files: File[]): Promise<StoredSkill> {
 export async function deleteSkill(name: string): Promise<void> {
   const r = await fetch(`${API}/skills/${encodeURIComponent(name)}`, { method: "DELETE" });
   if (!r.ok) throw new Error(await r.text());
+}
+
+export interface RoutineDefinition {
+  name: string;
+  agent: string;
+  instruction: string;
+  schedule: { at?: string; cron?: string; timezone?: string };
+}
+export interface Routine extends RoutineDefinition {
+  id: string;
+  enabled: boolean;
+}
+async function routineRequest(path = "", init?: RequestInit): Promise<any> {
+  const response = await fetch(`${API}/routines${path}`, init);
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    throw new Error(body.error || `Routines request failed (${response.status})`);
+  }
+  return response.json();
+}
+export async function fetchRoutines(): Promise<Routine[]> {
+  return (await routineRequest()) ?? [];
+}
+export async function fetchRoutineAgents(): Promise<string[]> {
+  return (await routineRequest("/agents")) ?? [];
+}
+export async function createRoutine(definition: RoutineDefinition): Promise<Routine> {
+  return routineRequest("", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(definition) });
+}
+export async function setRoutineEnabled(id: string, enabled: boolean): Promise<Routine> {
+  return routineRequest(`/${encodeURIComponent(id)}/${enabled ? "resume" : "pause"}`, { method: "POST" });
+}
+
+export async function fetchRoutineThreads(id: string): Promise<ThreadInfo[]> {
+  const body = await routineRequest(`/${encodeURIComponent(id)}/threads`);
+  return body.threads ?? [];
+}
+export async function fetchRoutine(id: string): Promise<Routine> {
+  return routineRequest(`/${encodeURIComponent(id)}`);
 }

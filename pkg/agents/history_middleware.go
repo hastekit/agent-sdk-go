@@ -22,6 +22,7 @@ type LoadMessagesRequest struct {
 }
 
 type SaveMessagesRequest struct {
+	GroupID        string
 	Namespace      string            `json:"namespace"`
 	RunID          string            `json:"run_id"`
 	PreviousRunID  string            `json:"previous_run_id,omitempty"`
@@ -97,10 +98,10 @@ func (p *historyMiddlewarePersistence) LoadMessages(ctx context.Context, namespa
 	})
 }
 
-func (p *historyMiddlewarePersistence) SaveMessages(ctx context.Context, namespace, runID, previousRunID, threadID, conversationID string, messages []history.Message, meta map[string]any) error {
-	request := &SaveMessagesRequest{Namespace: namespace, RunID: runID, PreviousRunID: previousRunID, ThreadID: threadID, ConversationID: conversationID, Messages: messages, Meta: meta}
+func (p *historyMiddlewarePersistence) SaveMessages(ctx context.Context, namespace, groupID, runID, previousRunID, threadID, conversationID string, messages []history.Message, meta map[string]any) error {
+	request := &SaveMessagesRequest{GroupID: history.NormalizeGroupID(groupID), Namespace: namespace, RunID: runID, PreviousRunID: previousRunID, ThreadID: threadID, ConversationID: conversationID, Messages: messages, Meta: meta}
 	return ExecuteSaveMessagesWithMiddleware(ctx, p.middlewares, request, func(ctx context.Context, r *SaveMessagesRequest) error {
-		return p.ConversationPersistenceAdapter.SaveMessages(ctx, r.Namespace, r.RunID, r.PreviousRunID, r.ThreadID, r.ConversationID, r.Messages, r.Meta)
+		return p.ConversationPersistenceAdapter.SaveMessages(ctx, r.Namespace, r.GroupID, r.RunID, r.PreviousRunID, r.ThreadID, r.ConversationID, r.Messages, r.Meta)
 	})
 }
 

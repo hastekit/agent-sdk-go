@@ -28,7 +28,7 @@ func TestMessagePagination(t *testing.T) {
 			state.BackgroundTasks = map[string]agentstate.BackgroundTask{"job": {TaskID: "job"}}
 			meta = state.ToMeta()
 		}
-		require.NoError(t, p.SaveMessages(ctx, "default", id, previous, "thread", "conversation", []history.Message{{Messages: []responses.InputMessageUnion{msg}}}, meta))
+		require.NoError(t, p.SaveMessages(ctx, "default", "default", id, previous, "thread", "conversation", []history.Message{{Messages: []responses.InputMessageUnion{msg}}}, meta))
 		previous = id
 	}
 	a := agents.NewAgent(&agents.AgentOptions{Name: "test", History: history.NewConversationManager(p)})

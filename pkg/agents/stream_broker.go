@@ -189,7 +189,7 @@ type RunFeed interface {
 //
 // Best effort. A run is not worth failing over a notification nobody may be
 // listening for, and the runs themselves are in the thread list regardless.
-func (e *Agent) publishRunEvent(ctx context.Context, event string, in *AgentInput, runID string) {
+func (e *Agent) publishRunEvent(ctx context.Context, event string, in *AgentInput, runID, groupID string) {
 	feed, ok := e.streamBroker.(RunFeed)
 	if !ok || in == nil {
 		return
@@ -198,6 +198,7 @@ func (e *Agent) publishRunEvent(ctx context.Context, event string, in *AgentInpu
 	if err := feed.PublishRunEvent(ctx, RunEvent{
 		Event:     event,
 		Namespace: in.Namespace,
+		GroupID:   groupID,
 		ThreadID:  in.ThreadID,
 		RunID:     runID,
 		AgentName: e.Name,
