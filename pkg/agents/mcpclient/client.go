@@ -2,6 +2,8 @@ package mcpclient
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -150,6 +152,8 @@ func WithEnv(env map[string]string) McpServerOption {
 	}
 }
 
+// WithCacheTTL caps a positive server TTL and supplies the TTL when the server
+// returns zero or omits it. If neither TTL is positive, schemas are not cached.
 func WithCacheTTL(ttl time.Duration) McpServerOption {
 	return func(srv *MCPClient) {
 		srv.CacheTTL = ttl
@@ -231,7 +235,12 @@ func (srv *MCPClient) ListTools(ctx context.Context, runContext map[string]any) 
 	// The shared key first: an entry only ever lands there when the server
 	// called its listing public, so whatever is found is safe for this run.
 	for _, key := range []string{sharedKey, privateKey} {
-		if cached, ok := srv.schemaCache.Get(ctx, key); ok && !cached.expired() {
+		data, found, err := srv.schemaCache.Get(ctx, key)
+		if err != nil {
+			return nil, fmt.Errorf("read MCP schema cache: %w", err)
+		}
+		var cached CachedToolEntry
+		if found && json.Unmarshal(data, &cached) == nil && !cached.ExpiresAt.IsZero() && !cached.expired() {
 			return srv.buildLazyTools(cached.Tools, cached.Meta, conn), nil
 		}
 	}
@@ -239,6 +248,12 @@ func (srv *MCPClient) ListTools(ctx context.Context, runContext map[string]any) 
 	listing, err := srv.fetchToolSchemas(ctx, conn)
 	if err != nil {
 		return nil, err
+	}
+
+	// A non-positive server TTL may use an explicit local TTL override.
+	// Without one, bypass caching instead of storing an unbounded entry.
+	if listing.TTL <= 0 && srv.CacheTTL <= 0 {
+		return srv.buildLazyTools(listing.Tools, listing.Meta, conn), nil
 	}
 
 	key := privateKey
@@ -254,16 +269,22 @@ func (srv *MCPClient) ListTools(ctx context.Context, runContext map[string]any) 
 	if ttl > 0 {
 		entry.ExpiresAt = time.Now().Add(ttl)
 	}
-	srv.schemaCache.Set(ctx, key, entry, ttl)
+	data, err := json.Marshal(entry)
+	if err != nil {
+		return nil, fmt.Errorf("encode MCP schema cache: %w", err)
+	}
+	if err = srv.schemaCache.Set(ctx, key, data, ttl); err != nil {
+		return nil, fmt.Errorf("write MCP schema cache: %w", err)
+	}
 
 	return srv.buildLazyTools(listing.Tools, listing.Meta, conn), nil
 }
 
 // cacheTTL is how long a listing may be held: what the server asked for,
 // bounded by what the caller allowed, the way a caching proxy's own max-age
-// bounds an upstream's. Zero means no expiry, which is what injecting a
-// SchemaCache has always meant and stays the behaviour when nobody says
-// otherwise.
+// bounds an upstream's. A non-positive server TTL uses the configured local
+// TTL. Responses bypass caching if neither TTL is positive, including legacy
+// responses without cache directives.
 func (srv *MCPClient) cacheTTL(listing toolListing) time.Duration {
 	if listing.TTL > 0 && srv.CacheTTL > 0 {
 		return min(listing.TTL, srv.CacheTTL)
@@ -312,27 +333,16 @@ func (srv *MCPClient) CallToolDirect(ctx context.Context, runContext map[string]
 }
 
 // InvalidateToolCache removes cached tool schemas for this MCP server.
-func (srv *MCPClient) InvalidateToolCache(ctx context.Context, runContext map[string]any) {
+func (srv *MCPClient) InvalidateToolCache(ctx context.Context, runContext map[string]any) error {
 	if srv.schemaCache == nil {
-		return
+		return nil
 	}
 	conn, err := srv.connFor(ctx, runContext)
 	if err != nil {
-		return
+		return err
 	}
-	// Both, because which one this server's listing landed under is its call,
-	// not ours, and a stale entry under the other would outlive the drop.
 	sharedKey, privateKey := srv.schemaCacheKeys(conn)
-	srv.schemaCache.Delete(ctx, sharedKey)
-	srv.schemaCache.Delete(ctx, privateKey)
-}
-
-// InvalidateAllToolCache removes all cached tool schemas from the injected cache.
-func (srv *MCPClient) InvalidateAllToolCache(ctx context.Context) {
-	if srv.schemaCache == nil {
-		return
-	}
-	srv.schemaCache.Clear(ctx)
+	return errors.Join(srv.schemaCache.Delete(ctx, sharedKey), srv.schemaCache.Delete(ctx, privateKey))
 }
 
 // connFor builds the description of this server that the transport and the pool

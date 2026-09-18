@@ -17,6 +17,12 @@ import (
 )
 
 func main() {
+	fileHistory, err := hastekit.OpenFileHistory("./conversations")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer fileHistory.Close()
+
 	client := hastekit.NewLLMClient([]hastekit.ProviderConfig{
 		{
 			ProviderName: hastekit.ProviderOpenAI,
@@ -37,8 +43,8 @@ func main() {
 		HttpClient: http.DefaultClient,
 	}
 
-	hist := hastekit.NewFileHistory("./conversations")
-	agent := hastekit.NewAgent(&hastekit.AgentConfig{
+	hist := fileHistory
+	agent := hastekit.MustNewAgent(&hastekit.AgentConfig{
 		Name:        "hello-world-agent",
 		Instruction: hastekit.NewPrompt("You are a helpful assistant with access to terminal (bash)"),
 		LLM:         model,

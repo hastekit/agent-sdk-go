@@ -15,6 +15,12 @@ import (
 )
 
 func main() {
+	fileHistory, err := hastekit.OpenFileHistory("./conversations")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer fileHistory.Close()
+
 	client := hastekit.NewLLMClient([]hastekit.ProviderConfig{
 		{
 			ProviderName: hastekit.ProviderOpenAI,
@@ -29,8 +35,8 @@ func main() {
 
 	model := client.Model("OpenAI/gpt-4.1-mini")
 
-	hist := hastekit.NewFileHistory("./conversations")
-	agent := hastekit.NewAgent(&hastekit.AgentConfig{
+	hist := fileHistory
+	agent := hastekit.MustNewAgent(&hastekit.AgentConfig{
 		Name:        "Hello world agent",
 		Instruction: hastekit.NewPrompt("You are helpful assistant."),
 		LLM:         model,
@@ -60,7 +66,7 @@ func main() {
 	fmt.Println(string(b))
 
 	// Agent itself is stateless - you can either re-create another agent or reuse the same agent instance, but ensure to pass the correct `ThreadID`
-	agent2 := hastekit.NewAgent(&hastekit.AgentConfig{
+	agent2 := hastekit.MustNewAgent(&hastekit.AgentConfig{
 		Name:        "Hello world agent",
 		Instruction: hastekit.NewPrompt("You are helpful assistant."),
 		LLM:         model,

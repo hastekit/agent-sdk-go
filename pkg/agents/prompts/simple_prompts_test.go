@@ -31,11 +31,13 @@ func TestSkillsAreListedWithTheToolThatReadsThem(t *testing.T) {
 		"read_skill",
 		"<name>changelog</name>",
 		"Write a release changelog entry.",
-		"<location>skills/changelog/SKILL.md</location>",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("prompt is missing %q:\n%s", want, prompt)
 		}
+	}
+	if strings.Contains(prompt, "<location>") || strings.Contains(prompt, "skills/changelog/SKILL.md") {
+		t.Errorf("prompt exposes a storage location unused by read_skill:\n%s", prompt)
 	}
 }
 
@@ -45,7 +47,7 @@ func TestSkillsAreListedWithTheToolThatReadsThem(t *testing.T) {
 func TestSkillHintIsUsedVerbatim(t *testing.T) {
 	deps := &agents.Dependencies{
 		Skills:    []agents.Skill{{Name: "changelog", Description: "Write a release changelog entry."}},
-		SkillHint: "Read one with the `read_file` tool at the location listed below.",
+		SkillHint: "Read one with the `read_file` tool at /skills/{name}/SKILL.md.",
 	}
 
 	prompt, err := prompts.New("base", prompts.WithResolver(prompts.ResolveSkills)).
@@ -57,8 +59,8 @@ func TestSkillHintIsUsedVerbatim(t *testing.T) {
 	if !strings.Contains(prompt, deps.SkillHint) {
 		t.Errorf("prompt does not carry the hint:\n%s", prompt)
 	}
-	if !strings.Contains(prompt, "<location>/skills/changelog/SKILL.md</location>") {
-		t.Errorf("prompt does not use the sandbox location:\n%s", prompt)
+	if strings.Contains(prompt, "<location>") {
+		t.Errorf("prompt invented a location outside the provider hint:\n%s", prompt)
 	}
 }
 

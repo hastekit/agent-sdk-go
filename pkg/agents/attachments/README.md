@@ -1,0 +1,510 @@
+# Owned attachments
+
+Store files once, keep `attachment://...` references in messages, and resolve them
+to inline data only inside the model call that needs them. Input images and files
+use `file_id`; generated-image output keeps the shared Responses shape and carries
+the reference in `image_generation_call.result`. Filesystem and S3 implementations are
+included; applications can implement `Store` / `UploadStore` for other storage.
+
+The shared Responses types retain their existing `file_id` fields. Use
+`attachments.FileID(ref)` to encode an immutable reference and
+`attachments.RefFromFileID(id)` to decode one. The reserved `attachment://`
+scheme distinguishes SDK-owned files from ordinary provider file IDs, which
+the middleware passes through unchanged. It is an opaque reference, not a URL
+that a provider or browser fetches. Browser previews use `attachments.URL(ref)`.
+
+Existing history written with the previous `file_ref: {id, version}` extension
+must be converted to `file_id: "attachment://<id>?version=<version>"` when
+upgrading; the shared schema no longer has a `file_ref` field.
+
+## S3 setup
+
+`S3Store` implements the same `UploadStore` interface as `FileStore`. Use it with
+`NewResolver`, attachment middleware, and the existing HTTP upload/preview handler.
+No changes to message references or the embedded UI are required.
+
+```go
+import (
+    "github.com/aws/aws-sdk-go-v2/service/s3"
+    "github.com/hastekit/agent-sdk-go/pkg/agents/attachments"
+)
+
+// awsConfig is your application's aws.Config, with region and credentials set
+// (for example, using the AWS SDK config.LoadDefaultConfig credential chain).
+client := s3.NewFromConfig(awsConfig)
+store, err := attachments.NewS3Store(client, attachments.S3StoreConfig{
+    Bucket: "my-private-attachments",
+    Prefix: "agents/attachments",
+    MaxFileBytes: 20 << 20,
+})
+if err != nil { return err }
+resolver := attachments.NewResolver(store, attachments.Config{})
+// Pass store and resolver to the same middleware setup shown below.
+```
+
+Create the bucket separately. The client needs `s3:PutObject` and `s3:GetObject`
+permissions for the configured prefix (`HeadObject` also uses `s3:GetObject`).
+Configure bucket encryption and access policy in your infrastructure. This store
+never sets a public ACL or exposes S3 URLs; previews use the SDK attachment handler.
+S3 may report a missing object as access denied when the caller lacks bucket-list
+permission; that response is preserved as `ErrDenied`.
+
+For S3-compatible services, configure `BaseEndpoint` and, where required,
+`UsePathStyle` through `s3.NewFromConfig` options. The service must support
+conditional `PutObject` (`If-None-Match: *`) and `GetObject` (`If-Match`).
+
+Objects are partitioned by namespace, session ID, and assigned attachment filename. Each object
+contains its filename and SHA-256 digest as metadata. Uploads buffer at most
+`MaxFileBytes + 1` bytes to validate size and content before sending a single atomic
+upload (default limit: 20 MiB). Canonical references contain only a UUID; SHA-256 versions remain in metadata;
+reads use the ETag from lookup to reject an object changed before download.
+Bucket versioning is optional. The caller owns the S3 client; the store does not
+require `Close`. As with `FileStore`, callers must supply an authorized namespace and session.
+
+## Local filesystem setup
+
+```go
+import (
+    "context"
+    "os"
+
+    hastekit "github.com/hastekit/agent-sdk-go"
+    "github.com/hastekit/agent-sdk-go/pkg/agents"
+    "github.com/hastekit/agent-sdk-go/pkg/agents/history"
+    "github.com/hastekit/agent-sdk-go/pkg/agents/middleware"
+    "github.com/hastekit/agent-sdk-go/pkg/agents/attachments"
+    "github.com/hastekit/agent-sdk-go/pkg/gateway/llm/constants"
+    "github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
+    "github.com/hastekit/agent-sdk-go/pkg/utils"
+)
+
+// Files are stored under the authorized namespace and session, passed explicitly.
+// Inside a run the middleware takes both from the call.
+ctx := context.Background()
+store, err := attachments.NewFileStore("./data/attachments", attachments.FileStoreConfig{
+    MaxFileBytes: 20 << 20,
+})
+if err != nil { panic(err) }
+defer store.Close() // close at service shutdown, after requests finish
+
+file, err := os.Open("photo.png")
+if err != nil { panic(err) }
+ref, uploadErr := store.Put(ctx, "tenant-123", "session-1", attachments.Upload{
+    Filename: "photo.png", MediaType: "image/png", Content: file,
+})
+file.Close()
+if uploadErr != nil { panic(uploadErr) }
+
+// One resolver, shared by every agent that reads from this store: its byte
+// cache is what keeps a repeated image from being read again per call.
+resolver := attachments.NewResolver(store, attachments.Config{
+    CacheBytes: 64 << 20,
+    MaxFileBytes: 20 << 20,
+    MaxConcurrentLoads: 4,
+})
+client := hastekit.NewLLMClient(providerConfigs)
+
+input := responses.InputMessageUnion{OfInputMessage: &responses.InputMessage{
+    Role: constants.RoleUser,
+    Content: responses.InputContent{
+        {OfInputText: &responses.InputTextContent{Text: "What is in this picture?"}},
+        {OfInputImage: &responses.InputImageContent{FileID: utils.Ptr(attachments.FileID(ref)), Detail: "auto"}},
+    },
+}}
+
+// Any persistence adapter can be used here, including one backed by Postgres.
+conversationHistory, err := hastekit.OpenFileHistory("./data/conversations")
+if err != nil { return err }
+defer conversationHistory.Close()
+agent := agents.NewAgent(&agents.AgentOptions{
+    Name: "vision",
+    LLM: client.Model("OpenAI/your-vision-model"),
+    History: conversationHistory,
+    // The middleware is what turns attachments on for this agent: it resolves
+    // attachment file_id inputs inside each model call, and stores what tools return.
+    Middlewares: []agents.Middleware{middleware.NewAttachmentMiddleware(middleware.AttachmentMiddlewareConfig{
+        Store: store,
+        Resolver: resolver,
+        InlineAttachments: true, // Opt in when this model should see the file contents.
+        MaxInlineBytes: 32 << 20,
+    })},
+})
+_, err = agent.ExecuteWithoutTrace(ctx, &agents.AgentInput{
+    Namespace: "tenant-123", ThreadID: "thread-1", SessionID: "session-1",
+    Message: history.Message{ID: "message-1", SenderID: "user-1",
+        Messages: []responses.InputMessageUnion{input}},
+})
+if err != nil { panic(err) }
+```
+
+`providerConfigs` is your normal provider configuration. The example is a setup
+recipe, not a complete executable. `NewFileHistory` is the existing convenience
+constructor; use `history.NewFileConversationPersistence` directly when you need
+explicit error/close handling.
+
+For documents use `responses.InputFileContent{FileID: utils.Ptr(attachments.FileID(ref))}`. Metadata supplies
+the original filename and MIME type; model/provider document support still
+applies. The same reference forms work inside multimodal tool-result content.
+Tools should upload their files before returning a reference.
+
+The host authorizes namespace and session access. Lookups require both; references
+from another session are rejected. Wrap the store for finer per-file ACLs.
+
+## Storage and transport contracts
+
+- `Store.Lookup(ctx, namespace, sessionID, ref)` authorizes every access, including cache
+  hits, and returns authoritative `Descriptor` metadata. The namespace is the
+  agent namespace and must isolate storage and tenants; key/version must
+  identify immutable bytes.
+- `Store.Open(ctx, descriptor)` opens that immutable content using backend
+  credentials. It must honor cancellation. No signed URL is needed.
+- `UploadStore` adds `Put(ctx, namespace, sessionID, Upload) (Ref, error)`. Application
+  input uploads happen before agent, broker, or workflow submission; tool and
+  generated-model output uploads happen inside their call boundary before the
+  result or completed-image stream event leaves it. A remote store can
+  implement both interfaces.
+- The local store uses immutable, collision-safe filenames, SHA-256 versions, namespace/session
+  directories, private file permissions, and `os.Root` path confinement. It
+  writes content and metadata separately and returns the reference after both
+  are flushed. Image MIME declarations are checked against file signatures.
+- Treat the store directory as SDK-owned. Do not edit the files behind an ID.
+  Back up the entire directory together with conversation history. Interrupted
+  processes can leave unreferenced upload files; retention/garbage collection is
+  application-managed in this version.
+
+Resolution and generated-image externalization are the middleware's `WrapModelCall`.
+It wraps the model call inside the
+step that makes it — the agent loop locally, the LLM activity under Temporal,
+the LLM run step under Restate — after the request has crossed into that step,
+and hands the provider a transient copy. By default, image attachments resolve to
+inline bytes, while file attachments become plain-text references with authorized
+metadata (filename, MIME type, size, and optional mount path). File contents are
+not opened or loaded into model context. Repeated file references share a metadata
+lookup within each model call. Lookup failures abort the call; with no store or
+resolver configured, files carry only their reference, and image resolution fails.
+The model can pass the exact `attachment://...` file reference to a tool that
+accepts attachments.
+
+Set `InlineAttachments: true` to also resolve file attachments into bytes.
+Image resolution is independent: `InlineImages` is a `*bool`, with `nil` meaning
+true. Set `InlineImages: utils.Ptr(false)` to send image references and metadata
+as text instead. These settings apply to user inputs and tool results;
+`InlineImages` also controls generated-image history. As complete
+generated-image items arrive, it uploads their `image_generation_call.result`
+before publishing the event, replaces the result with `attachment://...` on a
+copy, and reuses that reference in the accumulated response. Binary
+`partial_image` previews are suppressed by this middleware; progress, text, and
+tool events continue streaming. The loop, broker/UI, conversation history, and
+the durable journal therefore keep references.
+Adding the middleware to an agent turns attachment support on for that agent;
+removing it turns it off, and the LLM client is not involved either way. OpenAI
+gets data URLs for inlined attachments; Anthropic/Gemini/Bedrock adapters translate those into their
+inline representation. A request carrying no references passes through
+untouched.
+
+The LLM client and its middleware chain never touch attachments: retry,
+fallback and tracing all see the request the middleware produced, and the client
+sends exactly what it is handed. A caller dispatching Responses requests
+outside an agent — a direct `client.Model(...)` call, or an external gateway
+server with access to the store — prepares them itself with
+`middleware.PrepareAttachments(ctx, namespace, sessionID, ...)`, which explicitly resolves references to bytes (the middleware uses it after converting non-inlined attachments to text).
+Without a middleware or that preparation, the SDK does not resolve `file_id: "attachment://..."`, and
+the request continues through the existing provider adapter without an SDK
+validation step. A provider may reject the unresolved ID or its adapter may
+not support carrying it.
+
+## Cache and limits
+
+The resolver is service-lived and concurrency-safe. A byte-bounded LRU retains
+raw bytes. Concurrent misses for an immutable object share one load. Each caller
+is independently authorized. Cancelling a waiter does not cancel another
+waiter's load; shared reads have a timeout (30 seconds by default). Set
+`middleware.AttachmentMiddlewareConfig.Resolver` to share one resolver — and its cache —
+across agents when either inline option is enabled; a middleware given
+only a `Store` builds a private resolver over it.
+
+Defaults: 64 MiB retained cache, 20 MiB per file, four simultaneous storage loads,
+and 32 MiB aggregate encoded attachment content per model request. Negative
+`CacheBytes` disables retention. Configure the aggregate limit using
+`middleware.AttachmentMiddlewareConfig.MaxInlineBytes` when either inline option
+is enabled. Encoded limits count repeated message
+occurrences, even if the storage read is deduplicated. Provider request, MIME,
+image dimension, and model limits still apply. These are not a global limit on
+all simultaneous LLM request allocations.
+
+Cache eviction, worker restarts, and different workers can cause another read.
+The filesystem backend reads local files; an S3 adapter would download on a
+miss. Encoding happens per request. Inline bytes are still uploaded to the
+provider on every call that includes the image. Provider upload-ID caching and
+a shared/distributed content cache are not part of this version.
+
+## Durable runtimes and persistence
+
+The middleware takes `Namespace` and `SessionID` from the call it wraps:
+`ToolCall` on the way back from a tool, `ModelCall` on the way to the model. Under
+Temporal and Restate both travel with the call into the activity or step, so
+nothing has to be registered on a client or worker. Resolution runs inside the
+LLM activity or step, on the real middleware, so the journal contains references
+only. Protect durable ingress: workflow input is an internal server contract,
+not a source of authenticated identity. Application uploads should normally
+happen at ingress before starting the workflow.
+
+The caller's contract is: upload first, then send a `file_id: "attachment://..."`. History stores
+a message as it arrives, and the middleware resolves references for the model, so a
+message that carries a reference is one whose bytes never enter a queue, a
+journal, or a transcript. Keep binary payloads out of run metadata and text
+fields for the same reason.
+
+This version handles input images/documents, referenced tool results, and complete
+provider-generated images. The optional tool wrap below externalizes structured
+inline function-tool results; the model wrap externalizes the accumulated final
+image before it leaves a local call, Temporal activity, or Restate step. With the
+middleware installed, complete live image events carry references and binary
+`partial_image` previews are omitted, so model base64 never reaches the broker or
+UI. Successive previews are not fragments to concatenate. Without the middleware,
+the existing provider-native streaming behavior remains unchanged.
+
+Browser downloads are separate from LLM transport: the HTTP API below authorizes
+each fetch through the store and streams the file without exposing storage paths.
+
+## File IDs and optional mounted paths
+
+Each upload receives a UUID. History, shared Responses messages, and tool calls
+use the canonical `attachment://<uuid>` file ID, without thread or version query
+parameters. Namespace and session scope come from the trusted call; hashes stay
+in store metadata.
+
+Files on disk retain sanitized original basenames. Collisions get suffixes before
+the extension: `report.json`, `report_2.json`, `report_3.json`. Names remain stable
+across turns and restarts. Atomic filesystem reservations and S3 conditional
+writes prevent concurrent overwrites.
+
+Configure the directory where the harness mounts each session's files:
+
+```go
+store, err := attachments.NewFileStore("./data/attachments", attachments.FileStoreConfig{
+    MountPath: "/mnt/user-data/uploads",
+})
+```
+
+`S3StoreConfig` accepts the same `MountPath` setting; the host must synchronize
+those files into the sandbox volume. The setting advertises a path; it does not
+create a container or perform a mount. It must be an absolute POSIX path.
+When empty, the model receives no `mount_path` field.
+
+With it configured, model-facing metadata looks like:
+
+```json
+{"file_id":"attachment://cc2c80ea-e99f-41bb-9b5f-de9f6441b9de","mount_path":"/mnt/user-data/uploads/report_2.json","original_filename":"report.json","mime_type":"application/json","size_bytes":38472}
+```
+
+Pass `file_id` unchanged to attachment tools. Use `mount_path` for commands such
+as `head -- '/mnt/user-data/uploads/report_2.json'`. No file bytes are loaded
+unless inline mode is enabled or a tool reads them. Tools resolve IDs with:
+
+```go
+ref, err := attachments.ParseRef(fileID) // canonical URI or bare UUID
+if err != nil { return err }
+descriptor, err := store.Lookup(ctx, call.Namespace, call.SessionID, ref)
+if err != nil { return err }
+reader, err := store.Open(ctx, descriptor)
+if err != nil { return err }
+defer reader.Close()
+```
+
+## Session directories for sandbox mounts
+
+Local storage writes bytes to `<root>/<namespace>/<session_id>/<assigned_filename>`.
+UUID metadata lives at `<root>/.metadata/<namespace>/<uuid>.json`. Uploads are
+staged alongside metadata, then published through an atomic hard link, retrying
+with a filename suffix if the destination exists. This requires a filesystem that
+supports hard links, with staging and content on the same filesystem. No separate
+filename index is kept, and incomplete uploads are not exposed by mounting a
+session directory. Use `store.SessionDir(ctx, namespace, sessionID)` to
+obtain the host directory, then bind-mount it read-only at the configured MountPath.
+Scope components must be nonempty single path components (no slashes, backslashes,
+`.` or `..`); `.metadata` is reserved as a namespace.
+
+S3 stores content at `<prefix>/<namespace>/<session_id>/<assigned_filename>` and
+UUID index objects at `<prefix>/.metadata/<namespace>/<uuid>`. Populate a volume
+separately if shell access is needed. Keep both content and metadata when backing
+up either backend. Failed or interrupted uploads can leave unreferenced content.
+
+Uploads from the embedded UI send the active session ID. Browser URLs contain
+only the UUID and use `ReferenceStore.LookupReference` within the authenticated
+namespace. Built-in stores implement it; custom stores should implement it to
+support these URLs. Agent/tool lookups additionally enforce their session scope.
+HTTP responses and downloads use the assigned filename; `original_filename`
+retains the original basename. Old `.blob` files and filename-based IDs are not
+migrated by this breaking change.
+
+## Browser upload and chat
+
+The embedded chat enables its file picker when you pass
+`agui.WithAttachmentStore(store)` to `web.Handler` or `web.Serve`. Use that same
+store in the agent's attachment middleware. A complete runnable example is in
+[`samples/attachments`](../../samples/attachments/main.go):
+
+```sh
+OPENAI_API_KEY=... go run ./samples/attachments
+# Open http://localhost:8080
+```
+
+The API exposes:
+
+- `POST /api/agui/attachments/`: multipart form with one `file` field and a required `session_id` field. Returns HTTP 201
+  and `{file_id, url, filename, original_filename, mediaType, size}`.
+- `GET /api/agui/attachments/{uuid}`: authorizes through `ReferenceStore.LookupReference`, then
+  streams `Store.Open`. Images display inline; PDFs download as documents.
+
+`attachments.NewHTTPHandler(store, maxBytes, namespaceOf)` can also be mounted
+under `/api/agui/` using `http.StripPrefix("/api/agui", handler)`; `namespaceOf` reports a request's namespace from whatever
+authenticated it.
+The default upload limit is 20 MiB; `agui.WithAttachmentUploadLimit` can lower it.
+The embedded picker has a 20 MiB client limit. Supported browser uploads are PNG,
+JPEG, GIF, WebP, and PDF, verified from their signatures. File signature checks
+identify format; they do not perform malware scanning or validate all document
+structure. A custom UploadStore can add processing before returning a reference.
+
+The browser uploads first and sends AG-UI image/document parts whose `source`
+is `{type: "url", value: "/api/agui/attachments/<id>?version=..."}`. These are owned API
+URLs, not arbitrary fetch targets. AG-UI validates ownership and format, pins
+an immutable version, and converts them to SDK `file_id: "attachment://..."` inputs **before**
+starting or enqueueing the turn. Client-provided MIME types and filenames are
+replaced by storage metadata. Inline data and external URLs in multipart input
+are rejected. Plain text messages remain compatible.
+
+History reload converts references back to browser URLs. Live multimodal input
+is announced as a CUSTOM `input_message` event containing an AG-UI Message;
+the embedded client upserts it by message ID, including when rejoining a run.
+External clients should handle that event to display incoming multimodal turns.
+The agent's attachment middleware then resolves the original references inside the
+model call, through its byte cache, using image/file-specific provider fields.
+Neither browser URLs nor resolved bytes are written back to conversation history.
+
+These routes do not install authentication or infer a tenant from a file ID.
+Mount the entire HTTP handler behind your existing authentication. The AG-UI
+handler serves the attachment routes under its namespace, the same one every
+run it starts reads them under, so uploads and runs agree. The local example
+uses the default namespace and binds to localhost. Browser fetches use same-origin credentials; providers
+do not fetch these URLs. Replacing FileStore with S3 requires implementing
+UploadStore, not changing the API or UI. IDs must be single URL path segments;
+references should carry a version when an ID can refer to changing content.
+
+## Externalizing tool results
+
+The same middleware that resolves references for the model stores what tools return.
+Register it on each agent that sends or returns files:
+
+```go
+Middlewares: []agents.Middleware{
+    middleware.NewAttachmentMiddleware(middleware.AttachmentMiddlewareConfig{
+        Store: store,
+        Resolver: resolver,
+        InlineAttachments: true, // Opt in when this model should see the file contents.
+        MaxFileBytes: 20 << 20,
+    }),
+},
+```
+
+Tools should return `FunctionCallOutputMessage.Output.OfList` containing
+`OfInputImage` with an `ImageURL` data URI, or `OfInputFile` with `FileData`
+(base64 data URI or raw base64) and an optional `FileName`. Raw base64 files have
+their MIME type inferred from the bytes. The middleware decodes each attachment,
+uploads through `UploadStore`, and replaces its transport fields with an `attachment://...` value in `file_id`.
+Existing references, text parts, call IDs, state updates, and task metadata are
+preserved. The original result is not mutated. Repeated identical attachments
+with the same filename within one result share an upload.
+
+The MCP adapter preserves text/image/embedded-resource content in the same
+structured format, so MCP images and file blobs reach this middleware too. Single
+text-only MCP results retain the existing string shape. Resource links are not
+fetched; embedded resources must contain bytes or text.
+
+Register this middleware after other transformations that produce media. Ordinary
+after-tool middlewares receive the transformed result. Upload or decoding failures abort the call rather than allow
+inline output into conversation history. Uploads are not a transaction: if a
+later attachment fails, earlier successful uploads can remain unreferenced.
+Do not put attachment bytes into arbitrary string/JSON output, state updates,
+interrupts, or task payloads: those fields are not scanned. Remote URLs,
+provider file IDs, and local paths must be explicitly loaded/uploaded by the
+tool or an application-specific middleware. The standard middleware does not fetch them.
+Provider-native image-generation results pass through the model half of the same
+middleware. Their original bytes are stored without image conversion, and the
+existing item ID, status, format, quality, size, and background metadata are kept.
+Both `response.output_item.done` and images present only in
+`response.completed.output` are externalized before publication. Providers that
+repeat the same completed payload across events and the accumulated response cause
+one upload per model call.
+On a subsequent model call with image inlining enabled, the reference in `result`
+is resolved into an ordinary `input_image` data URL in a user message, labeled as
+a previously generated image and accompanied by its attachment file ID. The
+transient request does not replay an `image_generation_call` or its provider item
+ID, so it does not depend on the provider retaining that item. Persisted history
+keeps the original generation metadata and attachment reference.
+
+The same middleware resolves these new refs on subsequent model calls, in its
+`WrapModelCall`, and the persisted tool results contain refs. `WrapToolCall`
+runs inside the Temporal activity or Restate run callback, around the tool,
+before its result is journaled. This applies to ordinary and MCP tool calls,
+background-task results, and results another middleware's wrap answers with, which
+flow back out through the wraps outside it. It is never registered as a
+separate durable step.
+
+Middlewares nest in registration order, the first outermost, so a result flows from
+the tool through the last middleware's wrap to the first's. Register the attachment
+middleware first, so a result another middleware's wrap adds media to still passes through
+it. A wrap can run multiple times: once per result-producing boundary, and
+again if that boundary retries. Use immutable, retry-safe uploads. FileStore
+creates fresh immutable objects, so retries may leave unused uploads; it does
+not promise cross-attempt deduplication. The middleware's own errors retain middleware-abort
+semantics and return no raw result; a tool's error passes back out as the
+tool's. Background failures are reported as task failures. Progress events,
+arbitrary metadata and native model outputs other than generated images remain
+outside this contract.
+
+All workers that may resume a task need access to the same durable attachment
+store. A machine-local store is suitable for a single worker;
+use shared storage for distributed workers. Already journaled payloads are not
+rewritten by this change.
+
+`ToolCallMiddleware` (and therefore `Middleware`) requires `WrapToolCall(next)`, and
+`ModelCallMiddleware` requires `WrapModelCall(next)`. Embed `agents.NoopMiddleware`
+and override what you need; it provides defaults for model, tool, history and
+prompt operations. Custom runtime adapters must run the wraps inside their
+own execution boundary: `agents.ExecuteToolCallWithMiddleware` around a tool,
+`agents.WrapBackgroundTool` to bind middleware around the real tool's
+`AwaitTask` before registering its durable wait, and `agents.ExecuteModelCallWithMiddleware`
+around the provider. These share the SDK's nesting and failure behavior.
+
+Workflow-side agents leave `Middlewares` empty: real middleware is bound to the
+worker's tool and model operations. Do not turn either wrap into another
+activity or run step: its input would then journal the raw bytes.
+
+Background waits use the same tool middleware around `AwaitTask`, so a wrap can
+short-circuit the wait or recover its error. The local agent binds this wrapper
+when dispatching the task; Temporal binds it to the wait activity and Restate
+to a registered wait operation. The supervisor only waits and delivers. A
+handoff changes neither the tool's middleware nor the owner of the conversation.
+
+Migration: Temporal MCP activity names now include the agent name
+(`agent_server_ExecuteMCPToolActivity` and `agent_server_ListMCPToolsActivity`).
+Restate background inputs now carry `tool_key`, supplied by the tool proxy,
+instead of `tool_agent_name` and `tool_name`. `BackgroundTaskRef.ToolAgentName`
+has been removed. Drain existing durable runs and background tasks on the old
+workers, or use a separately versioned deployment for new runs; old histories
+and queued task inputs are not automatically migrated to these routing names.
+
+### Original file uploads
+
+The AGUI file picker accepts all file types. The upload API stores original
+bytes and MIME/filename metadata, returning an immutable `attachment://` file ID.
+Messages carry that ID; dispatch resolves it to base64 in the native image/file
+input. DOCX, CSV, TXT and audio files are not parsed, extracted, transcribed, or
+converted. Provider support and request limits determine what can be consumed.
+General files are served as downloads; only common raster images are inline.
+
+Attachment uploads require multipart `session_id` (the conversation ID). Forked
+threads in the same session share attachment files. The embedded UI reads this ID
+from thread history; for a new conversation it uses the initial thread ID, which
+the server also uses to seed the conversation before its first run.

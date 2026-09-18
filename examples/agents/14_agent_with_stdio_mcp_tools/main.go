@@ -69,7 +69,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	agent := hastekit.NewAgent(&hastekit.AgentConfig{
+	agent := hastekit.MustNewAgent(&hastekit.AgentConfig{
 		Name:        "Filesystem_Agent",
 		Instruction: hastekit.NewPrompt("You are a helpful assistant that can read files under /tmp."),
 		LLM:         model,

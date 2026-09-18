@@ -1,21 +1,23 @@
 package temporal_runtime_test
 
 import (
+	"context"
 	"testing"
 	"testing/fstest"
 
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/history"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/runtime/temporal_runtime"
+	"github.com/hastekit/agent-sdk-go/pkg/agents/skills"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.temporal.io/sdk/converter"
 )
 
-func skillRegistry(t *testing.T) *agents.SkillRegistry {
+func skillSource(t *testing.T) agents.SkillSet {
 	t.Helper()
 
-	registry, err := agents.NewSkillRegistry(fstest.MapFS{
+	registry, err := skills.NewFSSkillSet("builtin", fstest.MapFS{
 		"skills/changelog/SKILL.md": &fstest.MapFile{Data: []byte(
 			"---\nname: changelog\ndescription: Write a release changelog entry.\n---\n\nGroup by Added and Fixed.\n")},
 	})
@@ -30,13 +32,14 @@ func skillRegistry(t *testing.T) *agents.SkillRegistry {
 func TestGetActivities_RegistersTheSkillReaderTool(t *testing.T) {
 	options := &agents.AgentOptions{
 		Name:    "Release_Agent",
-		Skills:  skillRegistry(t),
+		Skills:  []agents.SkillSet{skillSource(t)},
 		History: history.NewConversationManager(history.NewInMemoryConversationPersistence()),
 	}
 
 	activities := temporal_runtime.NewTemporalAgent(nil, options, nil).GetActivities()
 
-	assert.Contains(t, activities, "Release_Agent_read_skill_ExecuteToolActivity")
+	assert.Contains(t, activities, "Release_Agent_SkillSet_builtin_ListSkills")
+	assert.Contains(t, activities, "Release_Agent_SkillSet_builtin_ReadSkill")
 }
 
 func TestGetActivities_RegistersNothingExtraWithoutSkills(t *testing.T) {
@@ -55,8 +58,10 @@ func TestGetActivities_RegistersNothingExtraWithoutSkills(t *testing.T) {
 // Temporal's data converter — a section the model never sees is a skill it
 // never uses.
 func TestDependencies_CarrySkillsAcrossTheActivityBoundary(t *testing.T) {
-	registry := skillRegistry(t)
-	skills, hint := registry.Skills(), registry.SkillHint()
+	registry := skillSource(t)
+	skills, err := registry.ListSkills(context.Background(), "default", nil)
+	require.NoError(t, err)
+	hint := "Read enabled skills using " + agents.ReadSkillToolName
 
 	payload, err := converter.GetDefaultDataConverter().ToPayload(&agents.Dependencies{
 		Skills:    skills,

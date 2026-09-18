@@ -76,6 +76,7 @@ func TestReadStream_StopsMidStream(t *testing.T) {
 func TestReadStream_CompletesNormally(t *testing.T) {
 	stream := make(chan *responses.ResponseChunk, 2)
 	stream <- textItemDone("msg_1", "all done")
+	stream <- &responses.ResponseChunk{OfResponseCompleted: &responses.ChunkResponse[constants.ChunkTypeResponseCompleted]{}}
 	close(stream)
 
 	acc := agents.Accumulator{}
@@ -127,7 +128,7 @@ type streamingLLM struct {
 	finished bool
 }
 
-func (l *streamingLLM) NewStreamingResponses(ctx context.Context, in *responses.Request, cb func(*responses.ResponseChunk)) (*responses.Response, error) {
+func (l *streamingLLM) NewStreamingResponses(ctx context.Context, _ *agents.ModelCall, in *responses.Request, cb func(*responses.ResponseChunk)) (*responses.Response, error) {
 	stream := make(chan *responses.ResponseChunk)
 
 	go func() {

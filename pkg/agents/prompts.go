@@ -20,15 +20,9 @@ type Dependencies struct {
 	Handoffs      []*Handoff
 	DeferredTools []DeferredToolInfo
 
-	// Skills the agent was given, and the hint introducing them — what they
-	// are and how to read one. Both come from the SkillProvider, the only
-	// thing that knows how its skills are actually reached. A provider that
-	// says nothing gets no prose at all, just the catalogue: guessing here
-	// would sooner or later name a tool the agent does not have.
-	//
-	// Like DeferredTools, these are the flattened, JSON-serializable view: the
-	// SkillProvider itself holds filesystem handles that do not survive a
-	// Temporal activity boundary.
+	// Skills contains the enabled catalog for this execution. Legacy providers
+	// supply their own hint; dynamic sets share read_skill. Only serializable
+	// metadata crosses a durable prompt boundary, never resolver functions.
 	Skills    []Skill `json:"skills,omitempty"`
 	SkillHint string  `json:"skill_hint,omitempty"`
 

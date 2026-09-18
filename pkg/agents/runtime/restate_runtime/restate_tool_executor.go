@@ -3,6 +3,7 @@ package restate_runtime
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
 	restate "github.com/restatedev/sdk-go"
@@ -20,6 +21,9 @@ const ToolCancelledErrorCode = 499
 // replaying into this step and re-running the tool the user just stopped.
 // Other errors pass through untouched.
 func cancellationError(err error) error {
+	if agents.IsToolCallAborted(err) {
+		return abortError(err)
+	}
 	if err == nil || !stoppedWork(err) {
 		return err
 	}
@@ -46,25 +50,15 @@ func wasCancelled(err error) bool {
 // outcome, and stops the round on a cancelled call since the rest would
 // only start and cancel themselves. That comes from a journaled step
 // result, so a replay decides the same way.
+//
+// It holds no middlewares: the middlewares' wraps run inside the tool's step, and what
+// comes back is already what the chain made of the call.
 type RestateToolExecutor struct {
 	restateCtx restate.WorkflowContext
-
-	// hooks run here, in the handler, so each of their methods is its own run
-	// step — see RestateToolCallHook.
-	hooks []agents.ToolCallHook
 }
 
 func NewRestateToolExecutor(restateCtx restate.WorkflowContext) *RestateToolExecutor {
 	return &RestateToolExecutor{restateCtx: restateCtx}
-}
-
-var _ agents.HookAwareToolExecutor = (*RestateToolExecutor)(nil)
-
-// WithToolCallHooks implements agents.HookAwareToolExecutor.
-func (e *RestateToolExecutor) WithToolCallHooks(hooks []agents.ToolCallHook) agents.ToolExecutor {
-	bound := *e
-	bound.hooks = hooks
-	return &bound
 }
 
 func (e *RestateToolExecutor) ExecuteAll(ctx context.Context, executions []agents.ExecutableToolCall) []agents.ToolExecutionResult {
@@ -77,7 +71,10 @@ func (e *RestateToolExecutor) ExecuteAll(ctx context.Context, executions []agent
 			continue
 		}
 
-		resp, err := agents.RunWithToolCallHooks(ctx, e.hooks, exec, exec.Tool.Execute)
+		resp, err := agents.ExecuteToolWithMiddleware(ctx, nil, exec, exec.Tool.Execute)
+		if wasAborted(err) {
+			err = fmt.Errorf("%w: %w", agents.ErrToolCallAborted, err)
+		}
 		results[i] = agents.ToolExecutionResult{
 			Response:  resp,
 			Err:       err,
@@ -89,4 +86,9 @@ func (e *RestateToolExecutor) ExecuteAll(ctx context.Context, executions []agent
 	// TODO: parallelize restate tool execution.
 
 	return results
+}
+
+// wasAborted reports whether a run step failed because a middleware ended the run.
+func wasAborted(err error) bool {
+	return err != nil && restate.ErrorCode(err) == ToolCallAbortedErrorCode
 }

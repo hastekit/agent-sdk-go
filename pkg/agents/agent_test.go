@@ -34,7 +34,7 @@ type scriptedLLM struct {
 	requests []*responses.Request
 }
 
-func (s *scriptedLLM) NewStreamingResponses(ctx context.Context, in *responses.Request, cb func(chunk *responses.ResponseChunk)) (*responses.Response, error) {
+func (s *scriptedLLM) NewStreamingResponses(ctx context.Context, _ *agents.ModelCall, in *responses.Request, cb func(chunk *responses.ResponseChunk)) (*responses.Response, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.requests = append(s.requests, in)
@@ -57,7 +57,7 @@ func (s *scriptedLLM) request(i int) *responses.Request {
 }
 
 // fakeTool counts executions and returns a fixed text output. Tests can
-// override execute to hook side effects (stop signals, queued messages).
+// override execute to middleware side effects (stop signals, queued messages).
 type fakeTool struct {
 	*agents.BaseTool
 	mu      sync.Mutex

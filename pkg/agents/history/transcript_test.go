@@ -17,7 +17,7 @@ func summarizedThread(t *testing.T) *InMemoryConversationPersistence {
 
 	p := NewInMemoryConversationPersistence()
 	for _, ids := range [][2]string{{"msg-1", ""}, {"msg-2", "msg-1"}, {"msg-3", "msg-2"}} {
-		require.NoError(t, p.SaveMessages(ctx, "ns", ids[0], ids[1], "thread-1", "conv-1",
+		require.NoError(t, p.SaveMessages(ctx, "ns", "default", ids[0], ids[1], "thread-1", "conv-1",
 			[]Message{newTestMessage(t, "alice", ids[0])}, nil))
 	}
 	require.NoError(t, p.SaveSummary(ctx, "ns", Summary{
@@ -92,8 +92,8 @@ func (a summaryOnlyAdapter) LoadMessages(ctx context.Context, namespace, threadI
 	return a.inner.LoadMessages(ctx, namespace, threadID, previousRunID)
 }
 
-func (a summaryOnlyAdapter) SaveMessages(ctx context.Context, namespace, runID, previousRunID, threadID, conversationID string, msgs []Message, meta map[string]any) error {
-	return a.inner.SaveMessages(ctx, namespace, runID, previousRunID, threadID, conversationID, msgs, meta)
+func (a summaryOnlyAdapter) SaveMessages(ctx context.Context, namespace, groupID, runID, previousRunID, threadID, conversationID string, msgs []Message, meta map[string]any) error {
+	return a.inner.SaveMessages(ctx, namespace, groupID, runID, previousRunID, threadID, conversationID, msgs, meta)
 }
 
 func (a summaryOnlyAdapter) SaveSummary(ctx context.Context, namespace string, summary Summary) error {

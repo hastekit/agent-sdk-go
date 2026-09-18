@@ -104,33 +104,35 @@ func TestToolPrefixKeepsDeferredWildcard(t *testing.T) {
 // deployment would inject.
 type memCache struct {
 	mu      sync.Mutex
-	entries map[string]*CachedToolEntry
+	entries map[string][]byte
 	ttls    map[string]time.Duration
 }
 
 func newMemCache() *memCache {
-	return &memCache{entries: map[string]*CachedToolEntry{}, ttls: map[string]time.Duration{}}
+	return &memCache{entries: map[string][]byte{}, ttls: map[string]time.Duration{}}
 }
 
-func (m *memCache) Get(_ context.Context, key string) (*CachedToolEntry, bool) {
+func (m *memCache) Get(_ context.Context, key string) ([]byte, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	e, ok := m.entries[key]
-	return e, ok
+	return slices.Clone(e), ok, nil
 }
 
-func (m *memCache) Set(_ context.Context, key string, entry *CachedToolEntry, ttl time.Duration) {
+func (m *memCache) Set(_ context.Context, key string, entry []byte, ttl time.Duration) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.entries[key] = entry
+	m.entries[key] = slices.Clone(entry)
 	m.ttls[key] = ttl
+	return nil
 }
 
-func (m *memCache) Delete(_ context.Context, key string) {
+func (m *memCache) Delete(_ context.Context, key string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.entries, key)
 	delete(m.ttls, key)
+	return nil
 }
 
 // keys returns what is stored, so a test can see which key a listing landed
@@ -147,13 +149,6 @@ func (m *memCache) ttl(key string) time.Duration {
 	return m.ttls[key]
 }
 
-func (m *memCache) Clear(_ context.Context) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.entries = map[string]*CachedToolEntry{}
-	m.ttls = map[string]time.Duration{}
-}
-
 func (m *memCache) size() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -168,7 +163,9 @@ func echoServer(t *testing.T) (url string, namesSeen func() []string) {
 	var mu sync.Mutex
 	var seen []string
 
-	server := mcp.NewServer(&mcp.Implementation{Name: "echo-server", Version: "0.1.0"}, nil)
+	server := mcp.NewServer(&mcp.Implementation{Name: "echo-server", Version: "0.1.0"}, &mcp.ServerOptions{
+		SetCacheable: func(_ context.Context, _ mcp.Request, c *mcp.Cacheable) { c.TTLMs = 60000 },
+	})
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "echo",
 		Description: "Echoes back the name it was called under.",

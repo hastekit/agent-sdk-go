@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/bytedance/sonic"
@@ -25,8 +26,18 @@ import (
 //   - Multiple independent readers per channel (no coordination needed)
 //   - TTL-based automatic cleanup after a stream terminates
 type RedisStreamBroker struct {
-	client       *redis.Client
-	prefix       string
+	client *redis.Client
+	prefix string
+
+	// runFeed is this process's window of run lifecycle events, filled by the
+	// pub/sub subscriptions below rather than by local publishes — so a run
+	// that starts on another replica reaches the browsers watching here.
+	runFeed *feedHub
+
+	feedMu       sync.Mutex
+	feedSubs     map[string]bool
+	feedCtx      context.Context
+	feedStop     context.CancelFunc
 	activeTTL    time.Duration
 	replayTTL    time.Duration
 	maxLen       int64
@@ -125,9 +136,15 @@ func NewRedisStreamBroker(opts RedisStreamBrokerOptions) (*RedisStreamBroker, er
 		stopPoll = defaultStopPoll
 	}
 
+	feedCtx, feedStop := context.WithCancel(context.Background())
+
 	return &RedisStreamBroker{
 		client:       client,
 		prefix:       prefix,
+		runFeed:      newFeedHub(),
+		feedSubs:     map[string]bool{},
+		feedCtx:      feedCtx,
+		feedStop:     feedStop,
 		activeTTL:    activeTTL,
 		replayTTL:    replayTTL,
 		maxLen:       maxLen,

@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/hastekit/agent-sdk-go/pkg/agents"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/history"
 	restate "github.com/restatedev/sdk-go"
 )
@@ -13,10 +14,10 @@ type RestateHistory struct {
 	wrappedPersistence history.ConversationPersistenceAdapter
 }
 
-func NewRestateConversationPersistence(restateCtx restate.WorkflowContext, wrappedPersistence history.ConversationPersistenceAdapter) *RestateHistory {
+func NewRestateConversationPersistence(restateCtx restate.WorkflowContext, wrappedPersistence history.ConversationPersistenceAdapter, middlewares ...agents.HistoryMiddleware) *RestateHistory {
 	return &RestateHistory{
 		restateCtx:         restateCtx,
-		wrappedPersistence: wrappedPersistence,
+		wrappedPersistence: agents.WrapHistoryPersistence(wrappedPersistence, middlewares...),
 	}
 }
 
@@ -49,9 +50,9 @@ func (t *RestateHistory) LoadMessages(ctx context.Context, namespace string, thr
 	}, restate.WithName("LoadMessages"))
 }
 
-func (t *RestateHistory) SaveMessages(ctx context.Context, namespace, runId, previousRunId, threadId, conversationId string, messages []history.Message, meta map[string]any) error {
+func (t *RestateHistory) SaveMessages(ctx context.Context, namespace, groupID, runId, previousRunId, threadId, conversationId string, messages []history.Message, meta map[string]any) error {
 	_, err := restate.Run(t.restateCtx, func(ctx restate.RunContext) (any, error) {
-		return nil, t.wrappedPersistence.SaveMessages(ctx, namespace, runId, previousRunId, threadId, conversationId, messages, meta)
+		return nil, t.wrappedPersistence.SaveMessages(ctx, namespace, groupID, runId, previousRunId, threadId, conversationId, messages, meta)
 	}, restate.WithName("SaveMessages"))
 	return err
 }

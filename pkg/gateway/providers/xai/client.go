@@ -1,16 +1,12 @@
 package xai
 
 import (
-	"bufio"
 	"bytes"
 	"compress/gzip"
 	"context"
 	"errors"
-	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
-	"strings"
 
 	"github.com/bytedance/sonic"
 	image_edit2 "github.com/hastekit/agent-sdk-go/pkg/gateway/llm/image_edit"
@@ -30,6 +26,9 @@ type ClientOptions struct {
 	ApiKey  string
 	Headers map[string]string
 
+	// HTTPClient allows callers to configure timeouts and transports.
+	HTTPClient *http.Client
+
 	transport *http.Client
 }
 
@@ -39,6 +38,9 @@ type Client struct {
 }
 
 func NewClient(opts *ClientOptions) *Client {
+	if opts.transport == nil {
+		opts.transport = opts.HTTPClient
+	}
 	if opts.transport == nil {
 		opts.transport = http.DefaultClient
 	}
@@ -60,7 +62,7 @@ func (c *Client) NewResponses(ctx context.Context, inp *responses2.Request) (*re
 		return nil, err
 	}
 
-	req, err := http.NewRequest(http.MethodPost, c.opts.BaseURL+"/responses", bytes.NewBuffer(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.opts.BaseURL+"/responses", bytes.NewBuffer(payload))
 	if err != nil {
 		return nil, err
 	}
@@ -76,9 +78,7 @@ func (c *Client) NewResponses(ctx context.Context, inp *responses2.Request) (*re
 	defer res.Body.Close()
 
 	if res.StatusCode != http.StatusOK {
-		var errResp map[string]any
-		err = utils.DecodeJSON(res.Body, &errResp)
-		return nil, fmt.Errorf("error: %v", errResp)
+		return nil, base.ParseErrorResponse(res)
 	}
 
 	var xaiResponse *xai_responses2.Response
@@ -102,7 +102,7 @@ func (c *Client) NewStreamingResponses(ctx context.Context, inp *responses2.Requ
 		return nil, err
 	}
 
-	req, err := http.NewRequest(http.MethodPost, c.opts.BaseURL+"/responses", bytes.NewBuffer(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.opts.BaseURL+"/responses", bytes.NewBuffer(payload))
 	if err != nil {
 		return nil, err
 	}
@@ -117,38 +117,17 @@ func (c *Client) NewStreamingResponses(ctx context.Context, inp *responses2.Requ
 	}
 
 	if res.StatusCode != http.StatusOK {
-		var errResp string
-		err = utils.DecodeJSON(res.Body, &errResp)
-		return nil, errors.New(errResp)
+		defer res.Body.Close()
+		return nil, base.ParseErrorResponse(res)
 	}
 
-	out := make(chan *responses2.ResponseChunk)
-
-	go func() {
-		defer res.Body.Close()
-		defer close(out)
-		reader := bufio.NewReader(res.Body)
-
-		for {
-			line, err := reader.ReadString('\n')
-			if err != nil {
-				return
-			}
-
-			line = strings.TrimRight(line, "\r\n")
-			if strings.HasPrefix(line, "data:") {
-				xaiResponseChunk := &xai_responses2.ResponseChunk{}
-				err = sonic.Unmarshal([]byte(strings.TrimPrefix(line, "data:")), xaiResponseChunk)
-				if err != nil {
-					slog.WarnContext(ctx, "unable to unmarshal xai response chunk", slog.String("data", line), slog.Any("error", err))
-					continue
-				}
-				out <- xaiResponseChunk.ToNativeResponseChunk()
-			}
+	return base.StreamResponsesSSE(ctx, res.Body, func(data []byte) ([]*responses2.ResponseChunk, error) {
+		chunk := &xai_responses2.ResponseChunk{}
+		if err := sonic.Unmarshal(data, chunk); err != nil {
+			return nil, err
 		}
-	}()
-
-	return out, nil
+		return []*responses2.ResponseChunk{chunk.ToNativeResponseChunk()}, nil
+	}), nil
 }
 
 func (c *Client) NewSpeech(ctx context.Context, in *speech2.Request) (*speech2.Response, error) {
@@ -159,7 +138,7 @@ func (c *Client) NewSpeech(ctx context.Context, in *speech2.Request) (*speech2.R
 		return nil, err
 	}
 
-	req, err := http.NewRequest(http.MethodPost, c.opts.BaseURL+"/tts", bytes.NewBuffer(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.opts.BaseURL+"/tts", bytes.NewBuffer(payload))
 	if err != nil {
 		return nil, err
 	}
@@ -174,17 +153,7 @@ func (c *Client) NewSpeech(ctx context.Context, in *speech2.Request) (*speech2.R
 	defer res.Body.Close()
 
 	if res.StatusCode != http.StatusOK {
-		var errResp map[string]any
-		err = utils.DecodeJSON(res.Body, &errResp)
-		if err != nil {
-			return nil, err
-		}
-		if errorObj, ok := errResp["error"].(map[string]any); ok {
-			if message, ok := errorObj["message"].(string); ok {
-				return nil, errors.New(message)
-			}
-		}
-		return nil, errors.New("unknown error occurred")
+		return nil, base.ParseErrorResponse(res)
 	}
 
 	var reader io.Reader = res.Body
@@ -217,7 +186,7 @@ func (c *Client) NewImageGeneration(ctx context.Context, in *image_generation2.R
 		return nil, err
 	}
 
-	req, err := http.NewRequest(http.MethodPost, c.opts.BaseURL+"/images/generations", bytes.NewBuffer(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.opts.BaseURL+"/images/generations", bytes.NewBuffer(payload))
 	if err != nil {
 		return nil, err
 	}
@@ -232,17 +201,7 @@ func (c *Client) NewImageGeneration(ctx context.Context, in *image_generation2.R
 	defer res.Body.Close()
 
 	if res.StatusCode != http.StatusOK {
-		var errResp map[string]any
-		err = utils.DecodeJSON(res.Body, &errResp)
-		if err != nil {
-			return nil, err
-		}
-		if errorObj, ok := errResp["error"].(map[string]any); ok {
-			if message, ok := errorObj["message"].(string); ok {
-				return nil, errors.New(message)
-			}
-		}
-		return nil, errors.New("unknown error occurred")
+		return nil, base.ParseErrorResponse(res)
 	}
 
 	var xaiResponse *xai_image_generation.Response
@@ -262,7 +221,7 @@ func (c *Client) NewImageEdit(ctx context.Context, in *image_edit2.Request) (*im
 		return nil, err
 	}
 
-	req, err := http.NewRequest(http.MethodPost, c.opts.BaseURL+"/images/edits", bytes.NewBuffer(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.opts.BaseURL+"/images/edits", bytes.NewBuffer(payload))
 	if err != nil {
 		return nil, err
 	}
@@ -277,17 +236,7 @@ func (c *Client) NewImageEdit(ctx context.Context, in *image_edit2.Request) (*im
 	defer res.Body.Close()
 
 	if res.StatusCode != http.StatusOK {
-		var errResp map[string]any
-		err = utils.DecodeJSON(res.Body, &errResp)
-		if err != nil {
-			return nil, err
-		}
-		if errorObj, ok := errResp["error"].(map[string]any); ok {
-			if message, ok := errorObj["message"].(string); ok {
-				return nil, errors.New(message)
-			}
-		}
-		return nil, errors.New("unknown error occurred")
+		return nil, base.ParseErrorResponse(res)
 	}
 
 	var xaiEditResponse *xai_image_edit.Response

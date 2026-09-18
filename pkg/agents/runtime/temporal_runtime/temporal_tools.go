@@ -2,6 +2,7 @@ package temporal_runtime
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
 	"go.temporal.io/sdk/activity"
@@ -25,24 +26,27 @@ func injectProgressReporter(ctx context.Context, broker agents.StreamBroker, par
 }
 
 type TemporalTool struct {
+	middlewares []agents.ToolCallMiddleware
 	wrappedTool agents.Tool
 	broker      agents.StreamBroker
 }
 
-func NewTemporalTool(wrappedTool agents.Tool, broker agents.StreamBroker) *TemporalTool {
+func NewTemporalTool(wrappedTool agents.Tool, broker agents.StreamBroker, middlewares ...agents.ToolCallMiddleware) *TemporalTool {
 	return &TemporalTool{
 		wrappedTool: wrappedTool,
 		broker:      broker,
+		middlewares: append([]agents.ToolCallMiddleware{agents.StopMiddleware{Watcher: agents.StopWatcherFrom(broker)}}, middlewares...),
 	}
 }
 
 func (t *TemporalTool) Execute(ctx context.Context, params *agents.ToolCall) (*agents.ToolCallResponse, error) {
 	injectProgressReporter(ctx, t.broker, params)
 
-	resp, err := agents.RunStoppableTool(ctx, agents.StopWatcherFrom(t.broker), 0, params,
-		func(callCtx context.Context, p *agents.ToolCall) (*agents.ToolCallResponse, error) {
-			return agents.ExecuteWithTrace(callCtx, t.wrappedTool, p, t.wrappedTool.Execute)
-		})
+	resp, err := agents.ExecuteWithTrace(ctx, t.wrappedTool, params, func(ctx context.Context, call *agents.ToolCall) (*agents.ToolCallResponse, error) {
+		// The same projection the local executor shows a middleware, so a
+		// policy keyed on the tool's name reads the same here as it does there.
+		return agents.ExecuteToolCallWithMiddleware(ctx, t.middlewares, agents.SerializeTool(t.wrappedTool.GetToolDescriptor(), call), call, t.wrappedTool.Execute)
+	})
 
 	return resp, cancellationError(err)
 }
@@ -53,12 +57,18 @@ type TemporalToolProxy struct {
 	wrappedTool agents.Tool
 }
 
+// NewTemporalToolProxy wraps a tool for the workflow, keeping whichever
+// capabilities the loop will ask it about — see TemporalBackgroundToolProxy.
 func NewTemporalToolProxy(workflowCtx workflow.Context, prefix string, wrappedTool agents.Tool) agents.Tool {
-	return &TemporalToolProxy{
+	proxy := &TemporalToolProxy{
 		workflowCtx: workflowCtx,
 		prefix:      prefix,
 		wrappedTool: wrappedTool,
 	}
+	if _, ok := wrappedTool.(agents.BackgroundTool); ok {
+		return &TemporalBackgroundToolProxy{TemporalToolProxy: proxy}
+	}
+	return proxy
 }
 
 func (t *TemporalToolProxy) Execute(ctx context.Context, params *agents.ToolCall) (*agents.ToolCallResponse, error) {
@@ -73,12 +83,39 @@ func (t *TemporalToolProxy) Execute(ctx context.Context, params *agents.ToolCall
 
 // GetToolDescriptor reports the wrapped tool's own identity, not this
 // wrapper's: the wrapper is a way of running the tool, not a different tool,
-// and it is what the loop reads and what a hook is shown.
+// and it is what the loop reads and what a middleware is shown.
 func (t *TemporalToolProxy) GetToolDescriptor() *agents.BaseTool {
-	// Nil-safe because this one is asked on every tool call, by the hook runner,
+	// Nil-safe because this one is asked on every tool call, by the middleware runner,
 	// where losing the tool's identity is a far better outcome than a panic.
 	if t.wrappedTool == nil {
 		return &agents.BaseTool{}
 	}
 	return t.wrappedTool.GetToolDescriptor()
 }
+
+// TemporalBackgroundToolProxy is the proxy for a tool that also starts
+// background tasks. The loop asks a tool whether it is an agents.BackgroundTool
+// before letting it answer with a task id, and it asks the proxy, not the tool
+// behind it — so the proxy has to be one too.
+//
+// Its AwaitTask is never called in the workflow. Waiting is what the background
+// workflow's activity does, on the real tool; this exists so the loop
+// recognises the capability, and so the runner learns which activity waits.
+type TemporalBackgroundToolProxy struct {
+	*TemporalToolProxy
+}
+
+var (
+	_ agents.BackgroundTool   = (*TemporalBackgroundToolProxy)(nil)
+	_ backgroundActivityNamer = (*TemporalBackgroundToolProxy)(nil)
+)
+
+func (t *TemporalBackgroundToolProxy) AwaitTask(context.Context, agents.BackgroundTaskRef, agents.ProgressReporter) (agents.BackgroundResult, error) {
+	return agents.BackgroundResult{}, fmt.Errorf(
+		"a background task is waited on by its own workflow, not inside the run that started it")
+}
+
+// BackgroundActivityName is the activity registered to wait for this tool's
+// tasks — the tool's activity prefix, which is scoped to the agent the same
+// way every other activity here is.
+func (t *TemporalBackgroundToolProxy) BackgroundActivityName() string { return t.prefix }

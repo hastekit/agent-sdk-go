@@ -40,20 +40,19 @@ type ToolExecutor interface {
 	ExecuteAll(ctx context.Context, executions []ExecutableToolCall) []ToolExecutionResult
 }
 
-// HookAwareToolExecutor is an optional ToolExecutor capability: the executor
-// runs the agent's tool call hooks around each call. NewAgent injects the
-// hooks the agent was configured with.
+// MiddlewareAwareToolExecutor is an optional ToolExecutor capability: the executor
+// runs the agent's tool call middlewares around each call. NewAgent injects the
+// middlewares the agent was configured with.
 //
-// Running them here rather than in the loop is what makes them durable steps:
-// the Temporal and Restate executors run inside the workflow, so a hook they
-// invoke is journaled like any other step. An executor that doesn't implement
-// this simply runs no agent-level hooks.
-type HookAwareToolExecutor interface {
+// The local executor runs them directly. Durable executors leave them on the
+// worker, inside the same step as the tool. An executor that does not implement
+// this capability must arrange middleware at its own execution boundary.
+type MiddlewareAwareToolExecutor interface {
 	ToolExecutor
 
-	// WithToolCallHooks returns a copy bound to hooks, rather than mutating,
-	// so an executor shared between agents never runs another agent's hooks.
-	WithToolCallHooks(hooks []ToolCallHook) ToolExecutor
+	// WithToolCallMiddlewares returns a copy bound to middlewares, rather than mutating,
+	// so an executor shared between agents never runs another agent's middleware.
+	WithToolCallMiddlewares(middlewares []ToolCallMiddleware) ToolExecutor
 }
 
 // BrokerAwareToolExecutor is an optional ToolExecutor capability: the
@@ -81,25 +80,25 @@ type DefaultToolExecutor struct {
 	// DefaultCancelGrace.
 	CancelGracePeriod time.Duration
 
-	// Hooks wrap every call this executor runs, whatever the tool's source —
+	// Middlewares wrap every call this executor runs, whatever the tool's source —
 	// the agent's own function tools, its sub-agent tools, and every MCP
-	// server's. This is the only place tool call hooks run.
+	// server's. This is the only place tool call middlewares run.
 	//
 	// Handoffs do not pass through them: transfer_to_agent is settled by the
 	// loop before anything reaches an executor, and the target agent's own
-	// hooks apply to what it then does.
-	Hooks []ToolCallHook
+	// middlewares apply to what it then does.
+	Middlewares []ToolCallMiddleware
 }
 
 var (
-	_ BrokerAwareToolExecutor = (*DefaultToolExecutor)(nil)
-	_ HookAwareToolExecutor   = (*DefaultToolExecutor)(nil)
+	_ BrokerAwareToolExecutor     = (*DefaultToolExecutor)(nil)
+	_ MiddlewareAwareToolExecutor = (*DefaultToolExecutor)(nil)
 )
 
-// WithToolCallHooks implements HookAwareToolExecutor.
-func (e *DefaultToolExecutor) WithToolCallHooks(hooks []ToolCallHook) ToolExecutor {
+// WithToolCallMiddlewares implements MiddlewareAwareToolExecutor.
+func (e *DefaultToolExecutor) WithToolCallMiddlewares(middlewares []ToolCallMiddleware) ToolExecutor {
 	bound := *e
-	bound.Hooks = hooks
+	bound.Middlewares = middlewares
 	return &bound
 }
 
@@ -115,11 +114,10 @@ func (e *DefaultToolExecutor) WithStreamBroker(broker StreamBroker) ToolExecutor
 	return &bound
 }
 
-// ExecuteAll runs every call in parallel through RunStoppableTool — the
-// same primitive the Temporal and Restate wrappers use, since this
-// executor is where a local tool actually runs.
+// ExecuteAll runs calls in parallel, with stop middleware outside user middleware.
 func (e *DefaultToolExecutor) ExecuteAll(ctx context.Context, executions []ExecutableToolCall) []ToolExecutionResult {
 	results := make([]ToolExecutionResult, len(executions))
+	middlewares := append([]ToolCallMiddleware{StopMiddleware{Watcher: e.StopWatcher, CancelGracePeriod: e.CancelGracePeriod}}, e.Middlewares...)
 
 	// Per-call buffered channels rather than a shared slice: an abandoned
 	// goroutine's eventual result lands in a buffer nobody reads, never in
@@ -130,17 +128,9 @@ func (e *DefaultToolExecutor) ExecuteAll(ctx context.Context, executions []Execu
 		reports[i] = report
 
 		go func(ex ExecutableToolCall) {
-			// The hooks run inside the stoppable unit, so a stop unwinds a hook
-			// that is hanging on a slow authorization service the same way it
-			// unwinds a hanging tool. They sit outside the tool's own span,
-			// which stays a measure of the tool.
-			resp, err := RunStoppableTool(ctx, e.StopWatcher, e.CancelGracePeriod, ex.ToolCall,
-				func(callCtx context.Context, params *ToolCall) (*ToolCallResponse, error) {
-					return RunWithToolCallHooks(callCtx, e.Hooks, ex,
-						func(hookedCtx context.Context, p *ToolCall) (*ToolCallResponse, error) {
-							return ExecuteWithTrace(hookedCtx, ex.Tool, p, ex.Tool.Execute)
-						})
-				})
+			resp, err := ExecuteWithTrace(ctx, ex.Tool, ex.ToolCall, func(ctx context.Context, call *ToolCall) (*ToolCallResponse, error) {
+				return ExecuteToolWithMiddleware(ctx, middlewares, ex, ex.Tool.Execute)
+			})
 			report <- ToolExecutionResult{
 				Response:  resp,
 				Err:       err,

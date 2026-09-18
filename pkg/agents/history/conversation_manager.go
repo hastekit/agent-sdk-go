@@ -19,6 +19,7 @@ var (
 
 // ConversationMessage represents a turn within a thread.
 type ConversationMessage struct {
+	GroupID        string         `json:"group_id,omitempty" db:"group_id"`
 	RunID          string         `json:"run_id" db:"run_id"`
 	ThreadID       string         `json:"thread_id" db:"thread_id"`
 	ConversationID string         `json:"conversation_id" db:"conversation_id"`
@@ -44,7 +45,9 @@ type ConversationPersistenceAdapter interface {
 	NewRunID(ctx context.Context) string
 	Now(ctx context.Context) time.Time
 	LoadMessages(ctx context.Context, namespace string, threadID string, previousRunID string) ([]ConversationMessage, error)
-	SaveMessages(ctx context.Context, namespace, runId, previousRunId, threadID string, conversationId string, messages []Message, meta map[string]any) error
+	// SaveMessages assigns the group (empty selects DefaultGroupID) to a new conversation. Implementations
+	// must preserve its group on continuations, incremental saves, and forks.
+	SaveMessages(ctx context.Context, namespace, groupID, runId, previousRunId, threadID string, conversationId string, messages []Message, meta map[string]any) error
 	SaveSummary(ctx context.Context, namespace string, summary Summary) error
 }
 
@@ -121,9 +124,11 @@ func WithoutSteeringNotices() ConversationManagerOptions {
 type ConversationRunManager struct {
 	ConversationPersistenceAdapter
 
+	groupID        string
 	namespace      string
 	conversationId string
 	runId          string
+	requestedRunID string
 	previousRunId  string
 	msgIdToRunId   map[string]string
 	threadId       string
@@ -154,6 +159,14 @@ type ConversationRunManager struct {
 	// to the run that received it, which stops being useful once that run ends
 	// and the message is simply part of the thread's history.
 	steeredIDs map[string]struct{}
+
+	// justDrained holds the bundles the most recent GetMessages folded in off
+	// the queue, waiting to be read once by the loop. It exists because the
+	// moment a queued turn is picked up is the only moment worth announcing:
+	// it is queued at an iteration boundary but may sit there through several
+	// tool calls, and a client told about it any earlier would place it before
+	// work that in fact came first.
+	justDrained []Message
 }
 
 func NewRun(ctx context.Context, cm *CommonConversationManager, namespace string, threadID string, previousRunID string, options ...RunOption) (*ConversationRunManager, error) {
@@ -164,6 +177,7 @@ func NewRun(ctx context.Context, cm *CommonConversationManager, namespace string
 		messageAttribution:             cm.MessageAttribution,
 		steeringNotices:                cm.SteeringNotices,
 		msgIdToRunId:                   make(map[string]string),
+		groupID:                        DefaultGroupID,
 		State:                          make(map[string]string),
 	}
 
@@ -190,10 +204,19 @@ func NewRun(ctx context.Context, cm *CommonConversationManager, namespace string
 		// GetMessages of every turn see "no context yet" and skip
 		// summarization — so an agent that answers in one LLM call per turn
 		// (no tool loop) would never summarize at all.
+		//
+		// Background tasks carry forward for the same reason: a task outlives
+		// the run that started it, so the record of what is still outstanding
+		// belongs to the thread. Left behind, a task would stop being reported
+		// the moment the user took a turn of their own — and the reader has no
+		// other way to know it is still working. Each is dropped when its
+		// result arrives, which is what keeps the list from growing forever.
 		var lastAgent string
 		var contextTokens, pendingContextTokens int
+		var backgroundTasks map[string]agentstate.BackgroundTask
 		if cr.RunState != nil {
 			lastAgent = cr.RunState.LastAgentName
+			backgroundTasks = cr.RunState.BackgroundTasks
 			contextTokens = cr.RunState.ContextTokens
 			// The estimate carries too, though it is usually zero here: a run
 			// that ends normally does so straight after an LLM call, and that
@@ -209,6 +232,7 @@ func NewRun(ctx context.Context, cm *CommonConversationManager, namespace string
 		cr.RunState.LastAgentName = lastAgent
 		cr.RunState.ContextTokens = contextTokens
 		cr.RunState.PendingContextTokens = pendingContextTokens
+		cr.RunState.BackgroundTasks = backgroundTasks
 	} else {
 		// Continuing the previous run
 		runID = cr.previousRunId
@@ -217,9 +241,13 @@ func NewRun(ctx context.Context, cm *CommonConversationManager, namespace string
 	// Store the run id
 	cr.runId = runID
 
-	// Run the options
+	// Apply options after restoring pending state, so a new execution ID can
+	// continue an approval without losing the tool state it is resuming.
 	for _, o := range options {
 		o(cr)
+	}
+	if cr.requestedRunID != "" {
+		cr.runId = cr.requestedRunID
 	}
 
 	if cr.conversationId == "" {
@@ -230,6 +258,43 @@ func NewRun(ctx context.Context, cm *CommonConversationManager, namespace string
 }
 
 type RunOption func(manager *ConversationRunManager)
+
+// WithGroupID assigns a group to a new conversation. Restored threads and forks
+// retain their original group. Empty selects DefaultGroupID.
+func WithGroupID(id string) RunOption {
+	return func(cm *ConversationRunManager) {
+		if cm.previousRunId == "" {
+			cm.groupID = NormalizeGroupID(id)
+		}
+	}
+}
+
+// DefaultGroupID is the group used for ordinary conversations.
+const DefaultGroupID = "default"
+
+// NormalizeGroupID selects the default group when no ID is supplied.
+func NormalizeGroupID(id string) string {
+	if id == "" {
+		return DefaultGroupID
+	}
+	return id
+}
+
+// WithRunID selects a caller-provided execution ID. It must be new in this
+// namespace. Omit it to retain generated IDs and legacy paused-run continuation.
+func WithRunID(id string) RunOption {
+	return func(cr *ConversationRunManager) { cr.requestedRunID = id }
+}
+
+// WithDefaultConversationID selects the conversation ID only for a new conversation.
+// Restored threads and forks retain the conversation they already belong to.
+func WithDefaultConversationID(id string) RunOption {
+	return func(cm *ConversationRunManager) {
+		if cm.conversationId == "" {
+			cm.conversationId = id
+		}
+	}
+}
 
 func WithConversationID(cid string) RunOption {
 	return func(cm *ConversationRunManager) {
@@ -308,6 +373,7 @@ func (cm *ConversationRunManager) GetMessages(ctx context.Context, agentName str
 		for _, m := range cm.RunState.QueuedMessages {
 			cm.markSteered(m)
 		}
+		cm.justDrained = append(cm.justDrained, cm.RunState.QueuedMessages...)
 		cm.newMessages = append(cm.newMessages, cm.RunState.QueuedMessages...)
 		cm.RunState.QueuedMessages = nil
 	}
@@ -412,6 +478,18 @@ func (cm *ConversationRunManager) summarize(ctx context.Context) error {
 
 // markSteered records that a bundle reached this run mid-flight rather than
 // opening it.
+// TakeSteeredMessages returns the bundles the last GetMessages folded in from
+// the queue, and forgets them — so a caller that reports them reports each
+// exactly once.
+//
+// Nil on every call but the one right after a drain, which is the point: it
+// answers "did anything arrive mid-run, and has the run now picked it up?"
+func (cm *ConversationRunManager) TakeSteeredMessages() []Message {
+	drained := cm.justDrained
+	cm.justDrained = nil
+	return drained
+}
+
 func (cm *ConversationRunManager) markSteered(m Message) {
 	if m.ID == "" || !cm.steeringNotices {
 		return
@@ -461,6 +539,7 @@ func (cm *ConversationRunManager) LoadMessages(ctx context.Context, namespace st
 		}
 		cm.threadId = msg.ThreadID
 		cm.conversationId = msg.ConversationID
+		cm.groupID = NormalizeGroupID(msg.GroupID)
 		cm.previousRunId = msg.RunID
 
 		oldMessages = append(oldMessages, msg.Messages...)
@@ -491,7 +570,12 @@ func (cm *ConversationRunManager) GetMeta() map[string]any {
 	return cm.lastMessageMeta
 }
 
-// GetMessageID returns the current run id
+// GetGroupID returns the group of the new or restored conversation.
+func (cm *ConversationRunManager) GetGroupID() string {
+	return cm.groupID
+}
+
+// GetRunID returns the current run ID.
 func (cm *ConversationRunManager) GetRunID() string {
 	return cm.runId
 }
@@ -543,7 +627,7 @@ func (cm *ConversationRunManager) SaveMessages(ctx context.Context) error {
 	}
 
 	if cm.ConversationPersistenceAdapter != nil {
-		err := cm.ConversationPersistenceAdapter.SaveMessages(ctx, cm.namespace, cm.runId, cm.previousRunId, cm.threadId, cm.conversationId, cm.newMessages, meta)
+		err := cm.ConversationPersistenceAdapter.SaveMessages(ctx, cm.namespace, cm.groupID, cm.runId, cm.previousRunId, cm.threadId, cm.conversationId, cm.newMessages, meta)
 		if err != nil {
 			return err
 		}
@@ -649,6 +733,13 @@ func (cm *ConversationRunManager) ProcessIncomingMessages(message Message, queue
 }
 
 func (cm *ConversationRunManager) processIncoming(message Message, queue, estimate bool) {
+	// A background task's result landing is the answer to something the run is
+	// carrying, the same as an approval is — so it is reconciled here, where
+	// every incoming bundle already passes and where the run state is to hand.
+	// Both ways a result can arrive reach this: the turn that opens a run
+	// woken by one, and the queue a run already going drains.
+	cm.RunState.CompleteBackgroundTask(message.BackgroundTaskID)
+
 	// Process incoming message, and extract tool approvals and user messages
 	hasNewApproval := false
 	var stored []responses.InputMessageUnion
@@ -776,4 +867,13 @@ func (cm *ConversationRunManager) nextRunID(ctx context.Context) string {
 		return uuid.NewString()
 	}
 	return cm.ConversationPersistenceAdapter.NewRunID(ctx)
+}
+
+// Close releases the persistence adapter if it owns resources. Call only after
+// all users of this manager have stopped. Shared adapters must have one owner.
+func (cm *CommonConversationManager) Close() error {
+	if closer, ok := cm.ConversationPersistenceAdapter.(interface{ Close() error }); ok {
+		return closer.Close()
+	}
+	return nil
 }

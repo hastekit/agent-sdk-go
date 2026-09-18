@@ -16,7 +16,7 @@ import (
 // deployments with separate processes, use RedisStreamBroker.
 type MemoryStreamBroker struct {
 	mu          sync.RWMutex
-	subscribers map[string][]chan *responses.ResponseChunk
+	subscribers map[string][]*memorySubscriber
 	closed      map[string]bool
 	stopped     map[string]bool
 	stopChans   map[string]chan struct{}
@@ -28,6 +28,12 @@ type MemoryStreamBroker struct {
 	// than the tail. RedisStreamBroker is rejoinable for the same reason;
 	// this keeps the in-process broker behaving the same way.
 	transcripts map[string][]*responses.ResponseChunk
+
+	// runFeed is the per-namespace run log — see run_feed.go. It has a lock of
+	// its own: a reader waits on it for as long as a client holds a long poll
+	// open, and doing that under the broker's main lock would stop every run
+	// in the process.
+	runFeed *feedHub
 }
 
 // maxTranscript caps retained chunks per channel, mirroring the Redis
@@ -37,13 +43,14 @@ const maxTranscript = 2000
 // NewMemoryStreamBroker creates a new in-memory stream broker.
 func NewMemoryStreamBroker() *MemoryStreamBroker {
 	return &MemoryStreamBroker{
-		subscribers: make(map[string][]chan *responses.ResponseChunk),
+		subscribers: make(map[string][]*memorySubscriber),
 		closed:      make(map[string]bool),
 		stopped:     make(map[string]bool),
 		stopChans:   make(map[string]chan struct{}),
 		queues:      make(map[string][]messages.Message),
 		live:        make(map[string]bool),
 		transcripts: make(map[string][]*responses.ResponseChunk),
+		runFeed:     newFeedHub(),
 	}
 }
 
@@ -63,14 +70,12 @@ func (b *MemoryStreamBroker) Publish(ctx context.Context, channel string, chunk 
 	}
 	b.transcripts[channel] = append(transcript, chunk)
 
-	subscribers := append([]chan *responses.ResponseChunk(nil), b.subscribers[channel]...)
+	subscribers := append([]*memorySubscriber(nil), b.subscribers[channel]...)
 	b.mu.Unlock()
 
 	for _, sub := range subscribers {
-		select {
-		case sub <- chunk:
-		case <-ctx.Done():
-			return ctx.Err()
+		if err := sub.send(ctx, chunk); err != nil {
+			return err
 		}
 	}
 
@@ -101,28 +106,32 @@ func (b *MemoryStreamBroker) Subscribe(ctx context.Context, channel string) (<-c
 	for _, chunk := range transcript {
 		ch <- chunk
 	}
-	b.subscribers[channel] = append(b.subscribers[channel], ch)
+	sub := &memorySubscriber{ch: ch, done: make(chan struct{})}
+	b.subscribers[channel] = append(b.subscribers[channel], sub)
 
 	// Handle context cancellation
 	go func() {
-		<-ctx.Done()
-		b.unsubscribe(channel, ch)
+		select {
+		case <-ctx.Done():
+			b.unsubscribe(channel, sub)
+		case <-sub.done:
+		}
 	}()
 
 	return ch, nil
 }
 
 // unsubscribe removes a subscriber from a channel.
-func (b *MemoryStreamBroker) unsubscribe(channel string, ch chan *responses.ResponseChunk) {
+func (b *MemoryStreamBroker) unsubscribe(channel string, target *memorySubscriber) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
 	subscribers := b.subscribers[channel]
 	for i, sub := range subscribers {
-		if sub == ch {
+		if sub == target {
 			// Remove subscriber
 			b.subscribers[channel] = append(subscribers[:i], subscribers[i+1:]...)
-			close(ch)
+			sub.close()
 			break
 		}
 	}
@@ -140,8 +149,8 @@ func (b *MemoryStreamBroker) Close(ctx context.Context, channel string) error {
 	delete(b.live, channel)
 
 	// Close all subscriber channels
-	for _, ch := range b.subscribers[channel] {
-		close(ch)
+	for _, sub := range b.subscribers[channel] {
+		sub.close()
 	}
 
 	// Clear subscribers
@@ -258,16 +267,52 @@ func (b *MemoryStreamBroker) Reset() {
 
 	// Close all existing subscriber channels
 	for _, subs := range b.subscribers {
-		for _, ch := range subs {
-			close(ch)
+		for _, sub := range subs {
+			sub.close()
 		}
 	}
 
-	b.subscribers = make(map[string][]chan *responses.ResponseChunk)
+	b.subscribers = make(map[string][]*memorySubscriber)
 	b.closed = make(map[string]bool)
 	b.stopped = make(map[string]bool)
 	b.stopChans = make(map[string]chan struct{})
 	b.queues = make(map[string][]messages.Message)
 	b.live = make(map[string]bool)
 	b.transcripts = make(map[string][]*responses.ResponseChunk)
+}
+
+// Each subscriber owns its channel. Closing done first releases blocked sends;
+// the write lock then ensures all sends have left before ch is closed.
+type memorySubscriber struct {
+	mu   sync.RWMutex
+	once sync.Once
+	ch   chan *responses.ResponseChunk
+	done chan struct{}
+}
+
+func (s *memorySubscriber) send(ctx context.Context, chunk *responses.ResponseChunk) error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	select {
+	case <-s.done:
+		return nil
+	default:
+	}
+	select {
+	case <-s.done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case s.ch <- chunk:
+		return nil
+	}
+}
+
+func (s *memorySubscriber) close() {
+	s.once.Do(func() {
+		close(s.done)
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		close(s.ch)
+	})
 }

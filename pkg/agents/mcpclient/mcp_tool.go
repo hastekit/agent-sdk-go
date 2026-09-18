@@ -2,7 +2,6 @@ package mcpclient
 
 import (
 	"context"
-	"errors"
 	"maps"
 
 	"github.com/bytedance/sonic"
@@ -131,22 +130,7 @@ func (c *McpTool) Execute(ctx context.Context, params *agents.ToolCall) (*agents
 		return pause, nil
 	}
 
-	// Return the tool result
-	for _, r := range res.Content {
-		if tc, ok := r.(*mcp.TextContent); ok {
-			out := &responses.FunctionCallOutputMessage{
-				ID:     params.ID,
-				CallID: params.CallID,
-				Output: responses.FunctionCallOutputContentUnion{
-					OfString: utils.Ptr(tc.Text),
-				},
-			}
-			return &agents.ToolCallResponse{FunctionCallOutputMessage: out}, nil
-		}
-	}
-
-	err = errors.New("missing mcp tool result")
-	return nil, err
+	return mcpToolResult(params, res.Content)
 }
 
 // LazyMcpTool holds a cached tool schema but defers MCP connection to Execute() time.
@@ -249,10 +233,12 @@ func (c *LazyMcpTool) Execute(ctx context.Context, params *agents.ToolCall) (*ag
 
 		// Connection might be dead — remove from pool and retry once
 		globalPool.Remove(c.conn)
-		cli, retryErr := globalPool.Checkout(ctx, c.conn)
+		cli, retryRelease, retryErr := globalPool.Checkout(ctx, c.conn)
 		if retryErr != nil {
 			return toolOutput(params, err.Error()), nil
 		}
+		defer retryRelease()
+
 		res, err = cli.CallTool(ctx, callParams)
 		if err != nil {
 			return toolOutput(params, err.Error()), nil
@@ -269,22 +255,7 @@ func (c *LazyMcpTool) Execute(ctx context.Context, params *agents.ToolCall) (*ag
 		return pause, nil
 	}
 
-	// Return the tool result
-	for _, r := range res.Content {
-		if tc, ok := r.(*mcp.TextContent); ok {
-			out := &responses.FunctionCallOutputMessage{
-				ID:     params.ID,
-				CallID: params.CallID,
-				Output: responses.FunctionCallOutputContentUnion{
-					OfString: utils.Ptr(tc.Text),
-				},
-			}
-			return &agents.ToolCallResponse{FunctionCallOutputMessage: out}, nil
-		}
-	}
-
-	err = errors.New("missing mcp tool result")
-	return nil, err
+	return mcpToolResult(params, res.Content)
 }
 
 // toolOutput wraps text as this call's result, which is how a failure the
@@ -303,10 +274,12 @@ func toolOutput(params *agents.ToolCall, text string) *agents.ToolCallResponse {
 // checkoutSession returns the session this call runs on, and what to do with it
 // when the call is done.
 //
-// A pooled session is shared and outlives the call, so releasing it is nothing.
-// An unpooled one belongs to this call alone and is closed with it — see
-// serverConn.poolable for which is which, and why a connection carrying
-// credentials nobody identified is never shared.
+// Either way the release must be called when the caller is done. A pooled
+// session outlives the call, so releasing it only says the call is over —
+// which is what keeps the pool from sweeping a connection that is still
+// carrying a request. An unpooled one belongs to this call alone and is closed
+// with it; see serverConn.poolable for which is which, and why a connection
+// carrying credentials nobody identified is never shared.
 func checkoutSession(ctx context.Context, conn serverConn) (*mcp.ClientSession, func(), error) {
 	if !conn.poolable() {
 		session, err := connect(ctx, conn)
@@ -316,9 +289,5 @@ func checkoutSession(ctx context.Context, conn serverConn) (*mcp.ClientSession, 
 		return session, func() { session.Close() }, nil
 	}
 
-	session, err := globalPool.Checkout(ctx, conn)
-	if err != nil {
-		return nil, nil, err
-	}
-	return session, func() {}, nil
+	return globalPool.Checkout(ctx, conn)
 }

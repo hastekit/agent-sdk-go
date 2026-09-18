@@ -1,11 +1,9 @@
 package anthropic
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"errors"
-	"log/slog"
 	"net/http"
 	"strings"
 
@@ -22,6 +20,9 @@ type ClientOptions struct {
 	ApiKey  string
 	Headers map[string]string
 
+	// HTTPClient allows callers to configure timeouts and transports.
+	HTTPClient *http.Client
+
 	transport *http.Client
 }
 
@@ -31,6 +32,9 @@ type Client struct {
 }
 
 func NewClient(opts *ClientOptions) *Client {
+	if opts.transport == nil {
+		opts.transport = opts.HTTPClient
+	}
 	if opts.transport == nil {
 		opts.transport = http.DefaultClient
 	}
@@ -52,7 +56,7 @@ func (c *Client) NewResponses(ctx context.Context, inp *responses2.Request) (*re
 		return nil, err
 	}
 
-	req, err := http.NewRequest(http.MethodPost, c.opts.BaseURL+"/messages", bytes.NewBuffer(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.opts.BaseURL+"/messages", bytes.NewBuffer(payload))
 	if err != nil {
 		return nil, err
 	}
@@ -105,7 +109,7 @@ func (c *Client) NewStreamingResponses(ctx context.Context, inp *responses2.Requ
 		return nil, err
 	}
 
-	req, err := http.NewRequest(http.MethodPost, c.opts.BaseURL+"/messages", bytes.NewBuffer(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.opts.BaseURL+"/messages", bytes.NewBuffer(payload))
 	if err != nil {
 		return nil, err
 	}
@@ -140,38 +144,12 @@ func (c *Client) NewStreamingResponses(ctx context.Context, inp *responses2.Requ
 		return nil, base.ParseErrorResponse(res)
 	}
 
-	out := make(chan *responses2.ResponseChunk)
-
-	go func() {
-		defer res.Body.Close()
-		defer close(out)
-
-		reader := bufio.NewReader(res.Body)
-		converter := anthropic_responses2.ResponseChunkToNativeResponseChunkConverter{}
-
-		for {
-			line, err := reader.ReadString('\n')
-			if err != nil {
-				return
-			}
-
-			line = strings.TrimRight(line, "\r\n")
-			if strings.HasPrefix(line, "data:") {
-				anthropicResponseChunk := &anthropic_responses2.ResponseChunk{}
-				if err = sonic.Unmarshal([]byte(strings.TrimPrefix(line, "data:")), anthropicResponseChunk); err != nil {
-					slog.WarnContext(ctx, "unable to unmarshal anthropic response chunk", slog.String("data", line), slog.Any("error", err))
-					continue
-				}
-
-				//fmt.Println("---\nAnthropic chunk -> " + strings.TrimPrefix(line, "data:"))
-				for _, nativeChunk := range converter.ResponseChunkToNativeResponseChunk(anthropicResponseChunk) {
-					//d, _ := sonic.Marshal(nativeChunk)
-					//fmt.Println("\t\t <- Native Chunk" + string(d))
-					out <- nativeChunk
-				}
-			}
+	converter := anthropic_responses2.ResponseChunkToNativeResponseChunkConverter{}
+	return base.StreamResponsesSSE(ctx, res.Body, func(data []byte) ([]*responses2.ResponseChunk, error) {
+		chunk := &anthropic_responses2.ResponseChunk{}
+		if err := sonic.Unmarshal(data, chunk); err != nil {
+			return nil, err
 		}
-	}()
-
-	return out, nil
+		return converter.ResponseChunkToNativeResponseChunk(chunk), nil
+	}), nil
 }

@@ -7,7 +7,7 @@ import (
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/speech"
 )
 
-// Tracing for these requests is handled by TracingMiddleware, not inline.
+// Tracing for these requests is handled by middleware.Tracing, not inline.
 
 func (g *LLMGateway) handleSpeechRequest(ctx context.Context, providerName llm.ProviderName, p llm.Provider, in *speech.Request) (*speech.Response, error) {
 	return p.NewSpeech(ctx, in)

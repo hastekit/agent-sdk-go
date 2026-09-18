@@ -5,10 +5,7 @@ import (
 	"errors"
 
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm"
-	"go.opentelemetry.io/otel"
 )
-
-var tracer = otel.Tracer("LLMGateway")
 
 // ConfigStore is the interface required by LLMGateway to get provider and virtual key configurations.
 type ConfigStore interface {
@@ -31,8 +28,17 @@ func NewLLMGateway(ConfigStore ConfigStore) *LLMGateway {
 	}
 }
 
+// UseMiddleware appends middleware to the chain, outermost first.
+//
+// Middleware implementing ConfigStoreAware is handed this gateway's store on
+// the way in, so a caller can construct it without one.
 func (g *LLMGateway) UseMiddleware(middleware ...Middleware) {
-	g.middlewares = append(g.middlewares, middleware...)
+	for _, m := range middleware {
+		if aware, ok := m.(ConfigStoreAware); ok {
+			m = aware.WithConfigStore(g.ConfigStore)
+		}
+		g.middlewares = append(g.middlewares, m)
+	}
 }
 
 func (g *LLMGateway) HandleRequest(ctx context.Context, providerName llm.ProviderName, key string, r *llm.Request) (*llm.Response, error) {

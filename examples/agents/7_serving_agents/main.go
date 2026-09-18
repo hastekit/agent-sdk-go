@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"log"
 	"net/http"
 	"os"
 
@@ -52,6 +53,12 @@ func (t *CustomTool) Execute(ctx context.Context, params *agents.ToolCall) (*age
 }
 
 func main() {
+	fileHistory, err := hastekit.OpenFileHistory("./conversations")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer fileHistory.Close()
+
 	shutdownTelemetry := NewProvider(os.Getenv("LANGFUSE_BASE_URL"))
 	defer shutdownTelemetry()
 
@@ -69,9 +76,9 @@ func main() {
 
 	model := client.Model("OpenAI/gpt-4.1-mini")
 
-	history := hastekit.NewFileHistory("./conversations")
+	history := fileHistory
 	agentName := "SampleAgent"
-	_ = hastekit.NewAgent(&hastekit.AgentConfig{
+	agent := hastekit.MustNewAgent(&hastekit.AgentConfig{
 		Name:        agentName,
 		Instruction: hastekit.NewPrompt("You are a helpful assistant. Use the get_user_name tool to get the user's name and greet them."),
 		LLM:         model,
@@ -81,7 +88,13 @@ func main() {
 		},
 	})
 
-	http.ListenAndServe(":8070", hastekit.NewHTTPHandler())
+	registry := hastekit.NewRegistry()
+	if err := registry.Register(agent); err != nil {
+		log.Fatal(err)
+	}
+	if err := http.ListenAndServe(":8070", hastekit.NewHTTPHandler(registry)); err != nil {
+		log.Fatal(err)
+	}
 
 	// You can then invoke by hitting POST http://localhost:8070/?agent=SampleAgent with `agents.AgentInput` as your payload
 	/*

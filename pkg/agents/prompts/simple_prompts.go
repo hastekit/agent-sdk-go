@@ -162,7 +162,7 @@ func ResolveTemplate(prompt string, deps *agents.Dependencies) (string, error) {
 }
 
 // ResolveSkills appends the catalogue of skills the agent was given: the
-// provider's hint, then each skill's name, description and location. Only that
+// provider's hint, then each skill's name and description. Only that
 // much — the instructions themselves are what the reader tool is for, and
 // putting them here would cost context on every turn instead of the turns that
 // use them.
@@ -188,22 +188,12 @@ func ResolveSkills(prompt string, deps *agents.Dependencies) (string, error) {
 
 		p.WriteString(fmt.Sprintf("<name>%s</name>", skill.Name))
 		p.WriteString(fmt.Sprintf("<description>%s</description>", skill.Description))
-		p.WriteString(fmt.Sprintf("<location>%s</location>", skillLocation(skill)))
 
 		p.WriteString("</skill>")
 	}
 	p.WriteString("</available_skills>")
 
 	return prompt + p.String(), nil
-}
-
-// skillLocation keeps the sandbox convention for skills that carry no location
-// of their own, so skills staged into a sandbox still point where they used to.
-func skillLocation(skill agents.Skill) string {
-	if skill.FileLocation != "" {
-		return skill.FileLocation
-	}
-	return fmt.Sprintf("/skills/%s/SKILL.md", skill.Name)
 }
 
 // ResolveHandoffs appends the agents this one can transfer to.

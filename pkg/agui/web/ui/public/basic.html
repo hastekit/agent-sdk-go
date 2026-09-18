@@ -112,6 +112,15 @@
   <div class="brand"><span class="mark">⚡</span> HasteKit <span style="color:var(--muted);font-weight:400">AG-UI</span></div>
   <div class="side-controls">
     <select id="agent" title="Agent"></select>
+    <details><summary>Skills</summary><div id="skill-list">Loading skills…</div></details>
+    <details id="stored-skills" hidden><summary>Skill library</summary>
+      <p>Upload one skill folder, or select SKILL.md and supporting files. Upload replaces the entire same-named skill.</p>
+      <label>Folder <input id="skill-folder-upload" type="file" multiple webkitdirectory></label>
+      <label>Files <input id="skill-files-upload" type="file" multiple></label>
+      <button id="skill-save" disabled>Upload / replace</button>
+      <p id="skill-save-status" role="status"></p><div id="stored-skill-list"></div>
+      <button id="stored-skill-more" hidden>Load more</button><pre id="stored-skill-preview" style="white-space:pre-wrap;overflow-wrap:anywhere"></pre>
+    </details>
     <button id="new-thread" class="primary">+ New chat</button>
   </div>
   <div id="thread-list"></div>
@@ -144,10 +153,14 @@
   let running = false;
   let threads = [];         // last-fetched thread listing
   let listingSupported = true;
+  let skillChoices = {};
+  let selectedSkillFiles = [];
+  let storedSkillCursor = "";
 
   // ── Agents ────────────────────────────────────────────────
 
   fetch(API + "/agents").then(r => r.json()).then(d => {
+    if (d.skill_store) { document.getElementById("stored-skills").hidden = false; loadStoredSkills(); }
     for (const name of d.agents || []) {
       const opt = document.createElement("option");
       opt.value = opt.textContent = name;
@@ -157,10 +170,11 @@
       note("No agents registered on the server.");
     } else {
       refreshThreads();
+      refreshSkills();
     }
   }).catch(() => note("Could not load agents from " + API + "/agents"));
 
-  agentSel.onchange = () => { newChat(); refreshThreads(); };
+  agentSel.onchange = () => { newChat(); refreshThreads(); refreshSkills(); };
   document.getElementById("new-thread").onclick = () => newChat();
 
   function newChat() {
@@ -170,6 +184,101 @@
     feed.innerHTML = "";
     note("Send a message to start the conversation.");
     renderThreads();
+  }
+
+  async function loadStoredSkills(after = "") {
+    const list = document.getElementById("stored-skill-list");
+    const status = document.getElementById("skill-save-status");
+    try {
+      const res = await fetch(API + "/skills?limit=50&cursor=" + encodeURIComponent(after));
+      if (!res.ok) throw new Error(await res.text());
+      const page = await res.json();
+      if (!after) list.textContent = "";
+      for (const skill of page.skills || []) {
+        const row = document.createElement("div");
+        const view = document.createElement("button"); view.textContent = skill.name; view.title = skill.description;
+        view.onclick = async () => {
+          try {
+            const response = await fetch(API + "/skills/" + encodeURIComponent(skill.name) + "?file=SKILL.md");
+            if (!response.ok) throw new Error(await response.text());
+            document.getElementById("stored-skill-preview").textContent = await response.text();
+          } catch (err) { status.textContent = String(err); }
+        };
+        const remove = document.createElement("button"); remove.textContent = "Delete";
+        remove.setAttribute("aria-label", "Delete " + skill.name);
+        remove.onclick = () => {
+          const confirm = document.createElement("button"); confirm.textContent = "Confirm delete";
+          const cancel = document.createElement("button"); cancel.textContent = "Cancel";
+          remove.hidden = true; row.append(confirm, cancel);
+          cancel.onclick = () => { confirm.remove(); cancel.remove(); remove.hidden = false; };
+          confirm.onclick = async () => {
+            confirm.disabled = true; cancel.disabled = true;
+            try {
+              const response = await fetch(API + "/skills/" + encodeURIComponent(skill.name), { method: "DELETE" });
+              if (!response.ok) throw new Error(await response.text());
+              document.getElementById("stored-skill-preview").textContent = "";
+              status.textContent = "Deleted " + skill.name;
+              await loadStoredSkills(); await refreshSkills();
+            } catch (err) { status.textContent = String(err); confirm.disabled = false; cancel.disabled = false; }
+          };
+        };
+        row.append(view, remove); list.append(row);
+      }
+      if (!list.children.length) list.textContent = "No skills uploaded yet.";
+      storedSkillCursor = page.nextCursor || "";
+      document.getElementById("stored-skill-more").hidden = !storedSkillCursor;
+    } catch (err) { status.textContent = String(err); }
+  }
+  document.getElementById("stored-skill-more").onclick = () => loadStoredSkills(storedSkillCursor);
+  for (const id of ["skill-folder-upload", "skill-files-upload"]) document.getElementById(id).onchange = e => {
+    selectedSkillFiles = Array.from(e.target.files || []); e.target.value = "";
+    document.getElementById("skill-save").disabled = !selectedSkillFiles.length;
+    document.getElementById("skill-save-status").textContent = selectedSkillFiles.length + " files selected";
+  };
+  document.getElementById("skill-save").onclick = async () => {
+    const button = document.getElementById("skill-save"); button.disabled = true;
+    const status = document.getElementById("skill-save-status");
+    try {
+      const body = new FormData();
+      for (const file of selectedSkillFiles) body.append("files", file, file.webkitRelativePath ? file.webkitRelativePath.split("/").slice(1).join("/") : file.name);
+      const res = await fetch(API + "/skills", { method: "POST", body });
+      if (!res.ok) throw new Error(await res.text());
+      const saved = await res.json(); selectedSkillFiles = [];
+      status.textContent = "Saved " + saved.name + ". Enable it in Skills if opt-in.";
+      await loadStoredSkills(); await refreshSkills();
+    } catch (err) { status.textContent = String(err); }
+    finally { button.disabled = !selectedSkillFiles.length; }
+  };
+
+  async function refreshSkills() {
+    const agent = agentSel.value;
+    const container = document.getElementById("skill-list");
+    container.textContent = "Loading skills…";
+    skillChoices = {};
+    try { skillChoices = JSON.parse(localStorage.getItem("hastekit-skills:" + agent) || "{}"); } catch {}
+    try {
+      const res = await fetch(API + "/agents/" + encodeURIComponent(agent) + "/skills");
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      const data = await res.json();
+      if (agent !== agentSel.value) return;
+      container.textContent = "";
+      for (const skill of data.skills || []) {
+        const label = document.createElement("label");
+        label.style.cssText = "display:block;margin:10px 0;font-size:12px";
+        const checkbox = document.createElement("input");
+        checkbox.type = "checkbox";
+        checkbox.disabled = skill.policy === "required";
+        checkbox.checked = checkbox.disabled || (skillChoices[skill.name] ?? skill.enabled);
+        checkbox.onchange = () => {
+          skillChoices[skill.name] = checkbox.checked;
+          try { localStorage.setItem("hastekit-skills:" + agent, JSON.stringify(skillChoices)); } catch {}
+        };
+        label.append(checkbox, document.createTextNode(" " + skill.name + (checkbox.disabled ? " (required)" : "")));
+        label.title = skill.description;
+        container.append(label);
+      }
+      if (!container.children.length) container.textContent = "No skills available.";
+    } catch (err) { if (agent === agentSel.value) container.textContent = "Unable to load skills: " + err.message; }
   }
 
   // ── Conversation list ─────────────────────────────────────
@@ -235,6 +344,17 @@
       threadId = t.thread_id;
       threadIsNew = false;
       history = data.messages || [];
+      // This minimal fallback renders the complete transcript. Follow pages
+      // explicitly so long conversations are not silently truncated.
+      let cursor = data.nextCursor;
+      while (cursor) {
+        const older = await fetch(API + "/agents/" + encodeURIComponent(agentSel.value) +
+          "/threads/" + encodeURIComponent(t.thread_id) + "/messages?cursor=" + encodeURIComponent(cursor));
+        if (!older.ok) throw new Error("HTTP " + older.status);
+        const page = await older.json();
+        history = [...(page.messages || []), ...history];
+        cursor = page.nextCursor;
+      }
       renderHistory(history);
       renderThreads();
     } catch (err) {
@@ -364,6 +484,10 @@
   // ── Run + SSE pump ────────────────────────────────────────
 
   async function run(body) {
+    body.forwardedProps = { ...body.forwardedProps, skills: {
+      enable: Object.keys(skillChoices).filter(name => skillChoices[name]),
+      disable: Object.keys(skillChoices).filter(name => !skillChoices[name]),
+    } };
     setRunning(true);
 
     const status = el("div", "status");

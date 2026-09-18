@@ -1,5 +1,7 @@
 package workflow
 
+import "github.com/google/uuid"
+
 // Input is the run-level object a workflow invocation receives
 // and accumulates into. RunContext is an opaque map the walker
 // deep-merges node updates into; Status tracks per-node lifecycle
@@ -24,6 +26,10 @@ type Input struct {
 	// Pause.NodeID and is awaiting an external decision.
 	Pause *PauseState `json:"pause,omitempty"`
 
+	// Suspended retains every paused node in a parallel wave, including private
+	// continuation data. Hosts may resolve one node at a time via SetResume.
+	Suspended map[string]*PauseState `json:"suspended,omitempty"`
+
 	// Ports records the output port each completed node emitted,
 	// keyed by node id. The walker uses it on resume to follow a
 	// completed node's outgoing edges without re-executing it.
@@ -47,6 +53,7 @@ type NodeStatus string
 
 const (
 	NodeStatusRunning   NodeStatus = "running"
+	NodeStatusCancelled NodeStatus = "cancelled"
 	NodeStatusCompleted NodeStatus = "completed"
 	NodeStatusFailed    NodeStatus = "failed"
 	NodeStatusSkipped   NodeStatus = "skipped"
@@ -124,6 +131,9 @@ func deepMerge(dst, src map[string]any) {
 func ensureInit(in *Input) *Input {
 	if in == nil {
 		in = &Input{}
+	}
+	if in.RunID == "" {
+		in.RunID = uuid.NewString()
 	}
 	if in.RunContext == nil {
 		in.RunContext = map[string]any{}

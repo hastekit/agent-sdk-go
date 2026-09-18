@@ -98,6 +98,12 @@ func (t *DeleteUserTool) Execute(ctx context.Context, params *agents.ToolCall) (
 }
 
 func main() {
+	fileHistory, err := hastekit.OpenFileHistory("./conversations")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer fileHistory.Close()
+
 	ctx := context.Background()
 
 	client := hastekit.NewLLMClient([]hastekit.ProviderConfig{
@@ -112,7 +118,7 @@ func main() {
 		},
 	})
 
-	agent := hastekit.NewAgent(&hastekit.AgentConfig{
+	agent := hastekit.MustNewAgent(&hastekit.AgentConfig{
 		Name:        "User Manager",
 		Instruction: hastekit.NewPrompt("You help manage user accounts."),
 		LLM:         client.Model("OpenAI/gpt-4o-mini"),
@@ -120,7 +126,7 @@ func main() {
 			NewGetUserTool(),
 			NewDeleteUserTool(),
 		},
-		History: hastekit.NewFileHistory("./conversations"),
+		History: fileHistory,
 	})
 
 	threadID := uuid.New().String()

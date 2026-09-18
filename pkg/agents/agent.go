@@ -18,10 +18,8 @@ import (
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm"
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/constants"
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
-	"github.com/hastekit/agent-sdk-go/pkg/genai"
 	"github.com/hastekit/agent-sdk-go/pkg/utils"
 	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -30,24 +28,36 @@ var (
 )
 
 type Agent struct {
-	Name           string
-	output         map[string]any
-	history        *history.CommonConversationManager
-	instruction    SystemPromptProvider
-	tools          []Tool
-	mcpServers     []MCPToolset
-	llm            LLM
-	parameters     responses.Parameters
-	runtime        Runtime
-	maxLoops       int
-	streamBroker   StreamBroker
-	handoffs       []*Handoff
-	toolExecutor   ToolExecutor
-	durableStep    DurableStep
-	stickyHandoff  bool
-	singleTurn     bool
-	modelCallHooks []ModelCallHook
-	skills         SkillProvider
+	Name                 string
+	output               map[string]any
+	history              *history.CommonConversationManager
+	instruction          SystemPromptProvider
+	tools                []Tool
+	mcpServers           []MCPToolset
+	llm                  LLM
+	parameters           responses.Parameters
+	runtime              Runtime
+	maxLoops             int
+	streamBroker         StreamBroker
+	handoffs             []*Handoff
+	toolExecutor         ToolExecutor
+	durableStep          DurableStep
+	stickyHandoff        bool
+	singleTurn           bool
+	modelCallMiddlewares []ModelCallMiddleware
+	skillSets            []SkillSet
+
+	// background waits on the tasks this agent's tools start, and is nil where
+	// nothing can wait — see BackgroundRunner and ErrBackgroundUnsupported.
+	background BackgroundRunner
+
+	// options is what this agent was built from, kept so that a change made
+	// after construction reaches whoever else holds them.
+	//
+	// A durable runtime does: it registers the options and rebuilds the agent
+	// from them inside the workflow, so an edge added to the agent alone would
+	// exist in this process and nowhere else. See AddHandoffs.
+	options *AgentOptions
 }
 
 type AgentOptions struct {
@@ -61,11 +71,8 @@ type AgentOptions struct {
 	Tools    []Tool
 	Handoffs []*Handoff
 
-	// Skills are folders of instructions the agent reads only when it needs
-	// them — see SkillProvider and NewSkillRegistryFromDir. The agent lists
-	// them in its prompt and adds the provider's reader tool to Tools itself,
-	// so the two halves cannot be wired up inconsistently.
-	Skills        SkillProvider
+	// Skills are listed once per run; enabled skills share the read_skill tool.
+	Skills        []SkillSet
 	McpServers    []MCPToolset
 	Runtime       Runtime
 	MaxLoops      *int
@@ -74,22 +81,18 @@ type AgentOptions struct {
 	DurableStep   DurableStep
 	StickyHandoff bool
 
-	// Hooks observe or intercept what the agent does — see Hook. Each wraps
-	// both sides, with NoopToolCallHook or NoopModelCallHook standing in for
-	// the side it does not care about:
-	//
-	//   - the tool-call side wraps every tool the agent calls: its own function
-	//     tools, its sub-agent tools, and every MCP server's. Handoffs do not
-	//     pass through it, since transfer_to_agent calls out to nothing and the
-	//     target agent's own hooks govern what it then does.
-	//   - the model-call side wraps every call to the model, one per turn of
-	//     the tool loop. A budget check belongs here.
-	//
-	// Tool hooks are handed to the ToolExecutor, which runs them (see
-	// HookAwareToolExecutor); model hooks run in the loop, where the model is
-	// called. Under Temporal and Restate both of those sit inside the workflow,
-	// so a hook's methods become journaled steps either way.
-	Hooks []Hook
+	// Middlewares wrap tool/model calls, history LoadMessages/SaveMessages,
+	// and prompt GetPrompt. Embed NoopMiddleware to override selected methods.
+	// The first registered is outermost. Each chain executes inside the same
+	// activity or run step as its underlying operation, never around a durable
+	// proxy. Middleware may run again if that execution step retries.
+	Middlewares []Middleware
+
+	// BackgroundRunner waits on the tasks this agent's tools start. A durable
+	// runtime supplies its own, since a goroutine there would end with the
+	// activity or step that opened it. Left nil, a local agent gets an
+	// in-process one and a durable agent gets none — see BackgroundRunner.
+	BackgroundRunner BackgroundRunner
 
 	// SingleTurn ends the run as soon as the model has responded, before any
 	// tool is executed. The returned AgentOutput carries exactly what the model
@@ -150,34 +153,61 @@ func NewAgent(opts *AgentOptions) *Agent {
 
 	// Hand the executor the tool-call side, since running those around each
 	// call is its job. Only when the agent was given some: an executor built
-	// with hooks of its own keeps them rather than having them cleared.
-	if aware, ok := toolExecutor.(HookAwareToolExecutor); ok && len(opts.Hooks) > 0 {
-		toolExecutor = aware.WithToolCallHooks(ToolCallHooksOf(opts.Hooks))
+	// with middlewares of its own keeps them rather than having them cleared.
+	if aware, ok := toolExecutor.(MiddlewareAwareToolExecutor); ok && len(opts.Middlewares) > 0 {
+		toolExecutor = aware.WithToolCallMiddlewares(ToolCallMiddlewaresOf(opts.Middlewares))
 	}
 
-	return &Agent{
-		Name:        opts.Name,
-		output:      opts.Output,
-		history:     opts.History,
-		instruction: opts.Instruction,
-		// The skill source brings its own reader tool, so an agent given
-		// skills can always read them — there is no second thing to remember
-		// to pass, and no way to advertise a skill the model cannot open.
-		tools:          WithSkillTool(opts.Tools, opts.Skills),
-		skills:         opts.Skills,
-		mcpServers:     opts.McpServers,
-		llm:            &WrappedLLM{opts.LLM},
-		parameters:     opts.Parameters,
-		runtime:        opts.Runtime,
-		maxLoops:       maxLoops,
-		handoffs:       opts.Handoffs,
-		toolExecutor:   toolExecutor,
-		streamBroker:   streamBroker,
-		durableStep:    durableStep,
-		stickyHandoff:  opts.StickyHandoff,
-		singleTurn:     opts.SingleTurn,
-		modelCallHooks: ModelCallHooksOf(opts.Hooks),
+	modelMiddlewares := ModelCallMiddlewaresOf(opts.Middlewares)
+	if opts.DurableStep == nil {
+		// Durable adapters install stop middleware inside the provider step.
+		modelMiddlewares = append([]ModelCallMiddleware{StopMiddleware{Watcher: StopWatcherFrom(streamBroker)}}, modelMiddlewares...)
 	}
+
+	conversationHistory := opts.History
+	instruction := opts.Instruction
+	if opts.DurableStep == nil && len(opts.Middlewares) > 0 {
+		// Copy the manager so agents sharing persistence keep their own chains.
+		copy := *conversationHistory
+		copy.ConversationPersistenceAdapter = WrapHistoryPersistence(copy.ConversationPersistenceAdapter, HistoryMiddlewaresOf(opts.Middlewares)...)
+		conversationHistory = &copy
+		instruction = WrapPromptProvider(instruction, PromptMiddlewaresOf(opts.Middlewares)...)
+	}
+
+	agent := &Agent{
+		Name:                 opts.Name,
+		output:               opts.Output,
+		history:              conversationHistory,
+		instruction:          instruction,
+		tools:                slices.Clone(opts.Tools),
+		skillSets:            slices.Clone(opts.Skills),
+		mcpServers:           opts.McpServers,
+		llm:                  &WrappedLLM{opts.LLM},
+		parameters:           opts.Parameters,
+		runtime:              opts.Runtime,
+		maxLoops:             maxLoops,
+		handoffs:             opts.Handoffs,
+		toolExecutor:         toolExecutor,
+		streamBroker:         streamBroker,
+		durableStep:          durableStep,
+		stickyHandoff:        opts.StickyHandoff,
+		singleTurn:           opts.SingleTurn,
+		modelCallMiddlewares: modelMiddlewares,
+		options:              opts,
+	}
+
+	// A runtime that can keep a wait alive past the call that started it says
+	// so by supplying a BackgroundRunner. Otherwise only a process that owns
+	// the whole run can hold one, in a goroutine. An agent left with neither
+	// fails a tool that tries, rather than losing the task quietly.
+	switch {
+	case opts.BackgroundRunner != nil:
+		agent.background = opts.BackgroundRunner
+	case opts.DurableStep == nil && opts.Runtime == nil:
+		agent.background = newBackgroundSupervisor(agent)
+	}
+
+	return agent
 }
 
 // WithLLM returns a copy of the agent bound to a different LLM. It copies the
@@ -187,6 +217,14 @@ func NewAgent(opts *AgentOptions) *Agent {
 func (e *Agent) WithLLM(wrappedLLM LLM) *Agent {
 	clone := *e
 	clone.llm = wrappedLLM
+
+	// The one field a wholesale copy gets wrong: the in-process supervisor
+	// points back at the agent it delivers through, and left alone that stays
+	// the agent this was copied from — which would answer a finished task with
+	// the wrong model.
+	if _, ok := clone.background.(*backgroundSupervisor); ok {
+		clone.background = newBackgroundSupervisor(&clone)
+	}
 	return &clone
 }
 
@@ -227,6 +265,15 @@ func (e *Agent) PrepareMCPTools(ctx context.Context, runContext map[string]any) 
 // AddHandoffs appends handoff edges to the agent after construction.
 func (e *Agent) AddHandoffs(handoffs ...*Handoff) {
 	e.handoffs = append(e.handoffs, handoffs...)
+
+	// And on the options this agent was built from, because they are not only
+	// this agent's. A durable runtime registers them and rebuilds the agent
+	// from them inside the workflow — so an edge added here and nowhere else
+	// works in this process and is missing from every durable run, with
+	// nothing to say why.
+	if e.options != nil {
+		e.options.Handoffs = append(e.options.Handoffs, handoffs...)
+	}
 }
 
 func (e *Agent) PrepareHandoffTools(ctx context.Context) []Tool {
@@ -279,18 +326,40 @@ func (e *Agent) Stop(ctx context.Context, streamID string) error {
 // StreamBroker returns the broker the agent streams through, for callers
 // that need the run's channel directly — rejoining a stream in flight, or
 // folding a turn into a live run (see RunClaimBroker).
+// StickyHandoff reports whether a new turn resumes in the specialist a prior
+// turn ended in, rather than re-entering this agent.
+//
+// Exported for the same reason StreamBroker and History are: a durable runtime
+// rebuilds the agent on the far side of a boundary, and something has to be
+// able to check that what it rebuilt is what was configured.
+func (e *Agent) StickyHandoff() bool {
+	return e.stickyHandoff
+}
+
+// SingleTurn reports whether the run ends as soon as the model has responded,
+// before any tool is executed.
+func (e *Agent) SingleTurn() bool {
+	return e.singleTurn
+}
+
 func (e *Agent) StreamBroker() StreamBroker {
 	return e.streamBroker
 }
 
 // ToolExecutor returns the executor the agent runs tool calls through — the
-// one it was configured with, after the broker and the agent's tool call hooks
+// one it was configured with, after the broker and the agent's tool call middlewares
 // were injected into it.
 func (e *Agent) ToolExecutor() ToolExecutor {
 	return e.toolExecutor
 }
 
 type AgentInput struct {
+	// GroupID groups new conversations within a namespace (for example a routine or project). Empty selects "default".
+	GroupID string `json:"group_id,omitempty"`
+	// Skills selects opt-in skills by name for this execution, including resumes.
+	Skills SkillSelection `json:"skills,omitempty"`
+	// RunID optionally identifies this execution. History generates one when omitted.
+	RunID         string          `json:"run_id,omitempty"`
 	Namespace     string          `json:"namespace"`
 	ThreadID      string          `json:"thread_id"`
 	PreviousRunID string          `json:"previous_run_id"`
@@ -302,8 +371,22 @@ type AgentInput struct {
 	// and to poll IsStopped. Execute generates one if empty.
 	StreamID string `json:"stream_id,omitempty"`
 
-	// This is the conversation ID shared by the parent agent and the sub-agent.
+	// SessionID is the conversation ID shared by parent agents, sub-agents and
+	// forked threads. When provided, it also seeds new conversation history.
 	SessionID string `json:"shared_session_id"`
+
+	// owner is the agent the run entered at, set by ExecuteLocal.
+	//
+	// A handoff runs a specialist inside the run it was handed, on the same
+	// input — so the agent executing the loop is not necessarily the one the
+	// thread belongs to. Anything that outlives the run has to be settled
+	// against the owner: its history is the conversation, its broker is the
+	// stream, and it is where a later run has to enter for sticky handoff to
+	// route back to the specialist.
+	//
+	// Unexported, and never serialized: a handoff is always in-process, even
+	// inside a workflow, so this never has to survive a boundary.
+	owner *Agent
 }
 
 // AgentOutput represents the result of agent execution
@@ -312,75 +395,6 @@ type AgentOutput struct {
 	Status     agentstate.RunStatus          `json:"status"`
 	Output     []responses.InputMessageUnion `json:"output"`
 	Interrupts []responses.Interrupt         `json:"interrupts,omitempty"`
-}
-
-// Execute is the single public entry point for running the agent. It
-// generates a StreamID (if not supplied), subscribes to the configured
-// stream broker for that channel, and launches the run in a background
-// goroutine. The returned handle exposes a chunk channel, a Stop
-// function for clean cancellation, and a Wait function for the final
-// AgentOutput. The agent itself publishes all chunks (run lifecycle,
-// LLM streaming, tool results) through the broker — there is no
-// callback API.
-func (e *Agent) Execute(ctx context.Context, in *AgentInput) (*AgentHandle, error) {
-	if e.streamBroker == nil {
-		return nil, fmt.Errorf("Execute requires a stream broker on the agent")
-	}
-
-	if in.StreamID == "" {
-		in.StreamID = uuid.NewString()
-	}
-
-	chunks, err := e.streamBroker.Subscribe(ctx, in.StreamID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to subscribe to stream: %w", err)
-	}
-
-	handle := &AgentHandle{
-		StreamID: in.StreamID,
-		Chunks:   chunks,
-		broker:   e.streamBroker,
-		done:     make(chan struct{}),
-	}
-
-	if in.ThreadID == "" {
-		in.ThreadID = uuid.NewString()
-	}
-
-	if in.Message.ID == "" {
-		in.Message.ID = uuid.NewString()
-	}
-
-	go func() {
-		defer close(handle.done)
-
-		// GenAI invoke_agent span for the whole run. Callers that don't want
-		// this span invoke ExecuteWithoutTrace directly instead.
-		runCtx, span := tracer.Start(context.WithoutCancel(ctx), genai.OpInvokeAgent+" "+e.Name)
-		defer span.End()
-		span.SetAttributes(
-			attribute.String(genai.AttrOperationName, genai.OpInvokeAgent),
-			attribute.String(genai.AttrAgentName, e.Name),
-			attribute.String(genai.AttrConversationID, in.ThreadID),
-			attribute.String(genai.AttrSessionID, in.ThreadID),
-		)
-
-		if s, ok := genai.InputMessages(in.Message.Messages); ok {
-			span.SetAttributes(attribute.String(genai.AttrInputMessages, s))
-		}
-
-		// Stream lifecycle (Subscribe/Close) is owned by ExecuteLocal,
-		// which is the loop runner. We just observe it here.
-		handle.result, handle.err = e.ExecuteWithoutTrace(runCtx, in)
-
-		if handle.result != nil {
-			if s, ok := genai.OutputMessages(handle.result.Output); ok {
-				span.SetAttributes(attribute.String(genai.AttrOutputMessages, s))
-			}
-		}
-	}()
-
-	return handle, nil
 }
 
 // ExecuteWithoutTrace dispatches to the configured runtime, falling back
@@ -402,11 +416,18 @@ func (e *Agent) ExecuteWithoutTrace(ctx context.Context, in *AgentInput) (*Agent
 // channel on return so subscribers terminate cleanly. Callers (Agent.Execute,
 // the gateway's runtime workflows, etc.) don't need to call Close themselves.
 func (e *Agent) ExecuteLocal(ctx context.Context, in *AgentInput) (*AgentOutput, error) {
+	// Whoever the run enters at owns it. Set before the sticky-handoff routing
+	// below, so a run that resumes straight into a specialist still records the
+	// agent it entered at rather than the one it ended up in.
+	if in.owner == nil {
+		in.owner = e
+	}
+
 	if e.streamBroker != nil && in.StreamID != "" {
 		defer e.streamBroker.Close(context.Background(), in.StreamID)
 	}
 
-	run, err := history.NewRun(ctx, e.history, in.Namespace, in.ThreadID, in.PreviousRunID, history.WithRunContext(in.RunContext))
+	run, err := history.NewRun(ctx, e.history, in.Namespace, in.ThreadID, in.PreviousRunID, history.WithGroupID(in.GroupID), history.WithRunContext(in.RunContext), history.WithRunID(in.RunID), history.WithDefaultConversationID(in.SessionID))
 	if err != nil {
 		return &AgentOutput{Status: agentstate.RunStatusError, RunID: ""}, err
 	}
@@ -430,9 +451,28 @@ func (e *Agent) ExecuteLocal(ctx context.Context, in *AgentInput) (*AgentOutput,
 	run.RunState.TraceID = traceid
 
 	// Emit run.created once (durable step: not resent on replay).
+	//
+	// The turn that opened the run goes out with it, and after it: a client
+	// following the stream has to see the run begin before it can place
+	// anything inside it.
 	e.durableStep.Do(func() {
 		e.runCreated(ctx, in.StreamID, runId, traceid)
+		publishInputMessages(e.publisher(in.StreamID), in.Message)
+		e.publishRunEvent(ctx, RunEventStarted, in, runId, run.GetGroupID())
 	})
+
+	// And its end, however it ends. In the defer rather than beside
+	// run.completed, so a run that fails still tells a watcher it is over —
+	// otherwise a browser badges the conversation as busy and never unbadges.
+	//
+	// Through the durable step like its opposite number: a workflow replays
+	// this function from the top, and an unguarded publish here would announce
+	// the same run finishing once per replay.
+	defer func() {
+		e.durableStep.Do(func() {
+			e.publishRunEvent(context.WithoutCancel(ctx), RunEventFinished, in, runId, run.GetGroupID())
+		})
+	}()
 
 	// Sticky handoff: if a prior turn on this thread ended inside a
 	// specialist reached via handoff, resume there instead of
@@ -457,7 +497,11 @@ func (e *Agent) ExecuteWithRun(ctx context.Context, in *AgentInput, run *history
 	}
 
 	handoffTools := e.PrepareHandoffTools(ctx)
-	tools := append(e.tools, handoffTools...)
+	tools := append(slices.Clone(e.tools), handoffTools...)
+	tools, skills, skillHint, err := e.prepareSkills(ctx, in, tools)
+	if err != nil {
+		return &AgentOutput{Status: agentstate.RunStatusError, RunID: run.GetRunID()}, err
+	}
 
 	// Connect to MCP servers, and list the tools. A server that could not be
 	// listed is reported to the model through the prompt's Dependencies below
@@ -522,8 +566,6 @@ func (e *Agent) ExecuteWithRun(ctx context.Context, in *AgentInput, run *history
 				deferredToolInfos = append(deferredToolInfos, info)
 			}
 		}
-
-		skills, skillHint := skillDependencies(e.skills)
 
 		prompt, err := e.instruction.GetPrompt(ctx, &Dependencies{
 			RunContext:    in.RunContext,
@@ -654,6 +696,12 @@ func (e *Agent) ExecuteWithRun(ctx context.Context, in *AgentInput, run *history
 				return &AgentOutput{Status: agentstate.RunStatusError, RunID: runId}, err
 			}
 
+			// Anything that arrived while the run was working has just been
+			// folded in. Reported here rather than where it was queued: it can
+			// sit on the queue through several tool calls, and a client told
+			// earlier would place it before work that in fact came first.
+			publishInputMessages(publish, run.TakeSteeredMessages()...)
+
 			if reminder := budgetReminder(e.maxLoops - run.RunState.LoopIteration); reminder != nil {
 				convMessages = append(convMessages, *reminder)
 			}
@@ -681,11 +729,10 @@ func (e *Agent) ExecuteWithRun(ctx context.Context, in *AgentInput, run *history
 				Parameters: parameters,
 			}
 
-			// The hooks see what the call is and what the run has spent, not
-			// the prompt — see ModelCall. A hook that answers for the model
-			// (an exhausted budget, say) supplies the reply and the provider
-			// is never contacted.
-			resp, err := RunWithModelCallHooks(ctx, e.modelCallHooks, &ModelCall{
+			// A wrap sees the call and the request. One that answers for the
+			// model (an exhausted budget, say) returns the reply without
+			// calling next, and the provider is never contacted.
+			resp, err := ExecuteModelCallWithMiddleware(ctx, e.modelCallMiddlewares, &ModelCall{
 				AgentName:     e.Name,
 				Namespace:     in.Namespace,
 				ThreadID:      in.ThreadID,
@@ -697,15 +744,10 @@ func (e *Agent) ExecuteWithRun(ctx context.Context, in *AgentInput, run *history
 				LoopIteration: run.RunState.LoopIteration,
 				ContextTokens: run.ContextTokens(),
 				Usage:         run.RunState.Usage,
-			}, func(callCtx context.Context) (*responses.Response, error) {
-				// A stop lands mid-stream on the local runtime, where the
-				// provider's request is this process's to cancel. The durable
-				// runtimes cancel inside their own activity or step instead —
-				// from here they hold a proxy, and cancelling that would end
-				// the waiting rather than the work.
-				streamCtx, cancel := StopCancelContext(callCtx, StopWatcherFrom(e.streamBroker), in.StreamID)
-				defer cancel()
-				return e.llm.NewStreamingResponses(streamCtx, request, publish)
+				// A snapshot: a wrap reads the run's state and never writes it.
+				State: maps.Clone(run.State),
+			}, request, func(callCtx context.Context, call *ModelCall, prepared *responses.Request) (*responses.Response, error) {
+				return e.llm.NewStreamingResponses(callCtx, call, prepared, publish)
 			})
 			if errors.Is(err, ErrModelCallStopped) {
 				// Not a failure: the user stopped the run while the model was
@@ -884,7 +926,7 @@ func (e *Agent) ExecuteWithRun(ctx context.Context, in *AgentInput, run *history
 							ThreadID:            in.ThreadID,
 							StreamID:            in.StreamID,
 							RunContext:          in.RunContext,
-							State:               run.State,
+							State:               maps.Clone(run.State),
 							ShouldResume:        resuming,
 							ResumeMessages:      resumeMessages,
 							Progress:            e.progressReporter(in.StreamID, toolCall.CallID, toolCall.Name),
@@ -906,6 +948,15 @@ func (e *Agent) ExecuteWithRun(ctx context.Context, in *AgentInput, run *history
 					case result.Err == nil && result.Response != nil:
 						toolResults[pe.Index] = result.Response
 
+						// A task id means the tool answered now and is still
+						// working. The run carries on; the outcome arrives
+						// later as its own turn.
+						if result.Response.TaskID != "" {
+							if err := e.startBackgroundTask(ctx, in, runId, pe, result.Response, run.RunState); err != nil {
+								return &AgentOutput{Status: agentstate.RunStatusError, RunID: runId}, err
+							}
+						}
+
 						// If the tool response has interrupts process it
 						if len(result.Response.Interrupts) > 0 {
 							run.ProcessInterrupts(*pe.ToolCall.FunctionCallMessage, result.Response.Interrupts)
@@ -923,12 +974,12 @@ func (e *Agent) ExecuteWithRun(ctx context.Context, in *AgentInput, run *history
 						toolResults[pe.Index] = toolResponse(*pe.ToolCall.FunctionCallMessage, toolCancelledDuringExec)
 
 					case IsToolCallAborted(result.Err):
-						// A hook gave up on the run rather than refusing the
+						// A middleware gave up on the run rather than refusing the
 						// call. Reporting this to the model would be the
 						// opposite of what it asked for: the run ends here,
 						// leaving the function_call unanswered the same way a
 						// cancelled context does.
-						slog.ErrorContext(ctx, "tool call aborted by hook", slog.String("tool_name", pe.ToolCall.Name), slog.Any("error", result.Err))
+						slog.ErrorContext(ctx, "tool call aborted by middleware", slog.String("tool_name", pe.ToolCall.Name), slog.Any("error", result.Err))
 						return &AgentOutput{Status: agentstate.RunStatusError, RunID: runId}, result.Err
 
 					case result.Err != nil:
@@ -1122,73 +1173,6 @@ func (e *Agent) runCompleted(ctx context.Context, streamID, runId string, runSta
 			},
 		},
 	})
-}
-
-// AgentHandle is returned by Execute. The caller has two valid usage
-// patterns: drain Chunks yourself (and optionally call Wait for the
-// aggregated AgentOutput), or call Result to drain + aggregate in one
-// step. Mixing the two — calling Wait without draining Chunks — risks
-// deadlock because the broker's Publish back-pressures when no
-// subscriber is reading.
-type AgentHandle struct {
-	StreamID string
-	Chunks   <-chan *responses.ResponseChunk
-
-	broker StreamBroker
-	done   chan struct{}
-	result *AgentOutput
-	err    error
-}
-
-// Stop signals the agent to stop and transition to completed state.
-//
-// A tool call already running has its context cancelled, and is abandoned
-// after a grace period if it ignores that — it keeps running in the
-// background, unobserved. Each cancelled call gets a synthetic result so
-// history keeps its call/result pairing. An in-flight LLM call always
-// finishes streaming, so a stop during one lands at the next boundary.
-//
-// Reaching a running tool needs a broker implementing StopWatcher (the
-// memory and Redis brokers do); the tool wrapper watches that flag
-// wherever the tool runs. With a plain broker the stop still lands, at
-// the loop's next iteration boundary.
-//
-// Use Wait or Result to block until the run finishes.
-func (h *AgentHandle) Stop(ctx context.Context) error {
-	return h.broker.Stop(ctx, h.StreamID)
-}
-
-// EnqueueMessage pushes msg onto the run's broker queue. The agent
-// drains the queue at iteration boundaries (alongside the IsStopped
-// check) and folds queued messages into the current run via
-// ProcessIncomingMessages — approval responses become approve/reject
-// queues; other input messages slot into the next LLM call.
-//
-// Use this to deliver follow-ups (user messages, approval/rejection
-// decisions) to a run that's still in flight. For runs that have
-// already paused and exited, the next agent.Execute on the same
-// thread is the right entry instead.
-func (h *AgentHandle) EnqueueMessage(ctx context.Context, msg history.Message) error {
-	return h.broker.EnqueueMessage(ctx, h.StreamID, msg)
-}
-
-// Wait blocks until the run finishes and returns the aggregated output.
-// It is the lower-level counterpart to Result and is safe to call only
-// after the chunk channel has been drained — calling Wait while the
-// broker still has buffered chunks pending will deadlock.
-func (h *AgentHandle) Wait() (*AgentOutput, error) {
-	<-h.done
-	return h.result, h.err
-}
-
-// Result drains the chunk channel (discarding chunks) and then returns
-// the aggregated AgentOutput. Use this when you only care about the
-// final output and don't need to observe streaming chunks. To consume
-// chunks yourself, range over Chunks and then call Wait instead.
-func (h *AgentHandle) Result() (*AgentOutput, error) {
-	for range h.Chunks {
-	}
-	return h.Wait()
 }
 
 func toolResponse(toolCall responses.FunctionCallMessage, textOutput string) *ToolCallResponse {

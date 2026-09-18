@@ -226,6 +226,36 @@ func (m *ChunkTypeToolProgress) UnmarshalJSON(buf []byte) error {
 	return unmarshalConstantString(m, buf)
 }
 
+type ChunkTypeBackgroundTaskStarted string
+
+func (m *ChunkTypeBackgroundTaskStarted) Value() string { return "background_task.started" }
+func (m ChunkTypeBackgroundTaskStarted) MarshalJSON() ([]byte, error) {
+	return sonic.Marshal(m.Value())
+}
+func (m *ChunkTypeBackgroundTaskStarted) UnmarshalJSON(buf []byte) error {
+	return unmarshalConstantString(m, buf)
+}
+
+type ChunkTypeBackgroundTaskCompleted string
+
+func (m *ChunkTypeBackgroundTaskCompleted) Value() string { return "background_task.completed" }
+func (m ChunkTypeBackgroundTaskCompleted) MarshalJSON() ([]byte, error) {
+	return sonic.Marshal(m.Value())
+}
+func (m *ChunkTypeBackgroundTaskCompleted) UnmarshalJSON(buf []byte) error {
+	return unmarshalConstantString(m, buf)
+}
+
+type ChunkTypeInputMessage string
+
+func (m *ChunkTypeInputMessage) Value() string { return "input_message" }
+func (m ChunkTypeInputMessage) MarshalJSON() ([]byte, error) {
+	return sonic.Marshal(m.Value())
+}
+func (m *ChunkTypeInputMessage) UnmarshalJSON(buf []byte) error {
+	return unmarshalConstantString(m, buf)
+}
+
 type ChunkTypeResponseCreated string
 
 func (m *ChunkTypeResponseCreated) Value() string               { return "response.created" }

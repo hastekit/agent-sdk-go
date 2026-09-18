@@ -29,6 +29,9 @@
 //
 //	GET  /                            → embedded CopilotKit chat UI
 //	GET  /basic.html                  → offline (no-CDN) fallback UI
+//	GET  /api/agui/a2a/ → A2A agent directory
+//	GET  /api/agui/a2a/{agent}/.well-known/agent-card.json → A2A discovery card
+//	POST /api/agui/a2a/{agent} → A2A 1.0 JSON-RPC (including SSE)
 //	GET  /api/agui/agents             → registered agent names
 //	POST /api/agui/agents/{name}/run  → AG-UI run endpoint (SSE)
 //	POST /api/agui/agents/{name}/stop → stop a run in flight
@@ -39,19 +42,20 @@
 // A thread streams on the same channel every turn, so the stream endpoint
 // finds a run without the client having kept anything: it replays the run
 // so far and then follows it live, which is how a client that reloaded or
-// navigated away picks one back up.
+// navigated away picks one back up. Last-Event-ID resumes strictly after a
+// previously received event; omitting it replays the retained run, even after
+// completion. The browser retries interrupted connections with this cursor.
 //
 // A run posted for a thread that is already running folds into it: the
 // server answers 204 and the reply appears on that run's stream. That is
 // how a client steers a run in flight — send the new turn and keep reading
 // the stream it already has.
 //
-// The stop endpoint takes the stream id the run returned (the
-// X-Stream-Id header, or the streamId CUSTOM event) as {"streamId": …}
-// or ?streamId=…, and answers 202 once the stop is recorded. The run ends
-// on its own SSE connection with RUN_FINISHED. It travels via the agent's
-// broker, so with a shared broker it need not reach the replica streaming
-// that run.
+// The stop endpoint requires {"threadId": …} or ?threadId=… and derives the
+// target stream from the resolved namespace. An optional streamId must match
+// that target. It answers 202 once the stop is recorded; the run ends on its
+// own SSE connection with RUN_FINISHED. With a shared broker the request need
+// not reach the replica streaming the run.
 //
 // The /api/agui/* endpoints speak the canonical AG-UI protocol, so
 // external clients (CopilotKit, raw @ag-ui/client) can target them
@@ -77,9 +81,13 @@ const APIPrefix = "/api/agui"
 // Handler serves the embedded AG-UI chat client over every agent in
 // the registry, with the AG-UI protocol endpoints mounted under
 // APIPrefix. *hastekit.SDK satisfies agui.Registry.
+// Use agui.WithSkillStore to enable the skill library.
+// Use agui.WithRoutines(service, scheduler) to enable routine management at
+// /api/agui/routines and the Routines panel. The caller runs the scheduler.
 func Handler(registry agui.Registry, opts ...agui.Option) http.Handler {
 	mux := http.NewServeMux()
-	mux.Handle(APIPrefix+"/", http.StripPrefix(APIPrefix, agui.NewHandler(registry, opts...)))
+	api := agui.NewHandler(registry, opts...)
+	mux.Handle(APIPrefix+"/", http.StripPrefix(APIPrefix, api))
 
 	static, err := fs.Sub(staticFS, "static")
 	if err != nil {
@@ -92,7 +100,10 @@ func Handler(registry agui.Registry, opts ...agui.Option) http.Handler {
 }
 
 // Serve runs the embedded AG-UI chat client on addr, blocking like
-// http.ListenAndServe.
+// http.ListenAndServe. Use agui.WithSkillStore with the same store used by
+// skills.NewSkillSet to enable skill management in the UI.
+// Use agui.WithRoutines(service, scheduler) to enable routines APIs and UI.
+// The application remains responsible for running and stopping the scheduler.
 func Serve(addr string, registry agui.Registry, opts ...agui.Option) error {
 	return http.ListenAndServe(addr, Handler(registry, opts...))
 }

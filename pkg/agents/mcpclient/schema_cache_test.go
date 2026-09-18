@@ -2,12 +2,14 @@ package mcpclient
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/hastekit/agent-sdk-go/pkg/agents/skills"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -15,11 +17,17 @@ import (
 
 // cacheableServer answers tools/list with the directives a 2026-07-28 server
 // sends (SEP-2549), and counts how often it was actually asked.
-func cacheableServer(t *testing.T, ttl time.Duration, scope string) (url string, lists func() int) {
+func cacheableServer(t *testing.T, ttl time.Duration, scope string, versions ...string) (url string, lists func() int) {
 	t.Helper()
 	calls := 0
 
-	server := mcp.NewServer(&mcp.Implementation{Name: "cacheable", Version: "0.1.0"}, nil)
+	server := mcp.NewServer(&mcp.Implementation{Name: "cacheable", Version: "0.1.0"}, &mcp.ServerOptions{
+		SupportedProtocolVersions: versions,
+		SetCacheable: func(_ context.Context, _ mcp.Request, c *mcp.Cacheable) {
+			c.TTLMs = int(ttl / time.Millisecond)
+			c.CacheScope = scope
+		},
+	})
 	mcp.AddTool(server, &mcp.Tool{Name: "echo"},
 		func(context.Context, *mcp.CallToolRequest, struct{}) (*mcp.CallToolResult, any, error) {
 			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "ok"}}}, nil, nil
@@ -31,15 +39,18 @@ func cacheableServer(t *testing.T, ttl time.Duration, scope string) (url string,
 			if !ok {
 				return res, err
 			}
+			if len(versions) > 0 {
+				// Simulate a legacy server that does not emit cache directives.
+				list.CacheScope = ""
+				list.TTLMs = 0
+			}
 			calls++
-			list.TTLMs = int(ttl / time.Millisecond)
-			list.CacheScope = scope
-			return list, err
+			return res, err
 		}
 	})
 
 	hs := httptest.NewServer(mcp.NewStreamableHTTPHandler(
-		func(*http.Request) *mcp.Server { return server }, nil))
+		func(*http.Request) *mcp.Server { return server }, &mcp.StreamableHTTPOptions{Stateless: len(versions) == 0}))
 	t.Cleanup(func() { hs.CloseClientConnections(); hs.Close() })
 
 	return hs.URL, func() int { return calls }
@@ -98,7 +109,7 @@ func TestPrivateListingIsKeyedPerPrincipal(t *testing.T) {
 // A server too old to have been asked said nothing, and silence is not the
 // promise that an explicit "public" is.
 func TestAServerThatSaysNothingIsTreatedAsPrivate(t *testing.T) {
-	url, lists := cacheableServer(t, 0, "") // pre-2026-07-28: no directives at all
+	url, lists := cacheableServer(t, 0, "", "2025-11-25") // legacy: no cache directives
 	cache := newMemCache()
 
 	client := cachingClient(t, url, cache,
@@ -133,9 +144,15 @@ func TestServerTTLIsStoredAndHonoured(t *testing.T) {
 	assert.Equal(t, 1, lists(), "still fresh")
 
 	// Expire it on the entry rather than by sleeping.
-	entry, ok := cache.Get(ctx, key)
+	data, ok, err := cache.Get(ctx, key)
+	require.NoError(t, err)
+	var entry CachedToolEntry
+	require.NoError(t, json.Unmarshal(data, &entry))
 	require.True(t, ok)
 	entry.ExpiresAt = time.Now().Add(-time.Second)
+	data, err = json.Marshal(entry)
+	require.NoError(t, err)
+	require.NoError(t, cache.Set(context.Background(), cache.keys()[0], data, time.Minute))
 
 	_, err = client.ListTools(ctx, nil)
 	require.NoError(t, err)
@@ -235,4 +252,95 @@ func TestCacheKeyFollowsTheConnectorName(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, []string{"mcp:schema:cached"}, cache.keys())
+}
+
+func TestZeroServerTTLUsesLocalOverrideOrBypassesCache(t *testing.T) {
+	for _, scope := range []string{cacheScopePublic, cacheScopePrivate} {
+		for _, ttl := range []time.Duration{0, time.Minute} {
+			t.Run(scope+"/"+ttl.String(), func(t *testing.T) {
+				url, lists := cacheableServer(t, 0, scope)
+				cache := newMemCache()
+				client := cachingClient(t, url, cache, WithCacheTTL(ttl))
+				for range 2 {
+					tools, err := client.ListTools(context.Background(), nil)
+					require.NoError(t, err)
+					require.Len(t, tools, 1)
+				}
+				if ttl > 0 {
+					assert.Equal(t, 1, lists(), "configured local TTL overrides zero server TTL")
+					require.Len(t, cache.keys(), 1)
+					assert.Equal(t, ttl, cache.ttl(cache.keys()[0]))
+					data, ok, err := cache.Get(context.Background(), cache.keys()[0])
+					require.NoError(t, err)
+					var entry CachedToolEntry
+					require.NoError(t, json.Unmarshal(data, &entry))
+					require.True(t, ok)
+					require.False(t, entry.ExpiresAt.IsZero())
+					entry.ExpiresAt = time.Now().Add(-time.Second)
+					data, err = json.Marshal(entry)
+					require.NoError(t, err)
+					require.NoError(t, cache.Set(context.Background(), cache.keys()[0], data, time.Minute))
+					_, err = client.ListTools(context.Background(), nil)
+					require.NoError(t, err)
+					assert.Equal(t, 2, lists(), "local TTL override must still expire")
+				} else {
+					assert.Equal(t, 2, lists(), "zero server TTL without an override must refetch")
+					assert.Empty(t, cache.keys(), "zero server TTL must never become an unbounded entry")
+				}
+			})
+		}
+	}
+}
+
+func TestLegacyServerRetainsCacheTTLFallback(t *testing.T) {
+	for _, ttl := range []time.Duration{0, time.Minute} {
+		t.Run(ttl.String(), func(t *testing.T) {
+			url, lists := cacheableServer(t, 0, "", "2025-11-25")
+			cache := newMemCache()
+			client := cachingClient(t, url, cache, WithCacheTTL(ttl))
+			for range 2 {
+				_, err := client.ListTools(context.Background(), nil)
+				require.NoError(t, err)
+			}
+			if ttl > 0 {
+				assert.Equal(t, 1, lists())
+				require.Len(t, cache.keys(), 1)
+				assert.Equal(t, ttl, cache.ttl(cache.keys()[0]))
+			} else {
+				assert.Equal(t, 2, lists())
+				assert.Empty(t, cache.keys())
+			}
+		})
+	}
+}
+
+func TestSchemaCacheSharesKVWithSkills(t *testing.T) {
+	ctx := context.Background()
+	shared := newMemCache()
+	store, err := skills.NewFileStore(t.TempDir(), skills.WithCache(shared))
+	require.NoError(t, err)
+	_, err = store.List(ctx, "tenant", skills.ListOptions{})
+	require.NoError(t, err)
+	skillKeys := shared.keys()
+	require.NotEmpty(t, skillKeys)
+	url, lists := cacheableServer(t, time.Minute, cacheScopePublic)
+	client := cachingClient(t, url, shared)
+	for range 2 {
+		_, err = client.ListTools(ctx, nil)
+		require.NoError(t, err)
+	}
+	require.Equal(t, 1, lists())
+	require.NoError(t, client.InvalidateToolCache(ctx, nil))
+	require.Equal(t, skillKeys, shared.keys())
+	// Malformed data is treated as a miss and replaced with a serialized entry.
+	require.NoError(t, shared.Set(ctx, "mcp:schema:cached", []byte("broken JSON"), time.Minute))
+	_, err = client.ListTools(ctx, nil)
+	require.NoError(t, err)
+	require.Equal(t, 2, lists())
+	data, found, err := shared.Get(ctx, "mcp:schema:cached")
+	require.NoError(t, err)
+	require.True(t, found)
+	var entry CachedToolEntry
+	require.NoError(t, json.Unmarshal(data, &entry))
+	require.Len(t, entry.Tools, 1)
 }

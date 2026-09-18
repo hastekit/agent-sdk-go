@@ -12,6 +12,19 @@ type Message struct {
 	ID       string                        `json:"id" db:"id"`
 	SenderID string                        `json:"sender_id" db:"sender_id"`
 	Messages []responses.InputMessageUnion `json:"messages" db:"messages"`
+
+	// BackgroundTaskID names the task whose result this bundle carries.
+	//
+	// It is what lets a run reconcile the tasks it is still waiting on. The
+	// result arrives as an ordinary user turn — the call that started the task
+	// was answered when the tool returned, and a provider will not take a
+	// second output against it — so a run has no other way to know that the
+	// turn it just picked up is a task landing rather than someone speaking.
+	//
+	// Nothing announces the arrival from here: that is published by the
+	// delivery, which knows the call and the tool as well. This is only the
+	// bookkeeping.
+	BackgroundTaskID string `json:"background_task_id,omitempty" db:"background_task_id"`
 }
 
 // New builds a bundle under a fresh uuid.

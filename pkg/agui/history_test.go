@@ -262,11 +262,12 @@ func TestHistoryToMessagesReasoningEmptySkipped(t *testing.T) {
 }
 
 func TestHistoryToMessagesImageGeneration(t *testing.T) {
+	ref := "attachment://0123456789abcdef0123456789abcdef"
 	rows := []history.ConversationMessage{{
 		Messages: []history.Message{
 			messages.New("agent", []responses.InputMessageUnion{
 				{OfImageGenerationCall: &responses.ImageGenerationCallMessage{
-					ID: "ig_1", OutputFormat: "png", Result: "BBBB",
+					ID: "ig_1", OutputFormat: "png", Result: ref,
 				}},
 			}),
 		},
@@ -275,5 +276,62 @@ func TestHistoryToMessagesImageGeneration(t *testing.T) {
 	out := HistoryToMessages(rows)
 	require.Len(t, out, 1)
 	assert.Equal(t, RoleAssistant, out[0].Role)
-	assert.Equal(t, "![generated image](data:image/png;base64,BBBB)", out[0].Content)
+	assert.Equal(t, "![generated image](/api/agui/attachments/0123456789abcdef0123456789abcdef)", out[0].Content)
+	assert.NotContains(t, out[0].Content, "attachment://", "clients receive the authorized HTTP route")
+}
+
+// A task's result is delivered as a user turn — the only shape a provider
+// takes it in, since the call that started the task was answered when the tool
+// returned. Rehydrating it verbatim showed the user a message they never
+// wrote, describing a task in the agent's own words.
+func TestHistoryToMessagesSkipsBackgroundTaskResults(t *testing.T) {
+	result := messages.New("", []responses.InputMessageUnion{
+		responses.UserMessage("[Background task task-1, started by the render tool, has finished.]"),
+	})
+	result.BackgroundTaskID = "task-1"
+
+	rows := []history.ConversationMessage{{
+		RunID:    "turn-1",
+		ThreadID: "thread-1",
+		Messages: []history.Message{
+			messages.New("user", []responses.InputMessageUnion{
+				responses.UserMessage("render the chart"),
+			}),
+			result,
+			// The reply to the result is an ordinary turn and stays: hiding the
+			// delivery is not the same as hiding what came of it.
+			messages.New("Assistant", []responses.InputMessageUnion{
+				{OfOutputMessage: &responses.OutputMessage{
+					ID: "msg_1", Role: constants.RoleAssistant,
+					Content: &responses.OutputContent{
+						{OfOutputText: &responses.OutputTextContent{Text: "Here's your chart."}},
+					},
+				}},
+			}),
+		},
+	}}
+
+	out := HistoryToMessages(rows)
+	require.Len(t, out, 2)
+	assert.Equal(t, "render the chart", out[0].Content)
+	assert.Equal(t, RoleAssistant, out[1].Role)
+	assert.Equal(t, "Here's your chart.", out[1].Content)
+}
+
+// The whole bundle goes, not just its text: a task that returned an image or a
+// file carries those in the same bundle, and half a delivery on screen is
+// worse than none.
+func TestHistoryToMessagesSkipsEveryMessageInABackgroundBundle(t *testing.T) {
+	result := messages.New("", []responses.InputMessageUnion{
+		responses.UserMessage("[Background task task-2 has finished.]"),
+		responses.UserMessage("the raw output the model reads"),
+	})
+	result.BackgroundTaskID = "task-2"
+
+	rows := []history.ConversationMessage{{
+		RunID: "turn-1", ThreadID: "thread-1",
+		Messages: []history.Message{result},
+	}}
+
+	assert.Empty(t, HistoryToMessages(rows))
 }

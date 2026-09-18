@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/hastekit/agent-sdk-go/pkg/agents"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/history"
 	"go.temporal.io/sdk/workflow"
 )
@@ -13,9 +14,9 @@ type TemporalHistory struct {
 	wrappedPersistence history.ConversationPersistenceAdapter
 }
 
-func NewTemporalConversationPersistence(wrappedPersistence history.ConversationPersistenceAdapter) *TemporalHistory {
+func NewTemporalConversationPersistence(wrappedPersistence history.ConversationPersistenceAdapter, middlewares ...agents.HistoryMiddleware) *TemporalHistory {
 	return &TemporalHistory{
-		wrappedPersistence: wrappedPersistence,
+		wrappedPersistence: agents.WrapHistoryPersistence(wrappedPersistence, middlewares...),
 	}
 }
 
@@ -23,8 +24,8 @@ func (t *TemporalHistory) LoadMessages(ctx context.Context, namespace string, th
 	return t.wrappedPersistence.LoadMessages(ctx, namespace, threadID, previousRunID)
 }
 
-func (t *TemporalHistory) SaveMessages(ctx context.Context, namespace, runId, previousRunId, threadId, conversationId string, messages []history.Message, meta map[string]any) error {
-	return t.wrappedPersistence.SaveMessages(ctx, namespace, runId, previousRunId, threadId, conversationId, messages, meta)
+func (t *TemporalHistory) SaveMessages(ctx context.Context, namespace, groupID, runId, previousRunId, threadId, conversationId string, messages []history.Message, meta map[string]any) error {
+	return t.wrappedPersistence.SaveMessages(ctx, namespace, history.NormalizeGroupID(groupID), runId, previousRunId, threadId, conversationId, messages, meta)
 }
 
 func (t *TemporalHistory) SaveSummary(ctx context.Context, namespace string, summary history.Summary) error {
@@ -84,8 +85,8 @@ func (t *TemporalConversationPersistenceProxy) LoadMessages(ctx context.Context,
 	return messages, nil
 }
 
-func (t *TemporalConversationPersistenceProxy) SaveMessages(ctx context.Context, namespace, runId, previousRunId, threadId, conversationId string, messages []history.Message, meta map[string]any) error {
-	return workflow.ExecuteActivity(t.workflowCtx, t.prefix+"_SaveMessagesActivity", namespace, runId, previousRunId, threadId, conversationId, messages, meta).Get(t.workflowCtx, nil)
+func (t *TemporalConversationPersistenceProxy) SaveMessages(ctx context.Context, namespace, groupID, runId, previousRunId, threadId, conversationId string, messages []history.Message, meta map[string]any) error {
+	return workflow.ExecuteActivity(t.workflowCtx, t.prefix+"_SaveMessagesActivity", namespace, history.NormalizeGroupID(groupID), runId, previousRunId, threadId, conversationId, messages, meta).Get(t.workflowCtx, nil)
 }
 
 func (t *TemporalConversationPersistenceProxy) SaveSummary(ctx context.Context, namespace string, summary history.Summary) error {

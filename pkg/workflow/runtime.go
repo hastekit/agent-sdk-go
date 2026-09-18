@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -79,7 +80,9 @@ func (c *Compiled) Execute(ctx context.Context, in *Input, opts ...InvokeOption)
 }
 
 // InProcessRuntime runs graphs through the shared Walker using a
-// goroutine-per-node executor.
+// goroutine-per-node executor. Cancellation is cooperative: it cancels running
+// nodes and waits for them to unwind before returning their shared Input.
+// Nodes that ignore ctx can delay cancellation; goroutines cannot be killed.
 type InProcessRuntime struct{}
 
 const defaultMaxSteps = 500
@@ -118,7 +121,15 @@ func (e inProcessExecutor) ExecuteWave(ctx context.Context, invs []Invocation) [
 // The walker guarantees no concurrent writes to RunContext during a
 // wave, so reads here are race-free.
 func runInvocation(ctx context.Context, inv Invocation, onFail context.CancelFunc) Result {
+	if err := cancellationError(ctx); err != nil {
+		return Result{NodeID: inv.NodeID, Err: err}
+	}
 	output, port, err := inv.Node.Execute(ctx, inv.Input)
+	// Discard updates from work that returned after its context was cancelled.
+	// Cancellation also takes precedence over a pause from that work.
+	if cancelErr := cancellationError(ctx); cancelErr != nil {
+		return Result{NodeID: inv.NodeID, Err: errors.Join(err, cancelErr)}
+	}
 	if err != nil {
 		// A pause is a suspension, not a failure: surface it as a
 		// Result.Pause and do not cancel sibling nodes in the wave.
@@ -129,4 +140,16 @@ func runInvocation(ctx context.Context, inv Invocation, onFail context.CancelFun
 		return Result{NodeID: inv.NodeID, Err: fmt.Errorf("node %q failed: %w", inv.NodeID, err)}
 	}
 	return Result{NodeID: inv.NodeID, Output: output, Port: port}
+}
+
+// Keep standard errors.Is checks working while preserving WithCancelCause and
+// WithDeadlineCause details supplied by the caller.
+func cancellationError(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		if cause := context.Cause(ctx); cause != err {
+			return errors.Join(err, cause)
+		}
+		return err
+	}
+	return nil
 }

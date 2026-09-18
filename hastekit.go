@@ -1,33 +1,30 @@
 package sdk
 
 import (
+	"fmt"
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/history"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/streambroker"
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm"
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
-)
-
-var (
-	agentsByName         = map[string]*agents.Agent{}
-	temporalAgentConfigs = map[string]*agents.AgentOptions{}
-	restateAgentConfigs  = map[string]*agents.AgentOptions{}
-
-	DefaultStreamBroker = streambroker.NewMemoryStreamBroker()
+	"strings"
 )
 
 type Agent = agents.Agent
 type ModelParameters = responses.Parameters
 
-// Hook is anything an agent can be given to observe or intercept what it does
-// — see agents.Hook. Implement ToolCallHook, ModelCallHook, or both.
-type Hook = agents.Hook
+// AgentMiddleware wraps agent operations. Embed agents.NoopMiddleware and
+// override the Wrap methods relevant to your implementation. The root
+// Middleware alias remains the gateway/provider middleware API.
+type AgentMiddleware = agents.Middleware
 
-// ToolCallHook wraps a tool call — see agents.ToolCallHook.
-type ToolCallHook = agents.ToolCallHook
+// ToolCallMiddleware wraps a tool call — see agents.ToolCallMiddleware.
+type ToolCallMiddleware = agents.ToolCallMiddleware
 
-// ModelCallHook wraps a call to the model — see agents.ModelCallHook.
-type ModelCallHook = agents.ModelCallHook
+// ModelCallMiddleware wraps a call to the model — see agents.ModelCallMiddleware.
+type ModelCallMiddleware = agents.ModelCallMiddleware
+type HistoryMiddleware = agents.HistoryMiddleware
+type PromptMiddleware = agents.PromptMiddleware
 
 type AgentConfig struct {
 	Name          string
@@ -42,15 +39,12 @@ type AgentConfig struct {
 	Parameters    responses.Parameters
 	StickyHandoff bool
 
-	// Skills are folders of instructions the agent reads only when it needs
-	// them — see NewSkillRegistryFromDir. The agent lists them in its prompt
-	// and adds the reader tool to Tools itself.
-	Skills agents.SkillProvider
+	// Skills list runtime catalogs and resolve enabled skills through read_skill.
+	Skills []agents.SkillSet
 
-	// Hooks observe or intercept what the agent does. A ToolCallHook wraps
-	// every tool it calls; a ModelCallHook wraps every call to the model, which
-	// is where a budget or credit check belongs. One hook may be both.
-	Hooks []agents.Hook
+	// Middlewares wrap model/tool calls, history loads/saves and prompt
+	// retrieval. Embed agents.NoopMiddleware and override selected methods.
+	Middlewares []agents.Middleware
 }
 
 func (ac *AgentConfig) toAgentOptions() *agents.AgentOptions {
@@ -67,46 +61,78 @@ func (ac *AgentConfig) toAgentOptions() *agents.AgentOptions {
 		Parameters:    ac.Parameters,
 		StickyHandoff: ac.StickyHandoff,
 		Skills:        ac.Skills,
-		Hooks:         ac.Hooks,
+		Middlewares:   ac.Middlewares,
 	}
 }
 
-// NewAgent creates a new agent with the given configuration
-func NewAgent(cfg *AgentConfig, opts ...AgentOption) *Agent {
-	// Convert to AgentOptions
-	agentOptions := cfg.toAgentOptions()
+// NewAgent validates configuration, constructs an agent, and registers its
+// resolved configuration with the supplied runtime before returning.
+// History, runtime and broker resources remain owned by the caller.
+func NewAgent(cfg *AgentConfig, opts ...AgentOption) (*Agent, error) {
+	agent, options, err := buildAgent(cfg, opts...)
+	if err != nil {
+		return nil, err
+	}
+	if options.Runtime != nil {
+		if err := options.Runtime.RegisterAgent(options); err != nil {
+			return nil, err
+		}
+	}
+	return agent, nil
+}
 
-	// Apply options
+func buildAgent(cfg *AgentConfig, opts ...AgentOption) (*Agent, *agents.AgentOptions, error) {
+	if cfg == nil {
+		return nil, nil, fmt.Errorf("agent configuration is nil")
+	}
+	options := cfg.toAgentOptions()
 	for _, opt := range opts {
-		opt(agentOptions)
+		if opt == nil {
+			return nil, nil, fmt.Errorf("nil agent option")
+		}
+		opt(options)
 	}
-
-	if agentOptions.StreamBroker == nil {
-		agentOptions.StreamBroker = DefaultStreamBroker
+	if strings.TrimSpace(options.Name) == "" {
+		return nil, nil, fmt.Errorf("agent name is required")
 	}
+	if err := agents.ValidateSkillSets(options.Skills); err != nil {
+		return nil, nil, err
+	}
+	if options.LLM == nil {
+		return nil, nil, fmt.Errorf("agent model is required")
+	}
+	if options.MaxLoops != nil && *options.MaxLoops < 0 {
+		return nil, nil, fmt.Errorf("MaxLoops must not be negative")
+	}
+	if options.StreamBroker == nil {
+		if options.Runtime != nil {
+			return nil, nil, fmt.Errorf("an explicit stream broker is required when configuring a runtime")
+		}
+		options.StreamBroker = streambroker.NewMemoryStreamBroker()
+	}
+	return agents.NewAgent(options), options, nil
+}
 
-	// Create the agent
-	agent := agents.NewAgent(agentOptions)
-
-	// Add to the SDK
-	agentsByName[agentOptions.Name] = agent
-
+// MustNewAgent is NewAgent for static configuration where failure is a programmer error.
+func MustNewAgent(cfg *AgentConfig, opts ...AgentOption) *Agent {
+	agent, err := NewAgent(cfg, opts...)
+	if err != nil {
+		panic(err)
+	}
 	return agent
 }
 
 type AgentOption func(options *agents.AgentOptions)
 
-func WithRuntime(runtime agents.Runtime, broker agents.StreamBroker) AgentOption {
+// WithRuntime selects a runtime and uses its StreamBroker. A nil runtime uses
+// local execution with a default in-memory broker. NewAgent registers the resolved
+// configuration with the runtime; start Temporal/Restate workers with Serve.
+func WithRuntime(runtime agents.Runtime) AgentOption {
 	return func(opts *agents.AgentOptions) {
-		switch runtime.(type) {
-		case *TemporalRuntime:
-			temporalAgentConfigs[opts.Name] = opts
-		case *RestateRuntime:
-			restateAgentConfigs[opts.Name] = opts
-		default:
-		}
-
 		opts.Runtime = runtime
-		opts.StreamBroker = broker
+		opts.StreamBroker = nil
+		if runtime != nil {
+			opts.StreamBroker = runtime.StreamBroker()
+		}
 	}
 }

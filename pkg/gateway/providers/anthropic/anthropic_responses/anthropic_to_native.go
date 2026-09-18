@@ -1,7 +1,6 @@
 package anthropic_responses
 
 import (
-	"fmt"
 	"time"
 
 	"github.com/bytedance/sonic"
@@ -242,14 +241,9 @@ func (msg *MessageUnion) ToNativeMessage() responses2.InputMessageUnion {
 				outputs.OfString = content.OfToolResult.Content.OfString
 			}
 
-			// TODO: outputContent can be text, image, search result or document
 			for _, outputContent := range content.OfToolResult.Content.OfList {
-				if outputContent.OfText != nil {
-					outputs.OfList = append(outputs.OfList, responses2.InputContentUnion{
-						OfInputText: &responses2.InputTextContent{
-							Text: outputContent.OfText.Text,
-						},
-					})
+				if native, ok := toolResultContentToNative(outputContent); ok {
+					outputs.OfList = append(outputs.OfList, native)
 				}
 			}
 
@@ -365,14 +359,11 @@ func (msg *MessageUnion) ToNativeMessage() responses2.InputMessageUnion {
 		}
 
 		if content.OfImage != nil {
-			switch content.OfImage.Source.Type {
-			case "base64":
-				contents = append(contents, responses2.InputContentUnion{
-					OfInputImage: &responses2.InputImageContent{
-						ImageURL: utils.Ptr(fmt.Sprintf("data:%s;base64,%s", *content.OfImage.Source.MediaType, *content.OfImage.Source.Data)),
-					},
-				})
-			}
+			contents = append(contents, imageContentToNative(content.OfImage))
+		}
+
+		if content.OfDocument != nil {
+			contents = append(contents, documentContentToNative(content.OfDocument))
 		}
 	}
 

@@ -2,16 +2,23 @@ package agui
 
 import (
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
+	"github.com/a2aproject/a2a-go/v2/a2asrv"
 	"github.com/google/uuid"
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
+	"github.com/hastekit/agent-sdk-go/pkg/agents/attachments"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/history"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/messages"
+	"github.com/hastekit/agent-sdk-go/pkg/agents/skills"
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/constants"
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
+	"github.com/hastekit/agent-sdk-go/pkg/routines"
 )
 
 // Registry is the minimal view of an SDK client the AG-UI handler
@@ -22,18 +29,68 @@ type Registry interface {
 }
 
 type options struct {
-	namespace   string
-	senderID    string
-	fullHistory bool
-	keepalive   time.Duration
+	routineService     *routines.Service
+	routineScheduler   routines.Scheduler
+	a2aBaseURL         string
+	a2aHandlerOptions  func(agentName, namespace string) []a2asrv.RequestHandlerOption
+	a2aAuthorizer      agents.A2AAuthorizer
+	skillStore         skills.Store
+	attachmentStore    attachments.UploadStore
+	attachmentMaxBytes int64
+	namespaceResolver  NamespaceResolver
+	senderID           string
+	fullHistory        bool
+	keepalive          time.Duration
+}
+
+// WithRoutines enables routine management APIs and the embedded UI. The optional
+// scheduler exposes execution status; callers own its startup and shutdown.
+// Routines use WithNamespaceResolver, like agent runs. Protect management routes
+// with application authorization middleware.
+func WithRoutines(service *routines.Service, schedulers ...routines.Scheduler) Option {
+	return func(o *options) {
+		o.routineService = service
+		o.routineScheduler = nil
+		if len(schedulers) > 0 {
+			o.routineScheduler = schedulers[0]
+		}
+	}
+}
+
+// WithSkillStore enables namespace-scoped skill management APIs and the embedded
+// UI library, shared across agents. Configure an adapter over the same store
+// in each participating agent's Skills. Agent names do not scope stored content.
+// Protect management routes with application authorization middleware.
+func WithSkillStore(store skills.Store) Option { return func(o *options) { o.skillStore = store } }
+
+// WithAttachmentStore enables upload/download endpoints and owned file references.
+// Give the same store to the agent's middleware.NewAttachmentMiddleware, which resolves
+// the references on their way to the model. Files live under the handler's
+// namespace (see WithNamespaceResolver), the same one its runs read them under.
+func WithAttachmentStore(store attachments.UploadStore) Option {
+	return func(o *options) { o.attachmentStore = store }
+}
+
+// WithAttachmentUploadLimit bounds each HTTP upload (default 20 MiB).
+func WithAttachmentUploadLimit(n int64) Option {
+	return func(o *options) { o.attachmentMaxBytes = n }
 }
 
 // Option configures the AG-UI handler.
 type Option func(*options)
 
-// WithNamespace sets the conversation namespace (default "default").
-func WithNamespace(ns string) Option {
-	return func(o *options) { o.namespace = ns }
+// NamespaceResolver derives a namespace from a request, typically using identity
+// placed in its context by authentication middleware. It must be safe for
+// concurrent requests. Returning an empty or whitespace-only namespace selects
+// "default". Returning an error rejects the request with HTTP 403.
+type NamespaceResolver func(*http.Request) (string, error)
+
+// WithNamespaceResolver resolves the namespace once per API request, after route
+// matching (so PathValue is available). A nil resolver uses "default". Errors
+// never fall back to the default namespace. Authentication and authorization
+// remain the application's responsibility.
+func WithNamespaceResolver(resolve NamespaceResolver) Option {
+	return func(o *options) { o.namespaceResolver = resolve }
 }
 
 // WithSenderID sets the sender attribution for messages POSTed by
@@ -60,7 +117,6 @@ func WithKeepalive(d time.Duration) Option {
 
 func buildOptions(opts []Option) options {
 	o := options{
-		namespace: "default",
 		senderID:  "user",
 		keepalive: 15 * time.Second,
 	}
@@ -73,7 +129,11 @@ func buildOptions(opts []Option) options {
 // NewHandler exposes every agent registered on the client over the
 // AG-UI protocol:
 //
+//	GET  /a2a/                                    → A2A agent directory
+//	GET  /a2a/{agent}/.well-known/agent-card.json  → A2A discovery card
+//	POST /a2a/{agent}                            → A2A 1.0 JSON-RPC (including SSE)
 //	GET  /agents                                  → {"agents": ["name", ...]}
+//	GET  /agents/{agent}/skills                   → visible skill catalog and default enablement
 //	POST /agents/{agent}/run                      → run the agent; SSE stream of AG-UI events
 //	GET  /agents/{agent}/threads                  → stored conversation threads, newest first
 //	GET  /agents/{agent}/threads/{thread}/messages → thread history as AG-UI messages
@@ -86,7 +146,7 @@ func buildOptions(opts []Option) options {
 //	http.ListenAndServe(":8080", agui.NewHandler(client))
 //
 // The stop endpoint (POST /agents/{agent}/stop) ends a run already
-// streaming, identified by its stream id — a separate request, since the
+// streaming, identified by its thread id in the resolved namespace — a separate request, since the
 // run's own connection is busy streaming by then. It goes through the
 // agent's broker, so it works from any replica, not only the one holding
 // the SSE connection.
@@ -98,8 +158,99 @@ func buildOptions(opts []Option) options {
 func NewHandler(registry Registry, opts ...Option) http.Handler {
 	o := buildOptions(opts)
 	mux := http.NewServeMux()
+	o.mountA2A(mux, registry)
+	if o.routineService != nil {
+		h := routines.NewHTTPHandler(o.routineService, routines.HTTPConfig{
+			Scheduler:         o.routineScheduler,
+			NamespaceResolver: o.namespaceResolver,
+		})
+		mux.Handle("/routines", h)
+		mux.Handle("/routines/", h)
+	}
+	handleFunc := func(pattern string, fn http.HandlerFunc) {
+		mux.Handle(pattern, o.withNamespace(fn))
+	}
+	if o.skillStore != nil {
+		h := o.withNamespace(skills.NewHandler(o.skillStore, func(r *http.Request) (string, error) { return requestNamespace(r), nil }))
+		mux.Handle("/skills", h)
+		mux.Handle("/skills/", h)
+	}
+	if o.attachmentStore != nil {
+		// Uploads and downloads live under this handler's namespace, the same
+		// one every run it starts stores and reads attachments under.
+		mux.Handle("/attachments/", o.withNamespace(attachments.NewHTTPHandler(o.attachmentStore, o.attachmentMaxBytes,
+			func(r *http.Request) (string, error) { return requestNamespace(r), nil })))
+	}
 
-	mux.HandleFunc("GET /agents", func(w http.ResponseWriter, r *http.Request) {
+	if o.routineService != nil {
+		handleFunc("GET /routines/{id}/threads", func(w http.ResponseWriter, r *http.Request) {
+			routine, err := o.routineService.Get(r.Context(), requestNamespace(r), r.PathValue("id"))
+			if err != nil {
+				if errors.Is(err, routines.ErrNotFound) {
+					writeJSONError(w, 404, "routine not found")
+				} else {
+					writeJSONError(w, 500, "unable to load routine")
+				}
+				return
+			}
+			result := []history.ThreadInfo{}
+			seen := map[string]bool{}
+			supported := false
+			// Try the current agent first for legacy rows without agent attribution.
+			names := append([]string{routine.Agent}, registry.AgentNames()...)
+			visited := map[string]bool{}
+			for _, name := range names {
+				if visited[name] {
+					continue
+				}
+				visited[name] = true
+				agent, ok := registry.Agent(name)
+				if !ok {
+					continue
+				}
+				lister := threadLister(agent)
+				if lister == nil {
+					continue
+				}
+				supported = true
+				threads, err := lister.ListThreads(r.Context(), requestNamespace(r), routine.ID)
+				if err != nil {
+					writeJSONError(w, 500, "unable to list routine conversations")
+					return
+				}
+				for _, thread := range threads {
+					if thread.GroupID != routine.ID {
+						continue
+					}
+					if thread.AgentName != "" && thread.AgentName != name {
+						continue
+					}
+					if seen[thread.ThreadID] {
+						continue
+					}
+					seen[thread.ThreadID] = true
+					thread.AgentName = name
+					result = append(result, thread)
+				}
+			}
+			if !supported {
+				writeJSONError(w, 501, "conversation history is not available")
+				return
+			}
+			// Latest occurrence, not most recently edited conversation.
+			sort.Slice(result, func(i, j int) bool {
+				if result[i].CreatedAt.Equal(result[j].CreatedAt) {
+					return result[i].ThreadID > result[j].ThreadID
+				}
+				return result[i].CreatedAt.After(result[j].CreatedAt)
+			})
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Cache-Control", "no-store")
+			_ = json.NewEncoder(w).Encode(map[string]any{"threads": result})
+		})
+	}
+
+	handleFunc("GET /agents", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		// full_history tells a client whether this server needs the whole
 		// conversation on every run. It normally does not — the agent loads
@@ -110,10 +261,31 @@ func NewHandler(registry Registry, opts ...Option) http.Handler {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"agents":       registry.AgentNames(),
 			"full_history": o.fullHistory,
+			"attachments":  o.attachmentStore != nil,
+			"skill_store":  o.skillStore != nil,
+			"routines":     o.routineService != nil,
 		})
 	})
 
-	mux.HandleFunc("POST /agents/{agent}/run", func(w http.ResponseWriter, r *http.Request) {
+	handleFunc("GET /agents/{agent}/skills", func(w http.ResponseWriter, r *http.Request) {
+		agent, ok := registry.Agent(r.PathValue("agent"))
+		if !ok {
+			writeJSONError(w, http.StatusNotFound, "agent not found")
+			return
+		}
+		catalog, err := agent.ListSkills(r.Context(), requestNamespace(r), map[string]any{"Header": collectHeaders(r.Header)}, agents.SkillSelection{})
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "unable to list skills: "+err.Error())
+			return
+		}
+		if catalog == nil {
+			catalog = []agents.ListedSkill{}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"skills": catalog})
+	})
+
+	handleFunc("POST /agents/{agent}/run", func(w http.ResponseWriter, r *http.Request) {
 		agent, ok := registry.Agent(r.PathValue("agent"))
 		if !ok {
 			writeJSONError(w, http.StatusNotFound, "agent not found")
@@ -122,7 +294,7 @@ func NewHandler(registry Registry, opts ...Option) http.Handler {
 		serveRun(w, r, agent, o)
 	})
 
-	mux.HandleFunc("POST /agents/{agent}/stop", func(w http.ResponseWriter, r *http.Request) {
+	handleFunc("POST /agents/{agent}/stop", func(w http.ResponseWriter, r *http.Request) {
 		agent, ok := registry.Agent(r.PathValue("agent"))
 		if !ok {
 			writeJSONError(w, http.StatusNotFound, "agent not found")
@@ -131,7 +303,7 @@ func NewHandler(registry Registry, opts ...Option) http.Handler {
 		serveStop(w, r, agent)
 	})
 
-	mux.HandleFunc("GET /agents/{agent}/threads/{thread}/stream", func(w http.ResponseWriter, r *http.Request) {
+	handleFunc("GET /agents/{agent}/threads/{thread}/stream", func(w http.ResponseWriter, r *http.Request) {
 		agent, ok := registry.Agent(r.PathValue("agent"))
 		if !ok {
 			writeJSONError(w, http.StatusNotFound, "agent not found")
@@ -140,7 +312,16 @@ func NewHandler(registry Registry, opts ...Option) http.Handler {
 		serveStream(w, r, agent, r.PathValue("thread"), o)
 	})
 
-	mux.HandleFunc("GET /agents/{agent}/threads", func(w http.ResponseWriter, r *http.Request) {
+	handleFunc("GET /agents/{agent}/runs", func(w http.ResponseWriter, r *http.Request) {
+		agent, ok := registry.Agent(r.PathValue("agent"))
+		if !ok {
+			writeJSONError(w, http.StatusNotFound, "agent not found")
+			return
+		}
+		serveRunFeed(w, r, agent, o)
+	})
+
+	handleFunc("GET /agents/{agent}/threads", func(w http.ResponseWriter, r *http.Request) {
 		agent, ok := registry.Agent(r.PathValue("agent"))
 		if !ok {
 			writeJSONError(w, http.StatusNotFound, "agent not found")
@@ -149,7 +330,7 @@ func NewHandler(registry Registry, opts ...Option) http.Handler {
 		serveThreads(w, r, agent, o)
 	})
 
-	mux.HandleFunc("GET /agents/{agent}/threads/{thread}/messages", func(w http.ResponseWriter, r *http.Request) {
+	handleFunc("GET /agents/{agent}/threads/{thread}/messages", func(w http.ResponseWriter, r *http.Request) {
 		agent, ok := registry.Agent(r.PathValue("agent"))
 		if !ok {
 			writeJSONError(w, http.StatusNotFound, "agent not found")
@@ -170,7 +351,7 @@ func serveThreads(w http.ResponseWriter, r *http.Request, agent *agents.Agent, o
 		writeJSONError(w, http.StatusNotImplemented, "the agent's persistence adapter does not support thread listing")
 		return
 	}
-	threads, err := lister.ListThreads(r.Context(), o.namespace)
+	threads, err := lister.ListThreads(r.Context(), requestNamespace(r), history.NormalizeGroupID(r.URL.Query().Get("group_id")))
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "unable to list threads: "+err.Error())
 		return
@@ -187,18 +368,34 @@ func serveThreadMessages(w http.ResponseWriter, r *http.Request, agent *agents.A
 		writeJSONError(w, http.StatusNotImplemented, "the agent has no conversation persistence")
 		return
 	}
-	// The transcript, not the model's view of it: LoadMessages returns a
-	// summary in place of the turns it covers, which is right for a prompt and
-	// wrong for a chat window the user is scrolling back through.
-	rows, err := manager.LoadTranscript(r.Context(), o.namespace, threadID)
+
+	namespace := requestNamespace(r)
+	opts, err := messagePageOptions(r, namespace, threadID)
 	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "unable to load messages: "+err.Error())
+		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
+	}
+	page, err := history.LoadTranscriptPage(r.Context(), manager.ConversationPersistenceAdapter, namespace, threadID, opts)
+	if err != nil {
+		if errors.Is(err, history.ErrInvalidTranscriptCursor) {
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+		} else {
+			writeJSONError(w, http.StatusInternalServerError, "unable to load messages: "+err.Error())
+		}
+		return
+	}
+	var latest []history.ConversationMessage
+	if page.Latest != nil {
+		latest = []history.ConversationMessage{*page.Latest}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"threadId": threadID,
-		"messages": HistoryToMessages(rows),
+		"threadId":   threadID,
+		"sessionId":  sessionIDFromRows(threadID, latest),
+		"messages":   HistoryToMessages(page.Rows),
+		"run":        threadRunState(latest),
+		"nextCursor": nextMessageCursor(namespace, threadID, page.NextBeforeRunID),
+		"hasMore":    page.NextBeforeRunID != "",
 	})
 }
 
@@ -226,40 +423,58 @@ func threadLister(agent *agents.Agent) history.ThreadLister {
 // run's stream id from a route of your own.
 func AgentHandler(agent *agents.Agent, opts ...Option) http.Handler {
 	o := buildOptions(opts)
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return o.withNamespace(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeJSONError(w, http.StatusMethodNotAllowed, "POST a RunAgentInput to run the agent")
 			return
 		}
 		serveRun(w, r, agent, o)
-	})
+	}))
 }
 
-// serveStop stops a run, identified by the stream id the run endpoint
-// returned (the X-Stream-Id header, or the streamId CUSTOM event), taken
-// from a {"streamId": …} body or a ?streamId= query parameter.
-//
-// The stopping run ends on its own SSE connection with RUN_FINISHED,
-// which is where a client should watch for the outcome.
-//
-// The agent in the path selects whose broker to ask, which matters when
-// agents use different brokers. It is not an ownership check: the stream
-// id is the capability, and only the client that started the run has it.
+// serveStop stops a thread in the resolved namespace. threadId is required in
+// the JSON body or query. An optional streamId must match the server-derived ID;
+// a raw stream ID alone can never select a cancellation target.
 func serveStop(w http.ResponseWriter, r *http.Request, agent *agents.Agent) {
 	var body struct {
+		ThreadID string `json:"threadId"`
 		StreamID string `json:"streamId"`
 	}
-	// An empty body is fine when the stream id is in the query string.
 	if r.Body != nil {
-		_ = json.NewDecoder(r.Body).Decode(&body)
+		decoder := json.NewDecoder(r.Body)
+		if err := decoder.Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+			writeJSONError(w, http.StatusBadRequest, "invalid stop request")
+			return
+		}
+		var extra any
+		if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+			writeJSONError(w, http.StatusBadRequest, "invalid stop request")
+			return
+		}
 	}
-	streamID := body.StreamID
-	if streamID == "" {
-		streamID = r.URL.Query().Get("streamId")
+	query := r.URL.Query()
+	threadID := body.ThreadID
+	if threadID == "" {
+		threadID = query.Get("threadId")
 	}
-	if streamID == "" {
-		writeJSONError(w, http.StatusBadRequest, "streamId is required: pass the stream id the run endpoint returned")
+	if strings.TrimSpace(threadID) == "" {
+		writeJSONError(w, http.StatusBadRequest, "threadId is required")
 		return
+	}
+	// Reject conflicting body/query identifiers instead of silently ignoring one.
+	for _, value := range query["threadId"] {
+		if value != threadID {
+			writeJSONError(w, http.StatusBadRequest, "conflicting threadId")
+			return
+		}
+	}
+	streamID := agents.StreamIDForThread(requestNamespace(r), threadID)
+	supplied := append([]string{body.StreamID}, query["streamId"]...)
+	for _, value := range supplied {
+		if value != "" && value != streamID {
+			writeJSONError(w, http.StatusForbidden, "streamId does not match the thread in the resolved namespace")
+			return
+		}
 	}
 
 	if err := agent.Stop(r.Context(), streamID); err != nil {
@@ -272,7 +487,7 @@ func serveStop(w http.ResponseWriter, r *http.Request, agent *agents.Agent) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
-	_ = json.NewEncoder(w).Encode(map[string]any{"streamId": streamID, "stopping": true})
+	_ = json.NewEncoder(w).Encode(map[string]any{"threadId": threadID, "streamId": streamID, "stopping": true})
 }
 
 // serveStream attaches to a thread's run without starting one, and
@@ -281,9 +496,9 @@ func serveStop(w http.ResponseWriter, r *http.Request, agent *agents.Agent) {
 // channel is derived from the thread, and the broker replays what the run
 // has emitted so far before live chunks continue.
 //
-// A thread with no run in flight answers 204, so a client can attach
-// without checking first and without being left holding a stream that
-// nothing will ever publish to.
+// Last-Event-ID (or lastEventId in the query) resumes after that event.
+// Without a cursor, replay starts from the retained opening event, including
+// completed runs. A thread with no live run or retained replay answers 204.
 func serveStream(w http.ResponseWriter, r *http.Request, agent *agents.Agent, threadID string, o options) {
 	if threadID == "" {
 		writeJSONError(w, http.StatusBadRequest, "thread id is required")
@@ -297,19 +512,55 @@ func serveStream(w http.ResponseWriter, r *http.Request, agent *agents.Agent, th
 	}
 
 	ctx := r.Context()
-	streamID := agents.StreamIDForThread(o.namespace, threadID)
+	streamID := agents.StreamIDForThread(requestNamespace(r), threadID)
 
-	// Subscribing to a channel with no run behind it would block until the
-	// client gives up: nothing publishes to it and nothing closes it.
-	active, err := agent.StreamBroker().IsActive(ctx, streamID)
+	rawCursor := r.Header.Get("Last-Event-ID")
+	if queryCursor := r.URL.Query().Get("lastEventId"); queryCursor != "" {
+		if rawCursor != "" && rawCursor != queryCursor {
+			writeJSONError(w, http.StatusBadRequest, "conflicting Last-Event-ID values")
+			return
+		}
+		rawCursor = queryCursor
+	}
+	cursor, err := parseEventCursor(rawCursor)
 	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "unable to check run: "+err.Error())
+		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if !active {
-		w.Header().Set("X-Stream-Id", streamID)
-		w.WriteHeader(http.StatusNoContent)
+	if cursor != nil && cursor.Stream != streamID {
+		writeJSONError(w, http.StatusBadRequest, "Last-Event-ID belongs to another stream")
 		return
+	}
+	var replay []*responses.ResponseChunk
+	if reader, ok := agent.StreamBroker().(agents.StreamReplayReader); ok {
+		replay, err = reader.Replay(ctx, streamID)
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "unable to read stream replay")
+			return
+		}
+	} else if cursor != nil {
+		writeJSONError(w, http.StatusNotImplemented, "stream broker does not support resumable replay")
+		return
+	}
+	if cursor != nil {
+		if err := validateReplay(replay, threadID, streamID, cursor); err != nil {
+			writeJSONError(w, http.StatusGone, errReplayUnavailable.Error())
+			return
+		}
+	}
+	if len(replay) == 0 {
+		active, err := waitForRunChange(ctx, agent.StreamBroker(), streamID, false, watchWait(r, 0))
+		if err != nil {
+			if ctx.Err() == nil {
+				writeJSONError(w, http.StatusInternalServerError, "unable to check run: "+err.Error())
+			}
+			return
+		}
+		if !active {
+			w.Header().Set("X-Stream-Id", streamID)
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 	}
 
 	chunks, err := agent.StreamBroker().Subscribe(ctx, streamID)
@@ -327,56 +578,7 @@ func serveStream(w http.ResponseWriter, r *http.Request, agent *agents.Agent, th
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
 
-	enc := NewEncoder(w)
-
-	// The run id comes off the replayed run.created chunk, so the events
-	// this stream emits carry the same ids as the run's own connection.
-	// Until then the translator has nothing to attribute events to, which
-	// is why chunks are translated only once a run is seen.
-	var translator *Translator
-
-	keepalive := time.NewTicker(o.keepalive)
-	defer keepalive.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-keepalive.C:
-			if err := enc.Comment("keepalive"); err != nil {
-				return
-			}
-		case chunk, ok := <-chunks:
-			if !ok {
-				if translator != nil {
-					_ = enc.EncodeAll(ctx, translator.Finish())
-				}
-				return
-			}
-
-			if translator == nil {
-				runID := runIDOf(chunk)
-				if runID == "" {
-					// Nothing to attribute this to yet — the run's opening
-					// chunk hasn't been replayed.
-					continue
-				}
-				translator = NewTranslator(threadID, runID)
-				if err := enc.EncodeAll(ctx, translator.Start()); err != nil {
-					return
-				}
-			}
-
-			if events := translator.Translate(chunk); len(events) > 0 {
-				if err := enc.EncodeAll(ctx, events); err != nil {
-					return
-				}
-			}
-			if chunk.OfRunCompleted != nil || chunk.OfRunPaused != nil {
-				return
-			}
-		}
-	}
+	pumpEvents(w, r, chunks, threadID, streamID, cursor, o.keepalive, nil)
 }
 
 // runIDOf returns the run id a lifecycle chunk carries, or "" for chunks
@@ -410,6 +612,16 @@ func serveRun(w http.ResponseWriter, r *http.Request, agent *agents.Agent, o opt
 		return
 	}
 
+	sessionID, err := attachmentSessionID(r.Context(), agent, requestNamespace(r), input.ThreadID)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "unable to resolve conversation")
+		return
+	}
+	if err := validateMessageAttachments(r.Context(), requestNamespace(r), sessionID, input.Messages, o.attachmentStore); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid or inaccessible message attachments")
+		return
+	}
+
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeJSONError(w, http.StatusInternalServerError, "streaming unsupported")
@@ -435,7 +647,7 @@ func serveRun(w http.ResponseWriter, r *http.Request, agent *agents.Agent, o opt
 
 	// A thread always streams on the same channel, so a client that
 	// reconnects can find the run without having kept the id.
-	streamID := agents.StreamIDForThread(o.namespace, input.ThreadID)
+	streamID := agents.StreamIDForThread(requestNamespace(r), input.ThreadID)
 	turn := messages.New(o.senderID, sdkMessages)
 
 	// A turn arriving while the thread is already running folds into that
@@ -455,14 +667,19 @@ func serveRun(w http.ResponseWriter, r *http.Request, agent *agents.Agent, o opt
 		}
 	}
 
+	selection, _ := input.SkillSelection() // validated before claiming the run
 	in := &agents.AgentInput{
-		Namespace: o.namespace,
+		Skills:    selection,
+		Namespace: requestNamespace(r),
+		RunID:     runID,
 		ThreadID:  input.ThreadID,
+		SessionID: sessionID,
 		StreamID:  streamID,
 		Message:   turn,
 		// Fold AG-UI context into the prompt RunContext. forwardedProps
 		// and state land at top-level keys so prompt templates can
 		// reach them via {{State.x}} / {{ForwardedProps.y}}.
+		GroupID: history.DefaultGroupID,
 		RunContext: map[string]any{
 			"Context":        contextFromAGUI(input.Context),
 			"ForwardedProps": input.ForwardedProps,
@@ -490,62 +707,10 @@ func serveRun(w http.ResponseWriter, r *http.Request, agent *agents.Agent, o opt
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
 
-	enc := NewEncoder(w)
-	translator := NewTranslator(input.ThreadID, runID)
-
-	// Emit RUN_STARTED before any chunk-derived event. Also ship a
-	// CUSTOM event carrying the broker StreamID so a client that
-	// wants to correlate with the SDK's streaming surface can.
-	if err := enc.EncodeAll(ctx, translator.Start()); err != nil {
-		return
-	}
-	_ = enc.Encode(ctx, &CustomEvent{
-		BaseEvent: baseNow(),
-		Name:      CustomNameStreamID,
-		Value: map[string]any{
-			"streamId": handle.StreamID,
-			"runId":    runID,
-			"threadId": input.ThreadID,
-		},
+	pumpEvents(w, r, handle.Chunks, input.ThreadID, handle.StreamID, nil, o.keepalive, func() error {
+		_, err := handle.Wait(ctx)
+		return err
 	})
-
-	// Keep-alive ticker keeps idle SSE connections from being reaped
-	// by reverse proxies.
-	keepalive := time.NewTicker(o.keepalive)
-	defer keepalive.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-keepalive.C:
-			if err := enc.Comment("keepalive"); err != nil {
-				return
-			}
-		case chunk, ok := <-handle.Chunks:
-			if !ok {
-				// Stream closed without a terminal chunk. Surface the
-				// run error if there is one, otherwise synthesise a
-				// RUN_FINISHED so the AG-UI client doesn't hang.
-				if _, err := handle.Wait(); err != nil {
-					_ = enc.EncodeAll(ctx, translator.Error(err, "run_error"))
-				} else {
-					_ = enc.EncodeAll(ctx, translator.Finish())
-				}
-				return
-			}
-			if events := translator.Translate(chunk); len(events) > 0 {
-				if err := enc.EncodeAll(ctx, events); err != nil {
-					return
-				}
-			}
-			// Run terminated — close the connection. The translator
-			// has already emitted RUN_FINISHED (completed or paused).
-			if chunk.OfRunCompleted != nil || chunk.OfRunPaused != nil {
-				return
-			}
-		}
-	}
 }
 
 // appendContextBlock renders the AG-UI grounding context as a

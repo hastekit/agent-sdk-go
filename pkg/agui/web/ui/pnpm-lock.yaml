@@ -17,6 +17,9 @@ importers:
       '@copilotkit/react-core':
         specifier: ^1.58.0
         version: 1.59.5(@types/mdast@4.0.4)(@types/react-dom@18.3.7(@types/react@18.3.31))(@types/react@18.3.31)(graphql@16.14.2)(micromark-util-types@2.0.2)(micromark@4.0.2)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(zod@3.25.76)
+      '@radix-ui/react-dropdown-menu':
+        specifier: 2.1.17
+        version: 2.1.17(@types/react-dom@18.3.7(@types/react@18.3.31))(@types/react@18.3.31)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
       react:
         specifier: ^18.3.1
         version: 18.3.1
@@ -29,6 +32,12 @@ importers:
       remark-gfm:
         specifier: ^4.0.0
         version: 4.0.1
+      rxjs:
+        specifier: 7.8.1
+        version: 7.8.1
+      yaml:
+        specifier: ^2.8.1
+        version: 2.9.1
     devDependencies:
       '@types/react':
         specifier: ^18.3.12
@@ -2297,6 +2306,11 @@ packages:
 
   yallist@3.1.1:
     resolution: {integrity: sha512-a4UGQaWPH59mOXUYnAG2ewncQS4i4F43Tv3JoAM+s2VDAmS9NsK8GpDMLrCHPksFT7h3K6TOoUNn2pb7RoXx4g==}
+
+  yaml@2.9.1:
+    resolution: {integrity: sha512-3NxN8+78OdzbT7C/WjGsyfPAtJaN3FNDsWxv7Y7mcDsT/oOmgW8BpyQQFFBnvZE3j9Y2Sdz1ULFLezL7Eb2yFw==}
+    engines: {node: ">= 14.6"}
+    hasBin: true
 
   zod-to-json-schema@3.25.2:
     resolution: {integrity: sha512-O/PgfnpT1xKSDeQYSCfRI5Gy3hPf91mKVDuYLUHZJMiDFptvP41MSnWofm8dnCm0256ZNfZIM7DSzuSMAFnjHA==}
@@ -5113,6 +5127,8 @@ snapshots:
   wonka@6.3.6: {}
 
   yallist@3.1.1: {}
+
+  yaml@2.9.1: {}
 
   zod-to-json-schema@3.25.2(zod@3.25.76):
     dependencies:
