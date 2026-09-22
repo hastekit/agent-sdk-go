@@ -44,7 +44,8 @@ type options struct {
 }
 
 // WithRoutines enables routine management APIs and the embedded UI. The optional
-// scheduler exposes execution status; callers own its startup and shutdown.
+// scheduler exposes execution status and Run now; callers own its startup and
+// shutdown. Manual runs require the scheduler to be running in this process.
 // Routines use WithNamespaceResolver, like agent runs. Protect management routes
 // with application authorization middleware.
 func WithRoutines(service *routines.Service, schedulers ...routines.Scheduler) Option {

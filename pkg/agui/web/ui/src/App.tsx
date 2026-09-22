@@ -14,7 +14,7 @@ import {
   useInterrupt,
 } from "@copilotkit/react-core/v2";
 import { ComposerSkillsContext } from "./composer-menu";
-import { RoutineLibrary } from "./routine-library";
+import { RoutineLibrary, RunRoutineButton } from "./routine-library";
 import { SkillLibrary } from "./skill-library";
 import { AttachmentMessageView } from "./attachment-message";
 import { AttachmentInput } from "./attachment-input";
@@ -803,6 +803,7 @@ export default function App() {
         </CopilotKitProvider>
       )}
       {selectedRoutine && <aside className="routine-history" aria-label="Routine conversation history">
+        <RunRoutineButton key={selectedRoutine.id} routine={selectedRoutine} />
         <div className="routine-history-heading"><h2>Run history</h2><button className="icon-btn" aria-label="Manage routines" onClick={() => setRoutinesOpen(true)}>⚙</button></div>
         <p className="hint">{selectedRoutine.name}</p>
         {routineHistoryError && <p className="hint error" role="alert">{routineHistoryError}</p>}

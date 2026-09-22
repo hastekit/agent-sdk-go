@@ -298,3 +298,7 @@ export async function fetchRoutineThreads(id: string): Promise<ThreadInfo[]> {
 export async function fetchRoutine(id: string): Promise<Routine> {
   return routineRequest(`/${encodeURIComponent(id)}`);
 }
+
+export async function runRoutineNow(id: string): Promise<{ id: string }> {
+  return routineRequest(`/${encodeURIComponent(id)}/run`, { method: "POST" });
+}

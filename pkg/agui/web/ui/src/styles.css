@@ -768,3 +768,6 @@ body {
   .app:has(.routine-history) > .chat-pane { grid-row: 1; }
   .routine-history { grid-row: 2; border-top: 1px solid var(--hk-line); }
 }
+
+.routine-run-action { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; padding: 8px; }
+.routine-run-action small { font-size: 12px; overflow-wrap: anywhere; }

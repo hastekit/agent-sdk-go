@@ -8,7 +8,8 @@ import (
 )
 
 type HTTPConfig struct {
-	// Scheduler optionally exposes GET /routines/{id}/status.
+	// Scheduler optionally exposes status and POST /routines/{id}/run.
+	// Run must be active in this process to accept manual runs.
 	Scheduler Scheduler
 	// Resolve the authenticated tenant. Empty/nil uses default (single tenant).
 	NamespaceResolver func(*http.Request) (string, error)
@@ -16,7 +17,9 @@ type HTTPConfig struct {
 }
 
 // NewHTTPHandler exposes /routines and /routines/{id}, plus POST
-// /routines/{id}/pause and /resume, and GET /routines/agents. Mount behind the
+// /routines/{id}/pause and /resume, and GET /routines/agents. With a scheduler,
+// POST /routines/{id}/run durably queues a manual run and returns 202 with its ID.
+// The scheduler must be running in this process. Mount behind the
 // application's authentication middleware. A namespace is not authentication.
 func NewHTTPHandler(service *Service, config HTTPConfig) http.Handler {
 	if config.MaxBodyBytes <= 0 {
@@ -71,6 +74,14 @@ func NewHTTPHandler(service *Service, config HTTPConfig) http.Handler {
 		respond(w, 201, v, err)
 	}))
 	if config.Scheduler != nil {
+		mux.HandleFunc("POST /routines/{id}/run", wrap(func(w http.ResponseWriter, r *http.Request, ns string) {
+			if _, err := service.Get(r.Context(), ns, r.PathValue("id")); err != nil {
+				respond(w, 202, nil, err)
+				return
+			}
+			run, err := config.Scheduler.RunNow(r.Context(), ns, r.PathValue("id"))
+			respond(w, http.StatusAccepted, run, err)
+		}))
 		mux.HandleFunc("GET /routines/{id}/status", wrap(func(w http.ResponseWriter, r *http.Request, ns string) {
 			if _, err := service.Get(r.Context(), ns, r.PathValue("id")); err != nil {
 				respond(w, 200, nil, err)
@@ -117,6 +128,9 @@ func respond(w http.ResponseWriter, status int, v any, err error) {
 		status = 500
 		message := "routines storage unavailable"
 		switch {
+		case errors.Is(err, ErrSchedulerNotRunning):
+			status = 503
+			message = err.Error()
 		case errors.Is(err, ErrNotFound):
 			status = 404
 			message = err.Error()

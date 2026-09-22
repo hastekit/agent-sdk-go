@@ -14,6 +14,9 @@ import (
 // ErrSchedulerOwned means another scheduler already owns the state backend.
 var ErrSchedulerOwned = errors.New("scheduler backend is owned by another scheduler")
 
+// ErrSchedulerNotRunning means this scheduler cannot accept manual runs.
+var ErrSchedulerNotRunning = errors.New("scheduler is not running in this process")
+
 // ErrSchedulerLeaseLost means a scheduler no longer owns the state backend.
 var ErrSchedulerLeaseLost = errors.New("scheduler backend ownership lost")
 
@@ -24,6 +27,8 @@ var ErrSchedulerLeaseLost = errors.New("scheduler backend ownership lost")
 type Scheduler interface {
 	Run(context.Context) error
 	Status(context.Context, string, string) (RoutineState, error)
+	// RunNow queues an enabled routine without changing its scheduled occurrence.
+	RunNow(context.Context, string, string) (Run, error)
 }
 
 type SchedulerConfig struct {
@@ -54,6 +59,7 @@ func (c SchedulerConfig) defaults() SchedulerConfig {
 }
 
 type Run struct {
+	Manual      bool       `json:"manual,omitempty"`
 	ID          string     `json:"id"`
 	AgentRunID  string     `json:"agent_run_id"`
 	ScheduledAt time.Time  `json:"scheduled_at"`
@@ -122,10 +128,23 @@ type stateBackend interface {
 	Due(context.Context, time.Time) ([]string, error)
 }
 
+type manualRequest struct {
+	ctx    context.Context
+	ns, id string
+	reply  chan manualResult
+}
+type manualResult struct {
+	run Run
+	err error
+}
+
 type schedulerEngine struct {
-	service *Service
-	config  SchedulerConfig
-	backend stateBackend
+	manualMu sync.RWMutex
+	manual   chan manualRequest
+	stopped  chan struct{}
+	service  *Service
+	config   SchedulerConfig
+	backend  stateBackend
 }
 
 func (e *schedulerEngine) status(ctx context.Context, ns, id string) (RoutineState, error) {
@@ -138,6 +157,33 @@ func (e *schedulerEngine) status(ctx context.Context, ns, id string) (RoutineSta
 		return RoutineState{}, ErrNotFound
 	}
 	return copyState(r.State), nil
+}
+
+// runNow hands the write to the active scheduler so it is serialized with
+// dispatch and completion, and committed before the caller receives acceptance.
+func (e *schedulerEngine) runNow(ctx context.Context, ns, id string) (Run, error) {
+	e.manualMu.RLock()
+	requests, stopped := e.manual, e.stopped
+	e.manualMu.RUnlock()
+	if requests == nil {
+		return Run{}, ErrSchedulerNotRunning
+	}
+	req := manualRequest{ctx: ctx, ns: namespace(ns), id: id, reply: make(chan manualResult, 1)}
+	select {
+	case requests <- req:
+	case <-stopped:
+		return Run{}, ErrSchedulerNotRunning
+	case <-ctx.Done():
+		return Run{}, ctx.Err()
+	}
+	select {
+	case result := <-req.reply:
+		return result.run, result.err
+	case <-stopped:
+		return Run{}, ErrSchedulerNotRunning
+	case <-ctx.Done():
+		return Run{}, ctx.Err()
+	}
 }
 
 // run is shared by local and Redis. Every state transition commits to the
@@ -266,12 +312,66 @@ func (e *schedulerEngine) run(ctx context.Context) error {
 	if err := tick(); err != nil {
 		return err
 	}
+	requests := make(chan manualRequest)
+	stopped := make(chan struct{})
+	e.manualMu.Lock()
+	e.manual, e.stopped = requests, stopped
+	e.manualMu.Unlock()
+	defer func() {
+		e.manualMu.Lock()
+		e.manual = nil
+		close(stopped)
+		e.manualMu.Unlock()
+	}()
+	enqueue := func(req manualRequest) (Run, error) {
+		if err := req.ctx.Err(); err != nil {
+			return Run{}, err
+		}
+		definition, err := e.service.Get(req.ctx, req.ns, req.id)
+		if err != nil {
+			return Run{}, err
+		}
+		if !definition.Enabled {
+			return Run{}, fmt.Errorf("%w: resume the routine before running it", ErrConflict)
+		}
+		k := key(req.ns, req.id)
+		r, ok := rows[k]
+		if active[k] != nil || (ok && r.State.Pending != nil) {
+			return Run{}, fmt.Errorf("%w: routine already has a pending run", ErrConflict)
+		}
+		if !ok || r.Routine.Version != definition.Version {
+			r, err = newScheduled(definition, time.Now().UTC())
+			if err != nil {
+				return Run{}, err
+			}
+		}
+		if r.State.Paused {
+			return Run{}, fmt.Errorf("%w: routine is waiting for input", ErrConflict)
+		}
+		now := time.Now().UTC()
+		run := Run{ID: uuid.NewString(), Manual: true, ScheduledAt: now, RetryAt: now, Status: "queued"}
+		r.State = copyState(r.State)
+		r.State.Pending = &run
+		if err := e.backend.Save(ctx, k, r); err != nil {
+			return Run{}, err
+		}
+		rows[k] = r
+		return run, nil
+	}
 	timer := time.NewTicker(e.config.PollInterval)
 	defer timer.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case req := <-requests:
+			run, err := enqueue(req)
+			req.reply <- manualResult{run, err}
+			if err == nil {
+				if err := dispatch(); err != nil {
+					return err
+				}
+			}
 		case c := <-done:
 			delete(active, c.k)
 			if ctx.Err() != nil {
@@ -335,6 +435,12 @@ func finishAttempt(r scheduledRoutine, err error, now time.Time, c SchedulerConf
 	}
 	r.State.LastRun = run
 	r.State.Pending = nil
+	if run.Manual {
+		if errors.Is(err, ErrPaused) {
+			run.Status = "paused"
+		}
+		return r, nil
+	}
 	r.State.NextRunAt = time.Time{}
 	if errors.Is(err, ErrPaused) {
 		run.Status = "paused"
@@ -395,3 +501,7 @@ func (s *LocalScheduler) Status(ctx context.Context, ns, id string) (RoutineStat
 }
 
 var _ Scheduler = (*LocalScheduler)(nil)
+
+func (s *LocalScheduler) RunNow(ctx context.Context, ns, id string) (Run, error) {
+	return s.engine.runNow(ctx, ns, id)
+}

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { createRoutine, fetchRoutineAgents, fetchRoutines, setRoutineEnabled, type Routine } from "./api";
+import { createRoutine, runRoutineNow, fetchRoutineAgents, fetchRoutines, setRoutineEnabled, type Routine } from "./api";
 
 export function RoutineLibrary({ initialAgent, onClose, onChanged }: { initialAgent: string; onClose: () => void; onChanged: () => void }) {
   const dialog = useRef<HTMLDialogElement>(null);
@@ -87,8 +87,29 @@ export function RoutineLibrary({ initialAgent, onClose, onChanged }: { initialAg
       {loading ? <p role="status">Loading routines…</p> : !routines.length && <p>No routines yet.</p>}
       {routines.map(routine => <article key={routine.id}>
         <div className="skill-summary"><strong>{routine.name}</strong><p>{routine.instruction}</p><small>{routine.agent} · {routine.schedule.at ? new Date(routine.schedule.at).toLocaleString() : `${routine.schedule.cron} (${routine.schedule.timezone || "UTC"})`} · {routine.enabled ? "Enabled" : "Paused"}</small></div>
+        <RunRoutineButton routine={routine} />
         <button disabled={busy || loading} onClick={() => void toggle(routine)} aria-label={`${routine.enabled ? "Pause" : "Resume"} ${routine.name}`}>{routine.enabled ? "Pause" : "Resume"}</button>
       </article>)}
     </section>
   </dialog>;
+}
+
+export function RunRoutineButton({ routine }: { routine: Routine }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [queued, setQueued] = useState(false);
+  async function run() {
+    if (busy) return;
+    setBusy(true); setError(""); setQueued(false);
+    try { await runRoutineNow(routine.id); setQueued(true); }
+    catch (err) { setError(String(err)); }
+    finally { setBusy(false); }
+  }
+  return <div className="routine-run-action">
+    <button type="button" disabled={busy || !routine.enabled} onClick={() => void run()}
+      title={!routine.enabled ? "Resume this routine to run it" : "Run now without changing the schedule"}
+      aria-label={`Run ${routine.name} now`}>{busy ? "Queuing…" : "Run now"}</button>
+    {queued && <small role="status">Run queued.</small>}
+    {error && <small role="alert" className="error">{error}</small>}
+  </div>;
 }
