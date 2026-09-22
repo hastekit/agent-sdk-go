@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
 	restate "github.com/restatedev/sdk-go"
@@ -64,6 +65,7 @@ func NewRestateToolExecutor(restateCtx restate.WorkflowContext) *RestateToolExec
 func (e *RestateToolExecutor) ExecuteAll(ctx context.Context, executions []agents.ExecutableToolCall) []agents.ToolExecutionResult {
 	results := make([]agents.ToolExecutionResult, len(executions))
 
+	updates := map[string]string{}
 	stopped := false
 	for i, exec := range executions {
 		if stopped {
@@ -71,9 +73,22 @@ func (e *RestateToolExecutor) ExecuteAll(ctx context.Context, executions []agent
 			continue
 		}
 
+		if exec.ToolCall != nil {
+			call := *exec.ToolCall
+			call.State = maps.Clone(call.State)
+			if call.State == nil {
+				call.State = map[string]string{}
+			}
+			maps.Copy(call.State, updates)
+			exec.ToolCall = &call
+		}
+
 		resp, err := agents.ExecuteToolWithMiddleware(ctx, nil, exec, exec.Tool.Execute)
 		if wasAborted(err) {
 			err = fmt.Errorf("%w: %w", agents.ErrToolCallAborted, err)
+		}
+		if err == nil && resp != nil {
+			maps.Copy(updates, resp.StateUpdates)
 		}
 		results[i] = agents.ToolExecutionResult{
 			Response:  resp,
@@ -82,8 +97,6 @@ func (e *RestateToolExecutor) ExecuteAll(ctx context.Context, executions []agent
 		}
 		stopped = results[i].Cancelled
 	}
-
-	// TODO: parallelize restate tool execution.
 
 	return results
 }

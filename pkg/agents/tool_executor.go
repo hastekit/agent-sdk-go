@@ -3,6 +3,7 @@ package agents
 import (
 	"context"
 	"errors"
+	"maps"
 	"time"
 )
 
@@ -34,8 +35,9 @@ type ToolExecutionResult struct {
 	Cancelled bool
 }
 
-// ToolExecutor executes tool calls, potentially in parallel.
-// Implementations must return results in the same order as the input executions.
+// ToolExecutor executes tool calls sequentially in input order.
+// Implementations must return results in the same order and merge each successful
+// response's StateUpdates into the next call's State snapshot.
 type ToolExecutor interface {
 	ExecuteAll(ctx context.Context, executions []ExecutableToolCall) []ToolExecutionResult
 }
@@ -67,7 +69,7 @@ type BrokerAwareToolExecutor interface {
 	WithStreamBroker(broker StreamBroker) ToolExecutor
 }
 
-// DefaultToolExecutor executes tools in parallel using goroutines.
+// DefaultToolExecutor executes tool calls sequentially.
 type DefaultToolExecutor struct {
 	// StopWatcher is how this executor learns the run was stopped.
 	// NewAgent fills it in from the broker; set it directly to override.
@@ -114,34 +116,35 @@ func (e *DefaultToolExecutor) WithStreamBroker(broker StreamBroker) ToolExecutor
 	return &bound
 }
 
-// ExecuteAll runs calls in parallel, with stop middleware outside user middleware.
+// ExecuteAll runs calls sequentially, with stop middleware outside user middleware.
 func (e *DefaultToolExecutor) ExecuteAll(ctx context.Context, executions []ExecutableToolCall) []ToolExecutionResult {
 	results := make([]ToolExecutionResult, len(executions))
 	middlewares := append([]ToolCallMiddleware{StopMiddleware{Watcher: e.StopWatcher, CancelGracePeriod: e.CancelGracePeriod}}, e.Middlewares...)
-
-	// Per-call buffered channels rather than a shared slice: an abandoned
-	// goroutine's eventual result lands in a buffer nobody reads, never in
-	// memory already handed back to the caller.
-	reports := make([]chan ToolExecutionResult, len(executions))
-	for i, exec := range executions {
-		report := make(chan ToolExecutionResult, 1)
-		reports[i] = report
-
-		go func(ex ExecutableToolCall) {
-			resp, err := ExecuteWithTrace(ctx, ex.Tool, ex.ToolCall, func(ctx context.Context, call *ToolCall) (*ToolCallResponse, error) {
-				return ExecuteToolWithMiddleware(ctx, middlewares, ex, ex.Tool.Execute)
-			})
-			report <- ToolExecutionResult{
-				Response:  resp,
-				Err:       err,
-				Cancelled: errors.Is(err, ErrToolCancelled),
+	updates := map[string]string{}
+	stopped := false
+	for i, ex := range executions {
+		if stopped {
+			results[i] = ToolExecutionResult{Err: ErrToolCancelled, Cancelled: true}
+			continue
+		}
+		if ex.ToolCall != nil {
+			call := *ex.ToolCall
+			call.State = maps.Clone(call.State)
+			if call.State == nil {
+				call.State = map[string]string{}
 			}
-		}(exec)
-	}
+			maps.Copy(call.State, updates)
+			ex.ToolCall = &call
+		}
 
-	for i, report := range reports {
-		results[i] = <-report
+		resp, err := ExecuteWithTrace(ctx, ex.Tool, ex.ToolCall, func(ctx context.Context, call *ToolCall) (*ToolCallResponse, error) {
+			return ExecuteToolWithMiddleware(ctx, middlewares, ex, ex.Tool.Execute)
+		})
+		if err == nil && resp != nil {
+			maps.Copy(updates, resp.StateUpdates)
+		}
+		results[i] = ToolExecutionResult{Response: resp, Err: err, Cancelled: errors.Is(err, ErrToolCancelled)}
+		stopped = results[i].Cancelled
 	}
-
 	return results
 }

@@ -2,6 +2,10 @@ package tools
 
 import (
 	"context"
+	"fmt"
+	"io"
+	"strings"
+	"unicode/utf8"
 
 	"github.com/bytedance/sonic"
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
@@ -11,53 +15,17 @@ import (
 )
 
 type sandboxHelper struct {
-	sandboxManager sandbox.Manager
-	image          string
-	env            map[string]string
+	provider sandbox.Provider
+	profile  string
+	env      map[string]string
 }
 
-func (t *sandboxHelper) getClient(ctx context.Context, params *agents.ToolCall) (*sandbox.DaemonClient, string, error) {
+func (t *sandboxHelper) getClient(ctx context.Context, params *agents.ToolCall) (sandbox.Sandbox, map[string]string, error) {
 	env := map[string]string{}
 	for k, v := range t.env {
 		env[k] = utils.TryAndParseAsTemplate(v, params.RunContext)
 	}
-
-	sb, err := t.sandboxManager.CreateSandbox(ctx, &sandbox.CreateSandboxRequest{
-		SessionID: params.SessionID,
-		Image:     t.image,
-		AgentName: params.AgentName,
-		Namespace: params.Namespace,
-		Env:       env,
-	})
-	if err != nil {
-		return nil, "", err
-	}
-
-	// Restore the working directory from state.
-	workdir, ok := params.State[t.getSandboxCwdStateKey()]
-	if !ok || workdir == "" {
-		workdir = "/"
-	}
-
-	// Create a sandbox daemon client
-	cli := sandbox.NewDaemonClient(sb)
-
-	return cli, workdir, nil
-}
-
-func (t *sandboxHelper) getSandboxCwdStateKey() string {
-	return "sandbox_cwd"
-}
-
-func (t *sandboxHelper) getStateUpdates(cwd string) map[string]string {
-	// Propagate the new cwd back via state so later tool calls
-	// (and durable workflow replays) start from the correct directory.
-	var subAgentCtx map[string]string
-	if cwd != "" {
-		subAgentCtx = map[string]string{t.getSandboxCwdStateKey(): cwd}
-	}
-
-	return subAgentCtx
+	return sandbox.Acquire(ctx, t.provider, params.State, sandbox.CreateRequest{Profile: t.profile, Env: env, AgentName: params.AgentName, Session: sandbox.SessionKey{Namespace: params.Namespace, SessionID: params.SessionID}})
 }
 
 type BashTool struct {
@@ -66,10 +34,11 @@ type BashTool struct {
 }
 
 type BashToolInput struct {
-	Code string `json:"code"`
+	Code    string `json:"code"`
+	Workdir string `json:"workdir,omitempty"`
 }
 
-func NewBashTool(svc sandbox.Manager, image string, env map[string]string) *BashTool {
+func NewBashTool(svc sandbox.Provider, profile string, env map[string]string) *BashTool {
 	return &BashTool{
 		BaseTool: &agents.BaseTool{
 			ToolUnion: responses.ToolUnion{
@@ -79,6 +48,7 @@ func NewBashTool(svc sandbox.Manager, image string, env map[string]string) *Bash
 					Parameters: map[string]any{
 						"type": "object",
 						"properties": map[string]any{
+							"workdir": map[string]any{"type": "string", "description": "Working directory for this call. Defaults to the sandbox workspace. Directory changes do not persist between calls."},
 							"code": map[string]any{
 								"type":        "string",
 								"description": "bash command to be executed",
@@ -91,9 +61,9 @@ func NewBashTool(svc sandbox.Manager, image string, env map[string]string) *Bash
 			RequiresApproval: false,
 		},
 		sandboxHelper: &sandboxHelper{
-			sandboxManager: svc,
-			image:          image,
-			env:            env,
+			provider: svc,
+			profile:  profile,
+			env:      env,
 		},
 	}
 }
@@ -105,28 +75,21 @@ func (t *BashTool) Execute(ctx context.Context, params *agents.ToolCall) (*agent
 		return nil, err
 	}
 
-	cli, workdir, err := t.sandboxHelper.getClient(ctx, params)
+	cli, updates, err := t.sandboxHelper.getClient(ctx, params)
 	if err != nil {
 		return nil, err
 	}
 
-	// Run bash command
-	res, err := cli.RunBashCommand(ctx, &sandbox.BashExecRequest{
-		Command:        in.Code,
-		Args:           nil,
-		Script:         "",
-		TimeoutSeconds: 0,
-		Workdir:        workdir,
-		Env:            nil,
-	})
+	res, err := cli.Exec(ctx, sandbox.ExecRequest{Argv: []string{"bash", "-c", in.Code}, Workdir: in.Workdir})
 	if err != nil {
-		return nil, err
+		return sandboxToolError(ctx, params, updates, err)
 	}
 
 	// Serialize the output
 	txt, _ := sonic.Marshal(res)
 
 	return &agents.ToolCallResponse{
+		StateUpdates: updates,
 		FunctionCallOutputMessage: &responses.FunctionCallOutputMessage{
 			ID:     params.ID,
 			CallID: params.CallID,
@@ -134,7 +97,6 @@ func (t *BashTool) Execute(ctx context.Context, params *agents.ToolCall) (*agent
 				OfString: utils.Ptr(string(txt)),
 			},
 		},
-		StateUpdates: t.sandboxHelper.getStateUpdates(res.Cwd),
 	}, nil
 }
 
@@ -147,7 +109,13 @@ type ReadFileToolInput struct {
 	FilePath string `json:"file_path"`
 }
 
-func NewReadFileTool(svc sandbox.Manager, image string, env map[string]string) *ReadFileTool {
+// ReadFileToolOutput is the text tool response, separate from binary file transport.
+type ReadFileToolOutput struct {
+	Path    string `json:"path"`
+	Content string `json:"content"`
+}
+
+func NewReadFileTool(svc sandbox.Provider, profile string, env map[string]string) *ReadFileTool {
 	return &ReadFileTool{
 		BaseTool: &agents.BaseTool{
 			ToolUnion: responses.ToolUnion{
@@ -168,9 +136,9 @@ func NewReadFileTool(svc sandbox.Manager, image string, env map[string]string) *
 			},
 		},
 		sandboxHelper: &sandboxHelper{
-			sandboxManager: svc,
-			image:          image,
-			env:            env,
+			provider: svc,
+			profile:  profile,
+			env:      env,
 		},
 	}
 }
@@ -182,21 +150,35 @@ func (t *ReadFileTool) Execute(ctx context.Context, params *agents.ToolCall) (*a
 		return nil, err
 	}
 
-	cli, _, err := t.sandboxHelper.getClient(ctx, params)
+	cli, updates, err := t.sandboxHelper.getClient(ctx, params)
 	if err != nil {
 		return nil, err
 	}
 
-	// Run bash command
-	res, err := cli.ReadFile(ctx, in.FilePath)
+	// Read through the provider's native file API.
+	reader, err := cli.Files().Read(ctx, in.FilePath)
 	if err != nil {
-		return nil, err
+		return sandboxToolError(ctx, params, updates, err)
 	}
+
+	defer reader.Close()
+	data, err := io.ReadAll(io.LimitReader(reader, (4<<20)+1))
+	if err != nil {
+		return sandboxToolError(ctx, params, updates, err)
+	}
+	if len(data) > 4<<20 {
+		return sandboxToolError(ctx, params, updates, fmt.Errorf("file exceeds 4 MiB text tool limit; inspect it with shell commands"))
+	}
+	if !utf8.Valid(data) {
+		return sandboxToolError(ctx, params, updates, fmt.Errorf("file is binary; inspect it with shell commands"))
+	}
+	res := ReadFileToolOutput{Path: in.FilePath, Content: string(data)}
 
 	// Serialize the output
 	txt, _ := sonic.Marshal(res)
 
 	return &agents.ToolCallResponse{
+		StateUpdates: updates,
 		FunctionCallOutputMessage: &responses.FunctionCallOutputMessage{
 			ID:     params.ID,
 			CallID: params.CallID,
@@ -216,7 +198,7 @@ type DeleteFileToolInput struct {
 	FilePath string `json:"file_path"`
 }
 
-func NewDeleteFileTool(svc sandbox.Manager, image string, env map[string]string) *DeleteFileTool {
+func NewDeleteFileTool(svc sandbox.Provider, profile string, env map[string]string) *DeleteFileTool {
 	return &DeleteFileTool{
 		BaseTool: &agents.BaseTool{
 			ToolUnion: responses.ToolUnion{
@@ -237,9 +219,9 @@ func NewDeleteFileTool(svc sandbox.Manager, image string, env map[string]string)
 			},
 		},
 		sandboxHelper: &sandboxHelper{
-			sandboxManager: svc,
-			image:          image,
-			env:            env,
+			provider: svc,
+			profile:  profile,
+			env:      env,
 		},
 	}
 }
@@ -251,18 +233,19 @@ func (t *DeleteFileTool) Execute(ctx context.Context, params *agents.ToolCall) (
 		return nil, err
 	}
 
-	cli, _, err := t.sandboxHelper.getClient(ctx, params)
+	cli, updates, err := t.sandboxHelper.getClient(ctx, params)
 	if err != nil {
 		return nil, err
 	}
 
-	// Run bash command
-	err = cli.DeleteFile(ctx, in.FilePath)
+	// Remove through the provider's native file API.
+	err = cli.Files().Remove(ctx, in.FilePath)
 	if err != nil {
-		return nil, err
+		return sandboxToolError(ctx, params, updates, err)
 	}
 
 	return &agents.ToolCallResponse{
+		StateUpdates: updates,
 		FunctionCallOutputMessage: &responses.FunctionCallOutputMessage{
 			ID:     params.ID,
 			CallID: params.CallID,
@@ -283,7 +266,7 @@ type WriteFileToolInput struct {
 	Content  string `json:"content"`
 }
 
-func NewWriteFileTool(svc sandbox.Manager, image string, env map[string]string) *WriteFileTool {
+func NewWriteFileTool(svc sandbox.Provider, profile string, env map[string]string) *WriteFileTool {
 	return &WriteFileTool{
 		BaseTool: &agents.BaseTool{
 			ToolUnion: responses.ToolUnion{
@@ -308,9 +291,9 @@ func NewWriteFileTool(svc sandbox.Manager, image string, env map[string]string) 
 			},
 		},
 		sandboxHelper: &sandboxHelper{
-			sandboxManager: svc,
-			image:          image,
-			env:            env,
+			provider: svc,
+			profile:  profile,
+			env:      env,
 		},
 	}
 }
@@ -322,24 +305,36 @@ func (t *WriteFileTool) Execute(ctx context.Context, params *agents.ToolCall) (*
 		return nil, err
 	}
 
-	cli, _, err := t.sandboxHelper.getClient(ctx, params)
+	cli, updates, err := t.sandboxHelper.getClient(ctx, params)
 	if err != nil {
 		return nil, err
 	}
 
-	// Run bash command
-	resp, err := cli.WriteFile(ctx, in.FilePath, in.Content)
+	// Write through the provider's native file API.
+	err = cli.Files().Write(ctx, in.FilePath, strings.NewReader(in.Content))
 	if err != nil {
-		return nil, err
+		return sandboxToolError(ctx, params, updates, err)
 	}
 
 	return &agents.ToolCallResponse{
+		StateUpdates: updates,
 		FunctionCallOutputMessage: &responses.FunctionCallOutputMessage{
 			ID:     params.ID,
 			CallID: params.CallID,
 			Output: responses.FunctionCallOutputContentUnion{
-				OfString: utils.Ptr("Written successfully to " + resp.Path),
+				OfString: utils.Ptr("Written successfully to " + in.FilePath),
 			},
 		},
 	}, nil
+}
+
+// Operation failures are tool results so a successfully provisioned reference
+// survives the failure and durable runtimes do not retry the whole creation.
+func sandboxToolError(ctx context.Context, call *agents.ToolCall, updates map[string]string, err error) (*agents.ToolCallResponse, error) {
+	if ctx.Err() != nil {
+		return nil, err
+	}
+	result := agents.ToolCallResult(call, fmt.Sprintf("Tool execution failed: %v", err))
+	result.StateUpdates = updates
+	return result, nil
 }

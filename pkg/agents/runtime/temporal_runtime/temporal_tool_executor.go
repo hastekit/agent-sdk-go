@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
 	"go.temporal.io/sdk/temporal"
@@ -73,6 +74,7 @@ func NewTemporalToolExecutor(workflowCtx workflow.Context) *TemporalToolExecutor
 func (e *TemporalToolExecutor) ExecuteAll(ctx context.Context, executions []agents.ExecutableToolCall) []agents.ToolExecutionResult {
 	results := make([]agents.ToolExecutionResult, len(executions))
 
+	updates := map[string]string{}
 	stopped := false
 	for i, exec := range executions {
 		if stopped {
@@ -80,9 +82,22 @@ func (e *TemporalToolExecutor) ExecuteAll(ctx context.Context, executions []agen
 			continue
 		}
 
+		if exec.ToolCall != nil {
+			call := *exec.ToolCall
+			call.State = maps.Clone(call.State)
+			if call.State == nil {
+				call.State = map[string]string{}
+			}
+			maps.Copy(call.State, updates)
+			exec.ToolCall = &call
+		}
+
 		resp, err := agents.ExecuteToolWithMiddleware(ctx, nil, exec, exec.Tool.Execute)
 		if WasAborted(err) {
 			err = fmt.Errorf("%w: %w", agents.ErrToolCallAborted, err)
+		}
+		if err == nil && resp != nil {
+			maps.Copy(updates, resp.StateUpdates)
 		}
 		results[i] = agents.ToolExecutionResult{
 			Response:  resp,
@@ -91,8 +106,6 @@ func (e *TemporalToolExecutor) ExecuteAll(ctx context.Context, executions []agen
 		}
 		stopped = results[i].Cancelled
 	}
-
-	// TODO: Parallelize temporal tool execution.
 
 	return results
 }
