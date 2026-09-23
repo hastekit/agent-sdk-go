@@ -5,6 +5,25 @@ The SDK owns the daemon at `cmd/sandbox-daemon` and its reusable server package 
 Git, jq, CA certificates, and tini. It serves the SDK's existing `/health`,
 `/v2/exec`, and `/v2/files` protocol, used by the Docker and Kubernetes providers.
 
+Python packages are preinstalled for common agent tasks:
+
+| Task | Libraries |
+| --- | --- |
+| Data analysis | NumPy, pandas |
+| Plots and image processing | Matplotlib, seaborn, Pillow |
+| HTTP requests and HTML parsing | requests, HTTPX, Beautiful Soup, lxml |
+| YAML configuration | PyYAML |
+| Excel files | openpyxl, XlsxWriter |
+| PDF reading and generation | pypdf, ReportLab |
+| Word and PowerPoint files | python-docx, python-pptx |
+
+Matplotlib defaults to the headless `Agg` backend so plots can be saved without
+a display server. Direct dependencies are listed in `requirements.in`; exact
+versions, including transitive dependencies, are pinned in `requirements.txt`.
+Resolve updates under Python 3.11 and validate both supported architectures.
+The image build requires binary wheels, runs `pip check`, and imports every
+listed library to catch incompatible dependencies before publishing.
+
 ## Build and run
 
 From the SDK repository root:

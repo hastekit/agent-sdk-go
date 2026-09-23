@@ -1,0 +1,23 @@
+# Data analysis
+numpy
+pandas
+
+# Headless plotting and images
+matplotlib
+seaborn
+Pillow
+
+# HTTP, HTML, and configuration files
+requests
+httpx
+beautifulsoup4
+lxml
+PyYAML
+
+# Spreadsheets, PDFs, Word documents, and presentations
+openpyxl
+XlsxWriter
+pypdf
+python-docx
+python-pptx
+reportlab
