@@ -36,34 +36,33 @@ applications can call `daemon.Run(ctx, daemon.Config{...})` directly. A zero
 
 ## Releases
 
-The `Sandbox image` workflow builds Linux amd64 and arm64 images on published
-GitHub releases and pushes the same build to both
-`ghcr.io/hastekit/sandbox:<release-tag>` and
-`docker.io/hastekit/sandbox:<release-tag>`. Stable releases
-also update `latest`; prereleases only publish their release tag. Pull requests
+The `Sandbox image` workflow builds Linux amd64 and arm64 images on `v*` tag
+pushes and published GitHub releases, pushing the same build to both
+`ghcr.io/<repository-owner>/sandbox-base:<tag>` and
+`docker.io/<DOCKER_USERNAME>/sandbox-base:<tag>`. Publishing a stable release
+also updates `latest`; tag pushes and prereleases only publish their version tag. Pull requests
 validate image builds without publishing or registry login. GHCR uses
 `GITHUB_TOKEN` with `packages: write`.
 
 Configure these GitHub Actions repository secrets for Docker Hub:
 
-- `DOCKERHUB_USERNAME`: the Docker Hub account used to publish.
-- `DOCKERHUB_TOKEN`: an access token with write access to the image repository.
+- `DOCKER_USERNAME`: the Docker Hub account used to publish.
+- `DOCKER_TOKEN`: an access token with write access to the image repository.
 
-The Docker Hub image defaults to `hastekit/sandbox`. Set the repository variable
-`DOCKERHUB_IMAGE` to another `namespace/repository` if needed. Create that public
-repository on Docker Hub and give the publishing account write access before
-releasing. Docker Hub publishing is required for releases; missing credentials
+Create the public `sandbox-base` repository under that Docker Hub account before
+pushing a tag or publishing a release. Docker Hub publishing is required for both events; missing credentials
 fail the workflow instead of silently skipping it.
 
-The workflow must be merged before publishing a release. After the first push,
+The tagged commit must contain the workflow. Publishing a release for an already
+pushed tag triggers another build and push. After the first push,
 set the GHCR package visibility to **public** to allow anonymous pulls. No image
 is published merely by adding this workflow.
 
 ## Use directly or extend
 
 Set the Docker provider's `container.Config.Image` or the Kubernetes profile's
-container image to `ghcr.io/hastekit/sandbox:<release-tag>` or
-`hastekit/sandbox:<release-tag>` (Docker Hub). Both providers already
+container image to `ghcr.io/hastekit/sandbox-base:<tag>` or
+`<DOCKER_USERNAME>/sandbox-base:<tag>` (Docker Hub). Both providers already
 default to the `sandbox-daemon` executable on PATH, workspace `/workspace`, and
 port 8080. For a locally built Docker image, use `hastekit-sandbox:dev` with
 `docker.PullNever`.
@@ -71,7 +70,7 @@ port 8080. For a locally built Docker image, use `hastekit-sandbox:dev` with
 Custom images inherit the daemon and can install their own dependencies:
 
 ```dockerfile
-ARG SANDBOX_BASE_IMAGE=ghcr.io/hastekit/sandbox:latest
+ARG SANDBOX_BASE_IMAGE=ghcr.io/hastekit/sandbox-base:latest
 FROM ${SANDBOX_BASE_IMAGE}
 RUN pip install --no-cache-dir pandas pypdf
 COPY skills/ /skills/
