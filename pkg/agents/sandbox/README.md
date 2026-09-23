@@ -21,7 +21,7 @@ Middleware and approval run before the tool can provision compute.
 
 ## Usage
 
-Pass a backend or gateway HTTP provider directly to tools:
+Pass an in-process backend directly to tools:
 
 ```go
 bash := tools.NewBashTool(provider, "analysis", nil)
@@ -58,8 +58,29 @@ The configured image/template must provide Bash. FileSystem accepts binary reade
 and streams; for example, `sb.Files().Write(ctx, "uploads/report.pdf", reader)`.
 
 Provider imports are under `github.com/hastekit/agent-sdk-go/pkg/agents/sandbox/providers`.
-E2B profiles select a template, Daytona profiles select a snapshot, and gateway
-Docker/Kubernetes profiles select images. Changing providers does not change tools.
+E2B profiles select a template, Daytona profiles select a snapshot, and SDK
+Docker/Kubernetes profiles configure native containers and pods. Changing providers
+does not change tools.
+
+Standalone SDK implementations:
+
+- [`providers/docker`](providers/docker/README.md): official Docker Engine client,
+  configurable mounts/networks/resources, image pulling and daemon port routing.
+- [`providers/k8s`](providers/k8s/README.md): client-go, native pod templates,
+  application-managed PVC mounts and configurable daemon routing.
+
+Both accept injected clients and session-specific configuration callbacks. They
+require an image serving the daemon protocol and do not depend on gateway paths
+or service configuration. Docker references retain immutable container IDs;
+Kubernetes references retain namespace, pod name and UID.
+
+## Gateway integration
+
+The gateway HTTP client and routes live in `pkg/hastekitgateway`, not in the
+sandbox package. `hastekitgateway.Config.NewSandboxClient()` returns its
+gateway-specific `SandboxClient`, which also implements `sandbox.Provider`.
+The gateway server mounts `hastekitgateway.NewSandboxHandler`. Custom backends
+implement `sandbox.Provider` in process; there is no generic HTTP provider API.
 
 ## Gateway configuration
 

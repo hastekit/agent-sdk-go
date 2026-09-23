@@ -6,8 +6,6 @@ import (
 	"errors"
 	"io"
 	"maps"
-	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -47,22 +45,14 @@ func (p *stateProvider) Connect(_ context.Context, ref Reference) (Sandbox, erro
 }
 func (p *stateProvider) Delete(context.Context, Reference) error { p.runtime = nil; return nil }
 
-type handlerTransport struct{ handler http.Handler }
-
-func (t handlerTransport) RoundTrip(r *http.Request) (*http.Response, error) {
-	w := httptest.NewRecorder()
-	t.handler.ServeHTTP(w, r)
-	return w.Result(), nil
-}
-
-func TestConversationStateAndStatelessGateway(t *testing.T) {
+func TestConversationStateInProcessProvider(t *testing.T) {
 	ctx := context.Background()
 	backend := &stateProvider{}
-	gateway := &HTTPProvider{BaseURL: "http://gateway.test", Client: &http.Client{Transport: handlerTransport{NewProviderHandler(backend)}}}
+	provider := backend
 	key := SessionKey{Namespace: "project", SessionID: "session"}
 	state := map[string]string{}
 	req := CreateRequest{Session: key, Profile: "analysis", Env: map[string]string{"TOKEN": "secret"}}
-	_, updates, err := Acquire(ctx, gateway, state, req)
+	_, updates, err := Acquire(ctx, provider, state, req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,15 +60,14 @@ func TestConversationStateAndStatelessGateway(t *testing.T) {
 	if strings.Contains(state[StateKey], "secret") {
 		t.Fatal("environment credentials persisted")
 	}
-	if _, _, err := Acquire(ctx, gateway, state, req); err != nil {
+	if _, _, err := Acquire(ctx, provider, state, req); err != nil {
 		t.Fatal(err)
 	}
 	if backend.creates != 1 {
 		t.Fatal("duplicate sandbox")
 	}
-	// A fresh gateway/client has no session map to reload.
-	gateway = &HTTPProvider{BaseURL: "http://gateway.test", Client: &http.Client{Transport: handlerTransport{NewProviderHandler(backend)}}}
-	s, _, err := Acquire(ctx, gateway, state, req)
+	// Reuse is driven by the supplied state, not by a provider binding store.
+	s, _, err := Acquire(ctx, provider, state, req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,22 +91,22 @@ func TestConversationStateAndStatelessGateway(t *testing.T) {
 	if err := s.Files().Remove(ctx, "a b.bin"); err != nil {
 		t.Fatal(err)
 	}
-	if err := gateway.Delete(ctx, s.Reference()); err != nil {
+	if err := provider.Delete(ctx, s.Reference()); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := Acquire(ctx, gateway, state, req); !errors.Is(err, ErrNotFound) {
+	if _, _, err := Acquire(ctx, provider, state, req); !errors.Is(err, ErrNotFound) {
 		t.Fatal(err)
 	}
 	if backend.creates != 1 {
 		t.Fatal("missing sandbox replaced")
 	}
 	req.Profile = "different"
-	if _, _, err := Acquire(ctx, gateway, state, req); !errors.Is(err, ErrConflict) {
+	if _, _, err := Acquire(ctx, provider, state, req); !errors.Is(err, ErrConflict) {
 		t.Fatal(err)
 	}
 	// Corrupt authoritative state fails without provisioning.
 	state[StateKey] = "broken"
-	if _, _, err := Acquire(ctx, gateway, state, req); err == nil {
+	if _, _, err := Acquire(ctx, provider, state, req); err == nil {
 		t.Fatal("expected corrupt state")
 	}
 }

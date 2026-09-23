@@ -1,0 +1,12 @@
+# Keep the SDK small when it is used as a build context
+# (e.g. hastekit-ai-gateway's `--build-context sdk=../hastekit-sdk-go`)
+.git
+.idea
+.vscode
+.env
+.env.*
+.pnpm-store
+samples
+**/node_modules
+**/dist
+**/build
