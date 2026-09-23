@@ -77,7 +77,7 @@ func TestStdioTransport_ListsAndCallsTools(t *testing.T) {
 // sees, and the filter written against the server's own names.
 func TestStdioTransport_HonoursPrefixAndFilter(t *testing.T) {
 	ctx := context.Background()
-	client := stdioClient(t, WithToolPrefix("local__"), WithToolFilter("whoami"))
+	client := stdioClient(t, WithToolPrefix("local__"), WithToolFilter(ToolFilter{Include: []string{"whoami"}}))
 
 	tools, err := client.ListTools(ctx, nil)
 	require.NoError(t, err)
@@ -88,7 +88,7 @@ func TestStdioTransport_HonoursPrefixAndFilter(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "child", *res.FunctionCallOutputMessage.Output.OfString)
 
-	filtered := stdioClient(t, WithToolFilter("nothing-by-this-name"))
+	filtered := stdioClient(t, WithToolFilter(ToolFilter{Include: []string{"nothing-by-this-name"}}))
 	tools, err = filtered.ListTools(ctx, nil)
 	require.NoError(t, err)
 	assert.Empty(t, tools)

@@ -33,7 +33,7 @@ func main() {
 		mcpclient.WithHeaders(map[string]string{
 			"token": "your-token",
 		}),
-		mcpclient.WithToolFilter("list_users"),
+		mcpclient.WithToolFilter(mcpclient.ToolFilter{Include: []string{"list_users"}}),
 		mcpclient.WithApprovalRequiredTools("list_users"),
 		mcpclient.WithTransport("sse"),
 	)

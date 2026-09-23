@@ -727,7 +727,7 @@ mcpClient, err := mcpclient.NewClient(
     mcpclient.WithHeaders(map[string]string{
         "Authorization": "Bearer token",
     }),
-    mcpclient.WithToolFilter("list_users", "get_user"), // Optional: filter tools
+    mcpclient.WithToolFilter(mcpclient.ToolFilter{Include: []string{"list_users", "get_user"}}), // Optional: filter tools
 )
 if err != nil {
     log.Fatal(err)
@@ -783,6 +783,15 @@ Metadata is resolved inside the Temporal tool activity or Restate run step,
 using the call's persisted run context. Completed activities/steps replay their
 recorded results; retries resolve the templates again from those inputs. Keep
 authentication and values that determine tool visibility in credentials or headers.
+
+`WithToolFilter` accepts a `ToolFilter` with `Include` and `Exclude` lists.
+An empty `Include` allows all tools; `Exclude` takes precedence when a name
+appears in both lists. Names match exactly against the server's original names,
+before any tool prefix is applied. To expose all tools except specific ones:
+
+```go
+mcpclient.WithToolFilter(mcpclient.ToolFilter{Exclude: []string{"delete_user"}})
+```
 
 #### MCP Servers over stdio
 

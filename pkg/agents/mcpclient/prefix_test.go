@@ -49,7 +49,7 @@ func TestToolPrefixKeepsBothNames(t *testing.T) {
 func TestToolPrefixKeepsUnprefixedOptionsWorking(t *testing.T) {
 	srv := &MCPClient{
 		ToolPrefix:            "xyz__",
-		ToolFilter:            []string{"search", "book"},
+		ToolFilter:            ToolFilter{Include: []string{"search", "book"}},
 		ApprovalRequiredTools: []string{"book"},
 		DeferredTools:         []string{"search"},
 	}
@@ -72,7 +72,7 @@ func TestToolPrefixKeepsUnprefixedOptionsWorking(t *testing.T) {
 // caller is on.
 func TestOptionsWithoutToolPrefix(t *testing.T) {
 	srv := &MCPClient{
-		ToolFilter:            []string{"search", "book"},
+		ToolFilter:            ToolFilter{Include: []string{"search", "book"}},
 		ApprovalRequiredTools: []string{"book"},
 		DeferredTools:         []string{"search"},
 	}

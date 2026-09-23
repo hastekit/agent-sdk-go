@@ -220,7 +220,7 @@ func TestFilterAndPrefixShareOneCacheEntry(t *testing.T) {
 
 	ctx := context.Background()
 	unfiltered := cachingClient(t, url, cache)
-	filtered := cachingClient(t, url, cache, WithToolFilter("nothing-matches"))
+	filtered := cachingClient(t, url, cache, WithToolFilter(ToolFilter{Include: []string{"nothing-matches"}}))
 	prefixed := cachingClient(t, url, cache, WithToolPrefix("xyz__"))
 
 	all, err := unfiltered.ListTools(ctx, nil)

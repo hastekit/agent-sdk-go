@@ -54,7 +54,7 @@ func main() {
 
 		// Written against the server's own names, so the prefix above does not
 		// change what to put here.
-		mcpclient.WithToolFilter("read_file", "list_directory"),
+		mcpclient.WithToolFilter(mcpclient.ToolFilter{Include: []string{"read_file", "list_directory"}}),
 		mcpclient.WithApprovalRequiredTools("read_file"),
 
 		// Environment for the child process, on top of the one this process

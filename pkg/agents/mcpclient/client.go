@@ -23,7 +23,7 @@ type MCPClient struct {
 	Session               *mcp.ClientSession `json:"-"`
 	Tools                 []*mcp.Tool        `json:"-"`
 	Meta                  mcp.Meta           `json:"-"`
-	ToolFilter            []string           `json:"-"`
+	ToolFilter            ToolFilter         `json:"-"`
 	ApprovalRequiredTools []string           `json:"-"`
 	DeferredTools         []string           `json:"-"`
 	ToolPrefix            string             `json:"-"`
@@ -78,7 +78,16 @@ func WithHeaders(headers map[string]string) McpServerOption {
 	}
 }
 
-func WithToolFilter(toolFilter ...string) McpServerOption {
+// ToolFilter selects tools by their original server names, before any prefix
+// is applied. An empty Include allows all tools. Exclude takes precedence over
+// Include. Names are matched exactly.
+type ToolFilter struct {
+	Include []string
+	Exclude []string
+}
+
+// WithToolFilter controls which tools ListTools exposes.
+func WithToolFilter(toolFilter ToolFilter) McpServerOption {
 	return func(srv *MCPClient) {
 		srv.ToolFilter = toolFilter
 	}
@@ -465,13 +474,15 @@ func (srv *MCPClient) fetchToolSchemas(ctx context.Context, conn serverConn) (to
 }
 
 // buildLazyTools converts mcp.Tool schemas into LazyMcpTool instances, applying
-// tool filters, approval flags, and deferred flags. The schemas arrive already
-// carrying the prefix (see fetchToolSchemas), so name is the model-facing name
-// throughout.
+// tool filters, approval flags, and deferred flags against the server's original
+// names before adding the model-facing prefix.
 func (srv *MCPClient) buildLazyTools(tools []*mcp.Tool, meta mcp.Meta, conn serverConn) []agents.Tool {
 	var result []agents.Tool
 	for _, tool := range tools {
-		if len(srv.ToolFilter) > 0 && !slices.Contains(srv.ToolFilter, tool.Name) {
+		if len(srv.ToolFilter.Include) > 0 && !slices.Contains(srv.ToolFilter.Include, tool.Name) {
+			continue
+		}
+		if slices.Contains(srv.ToolFilter.Exclude, tool.Name) {
 			continue
 		}
 
