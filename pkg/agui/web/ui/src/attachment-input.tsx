@@ -1,68 +1,87 @@
-import { useRef, useState } from "react";
-import { CopilotChatInput } from "@copilotkit/react-core/v2";
+import { useRef, useState, type Ref } from "react";
+import { CopilotChatInput, CopilotChatAttachmentQueue, useAttachments } from "@copilotkit/react-core/v2";
 import { ComposerMenu } from "./composer-menu";
 import type { InputContent } from "@ag-ui/core";
-import { uploadAttachment, type UploadedAttachment } from "./api";
+import { uploadAttachment } from "./api";
 
-// Only uploaded references enter messages; File objects live in the browser
-// until upload completes. An input slot is remounted when its thread changes.
+// CopilotKit owns selection, validation, upload state, paste, and drag/drop.
+// Only store references enter messages; browser previews use the download URL.
+// The input slot remounts on thread changes, isolating pending uploads.
 export function AttachmentInput({ onSteer, attachmentsEnabled, sessionId, ...props }: any) {
-  const [files, setFiles] = useState<UploadedAttachment[]>([]);
-  const [uploading, setUploading] = useState(false);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState("");
-  const picker = useRef<HTMLInputElement>(null);
+  const previews = useRef(new Map<string, string>());
+  const sendingRef = useRef(false);
   const draft = useRef(props.value); draft.current = props.value;
+  const queue = useAttachments({ config: {
+    enabled: attachmentsEnabled && !sending,
+    maxSize: 20 * 1024 * 1024,
+    onUpload: async file => {
+      setError("");
+      const uploaded = await uploadAttachment(file, sessionId);
+      previews.current.set(uploaded.file_id, uploaded.url);
+      return { type: "url", value: uploaded.file_id, mimeType: uploaded.mediaType,
+        metadata: { filename: uploaded.filename } };
+    },
+    onUploadFailed: failure => setError(failure.message),
+  } });
+  const uploading = queue.attachments.some(file => file.status === "uploading");
   const busy = uploading || sending;
   const hasText = (props.value ?? "").trim().length > 0;
   const submit = async (text: string) => {
-    if (busy) return;
-    if (!files.length && !props.isRunning) { props.onSubmitMessage?.(text); return; }
-    setSending(true); setError("");
+    if (!text.trim() || uploading || sendingRef.current) return;
+    if (!queue.attachments.length && !props.isRunning) { props.onSubmitMessage?.(text); return; }
+    sendingRef.current = true; setSending(true); setError("");
+    const submitted = queue.attachments.filter(file => file.status === "ready");
     draft.current = ""; props.onChange?.("");
     try {
-      const parts: InputContent[] = files.map(f => ({
-        type: f.mediaType.startsWith("image/") ? "image" : "document",
-        source: { type: "url", value: f.file_id, mimeType: f.mediaType },
-        metadata: { filename: f.filename },
+      const parts: InputContent[] = submitted.map(file => ({
+        type: file.source.mimeType?.startsWith("image/") ? "image" : "document",
+        source: file.source,
+        metadata: { ...file.metadata, filename: file.metadata?.filename ?? file.filename },
       }));
       await onSteer(text, parts);
-      setFiles([]);
+      // Remove only this submission, preserving the queue if sending fails.
+      for (const file of submitted) {
+        queue.removeAttachment(file.id);
+        previews.current.delete(file.source.value);
+      }
     } catch (e) {
       setError(String(e));
       if (!draft.current?.trim()) props.onChange?.(text);
-    }
-    finally { setSending(false); }
+    } finally { sendingRef.current = false; setSending(false); }
   };
-  return <>
-    {attachmentsEnabled && <div className="attachment-composer">
-      <input ref={picker} type="file" hidden multiple
-        onChange={async e => {
-          const selected = Array.from(e.target.files ?? []); e.target.value = "";
-          if (!selected.length) return;
-          setUploading(true); setError("");
-          try {
-            for (const file of selected) {
-              const uploaded = await uploadAttachment(file, sessionId);
-              setFiles(old => [...old, uploaded]);
-            }
-          } catch (e) { setError(String(e)); }
-          finally { setUploading(false); }
+  const previewAttachments = queue.attachments.map(file => ({
+    ...file,
+    source: file.status === "ready" && previews.current.has(file.source.value)
+      ? { ...file.source, value: previews.current.get(file.source.value)! } : file.source,
+  }));
+  return <div ref={queue.containerRef as Ref<HTMLDivElement>} className={"attachment-input" + (queue.dragOver ? " attachment-drag-over" : "")}
+    onDragOver={attachmentsEnabled && !sending ? queue.handleDragOver : undefined}
+    onDragLeave={queue.handleDragLeave}
+    onDrop={attachmentsEnabled && !sending ? queue.handleDrop : undefined}>
+    {attachmentsEnabled && <>
+      <input ref={queue.fileInputRef as Ref<HTMLInputElement>} type="file" hidden multiple disabled={sending}
+        onChange={event => {
+          void queue.handleFileUpload(event);
+          // Allow selecting the same file again after sending or removing it.
+          event.currentTarget.value = "";
         }} />
-      {uploading && <span role="status">Uploading…</span>}
-      {files.map((file, i) => <div className="attachment-preview" key={`${file.file_id}-${i}`}>
-        {file.mediaType.startsWith("image/") && <img src={file.url} alt={file.filename} />}
-        <a href={file.url} target="_blank" rel="noreferrer">{file.filename}</a>
-        <button type="button" disabled={busy} aria-label={`Remove ${file.filename}`}
-          onClick={() => setFiles(old => old.filter((_, n) => n !== i))}>×</button>
-      </div>)}
-      {files.length > 0 && <button type="button" disabled={busy} onClick={() => void submit(props.value ?? "")}>Send attachments</button>}
-    </div>}
+      <CopilotChatAttachmentQueue attachments={previewAttachments}
+        onRemoveAttachment={id => {
+          if (sendingRef.current) return;
+          const file = queue.attachments.find(file => file.id === id);
+          if (file) previews.current.delete(file.source.value);
+          queue.removeAttachment(id);
+        }} />
+      {uploading && <div role="status" className="attachment-status">Uploading…</div>}
+      {queue.dragOver && <div role="status" className="attachment-status">Drop files to attach</div>}
+    </>}
     {error && <div role="alert" className="attachment-error">{error}</div>}
     <CopilotChatInput {...props}
-      onAddFile={attachmentsEnabled ? () => { if (!busy) picker.current?.click(); } : undefined}
+      onAddFile={attachmentsEnabled ? () => { if (!sendingRef.current) queue.fileInputRef.current?.click(); } : undefined}
       addMenuButton={ComposerMenu}
-      isRunning={props.isRunning && !hasText && !files.length}
+      isRunning={props.isRunning && !hasText}
       onSubmitMessage={busy ? undefined : (text: string) => void submit(text)} />
-  </>;
+  </div>;
 }

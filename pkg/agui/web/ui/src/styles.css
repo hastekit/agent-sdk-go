@@ -77,42 +77,6 @@ body {
 }
 
 /* ── Sidebar ─────────────────────────────────────────────── */
-.sidebar {
-  width: 260px;
-  flex: 0 0 260px;
-  background: var(--hk-sidebar);
-  color: var(--hk-text);
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  padding: 8px;
-  transition: margin-left 0.18s ease;
-}
-.app.sidebar-hidden .sidebar {
-  margin-left: -260px;
-}
-
-.side-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 4px 6px 10px;
-}
-.side-head .brand {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding-left: 4px;
-  font-size: 15px;
-  font-weight: 600;
-  letter-spacing: -0.2px;
-}
-.side-head .logo {
-  width: 22px;
-  height: 22px;
-  display: block;
-}
-
 .icon-btn {
   display: inline-flex;
   align-items: center;
@@ -130,12 +94,6 @@ body {
   color: var(--hk-text);
 }
 
-.side-nav {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding-bottom: 12px;
-}
 .nav-item {
   display: flex;
   align-items: center;
@@ -159,11 +117,6 @@ body {
   color: var(--hk-muted);
 }
 
-.thread-list {
-  flex: 1;
-  overflow-y: auto;
-  padding-bottom: 8px;
-}
 .section-label {
   padding: 8px 10px 6px;
   font-size: 12px;
@@ -646,12 +599,10 @@ body {
   }
 }
 
-.attachment-composer { pointer-events: auto; width: 100%; max-width: 48rem; margin: 0 auto; background: var(--hk-bg); display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 16px; }
-.attachment-composer button { border: 1px solid #d1d5db; border-radius: 8px; padding: 5px 10px; background: transparent; color: inherit; cursor: pointer; }
-.attachment-composer button:disabled { opacity: .5; cursor: wait; }
-.attachment-preview { display: flex; align-items: center; gap: 6px; max-width: 100%; }
-.attachment-preview img { width: 48px; height: 48px; object-fit: cover; border-radius: 6px; }
-.attachment-preview a { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.attachment-input { pointer-events: auto; width: 100%; min-width: 0; }
+.attachment-drag-over { outline: 2px dashed var(--hk-accent); outline-offset: -2px; border-radius: 16px; }
+.attachment-status { padding: 4px 16px; color: var(--hk-muted); font-size: 13px; }
+
 .attachment-error { pointer-events: auto; color: #b91c1c; padding: 6px 16px; }
 .attachment-documents { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin: 6px 0 12px; }
 .attachment-documents a { color: inherit; text-decoration: none; border: 1px solid #7775; border-radius: 10px; padding: 8px 12px; overflow-wrap: anywhere; }
@@ -763,11 +714,39 @@ body {
 @media (max-width: 900px) { .routine-history { flex-basis: 210px; } }
 @media (max-width: 640px) {
   .app:has(.routine-history) { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) minmax(100px, 28vh); }
-  .app:has(.routine-history) > .sidebar { position: absolute; z-index: 20; height: 100%; }
-  .app.sidebar-hidden:has(.routine-history) > .sidebar { display: none; }
+  .app:has(.routine-history) > .hastekit-threads-drawer { position: absolute; height: 100%; }
   .app:has(.routine-history) > .chat-pane { grid-row: 1; }
   .routine-history { grid-row: 2; border-top: 1px solid var(--hk-line); }
 }
 
 .routine-run-action { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; padding: 8px; }
 .routine-run-action small { font-size: 12px; overflow-wrap: anywhere; }
+
+/* CopilotKit controlled drawer; thread persistence stays in HasteKit. */
+.hastekit-threads-drawer {
+  --cpk-drawer-width: 260px;
+  --cpk-drawer-bg: var(--hk-sidebar);
+  --cpk-drawer-fg: var(--hk-text);
+  --cpk-drawer-border: var(--hk-line);
+  --cpk-drawer-accent: var(--hk-hover);
+  --cpk-drawer-accent-fg: var(--hk-text);
+  --cpk-drawer-launcher-top: 12px;
+  --cpk-drawer-launcher-left: 12px;
+  flex: 0 0 var(--cpk-drawer-reserved-width, 260px);
+  height: 100%;
+  min-height: 0;
+}
+/* These actions require mutation endpoints our history API does not expose. */
+.hastekit-threads-drawer::part(row-menu),
+.hastekit-threads-drawer::part(filter-toggle) { display: none; }
+.hastekit-threads-drawer::part(footer) { max-height: 35vh; overflow-y: auto; }
+.drawer-header { display: flex; flex-direction: column; gap: 12px; width: 100%; }
+.drawer-header .brand { display: flex; gap: 9px; align-items: center; font-weight: 600; }
+.drawer-header .logo { width: 26px; height: 26px; }
+.drawer-thread-content { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1; }
+.drawer-thread-content.unseen { font-weight: 600; }
+.app:has(.hastekit-threads-drawer[collapsed]) .topbar { padding-left: 108px; }
+@media (max-width: 768px) {
+  .hastekit-threads-drawer { flex-basis: 0; width: 0; }
+  .topbar { padding-left: 108px; }
+}

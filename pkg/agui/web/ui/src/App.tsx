@@ -13,6 +13,7 @@ import {
   useDefaultRenderTool,
   useInterrupt,
 } from "@copilotkit/react-core/v2";
+import { ThreadsDrawer } from "./threads-drawer";
 import { ComposerSkillsContext } from "./composer-menu";
 import { RoutineLibrary, RunRoutineButton } from "./routine-library";
 import { SkillLibrary } from "./skill-library";
@@ -191,7 +192,6 @@ export default function App() {
   // surface them as a banner in the chat pane. Cleared when a new run
   // starts or the thread/agent changes.
   const [runError, setRunError] = useState<string | null>(null);
-  const [sidebarOpen, setSidebarOpen] = useState(true);
 
   // What the address bar asked for when the page opened, read once at the
   // first render and then consumed.
@@ -247,6 +247,7 @@ export default function App() {
     try {
       const res = await fetchThreads(agentName);
       if (listingAgent.current !== agentName) return;
+      setError(null);
       setListingSupported(res.supported);
       setThreads(res.threads);
     } catch (e) {
@@ -716,7 +717,7 @@ export default function App() {
     // too means the sidebar — which lives OUTSIDE the provider — sees the
     // same --sidebar/--background/--border/... tokens and matches the chat.
     <div
-      className={"dark app" + (sidebarOpen ? "" : " sidebar-hidden")}
+      className="dark app"
       data-copilotkit
     >
       {routinesOpen && <RoutineLibrary initialAgent={agentName} onChanged={routinesChanged} onClose={() => setRoutinesOpen(false)} />}
@@ -735,7 +736,7 @@ export default function App() {
         routineError={routineListError}
         onManageRoutines={routinesEnabled ? () => setRoutinesOpen(true) : undefined}
         onManageSkills={skillStoreEnabled ? () => setLibraryOpen(true) : undefined}
-        onCollapse={() => setSidebarOpen(false)}
+        onRetry={refreshThreads}
         listingSupported={listingSupported}
         error={error}
       />
@@ -750,15 +751,6 @@ export default function App() {
         >
           <div className="chat-pane">
             <header className="topbar">
-              {!sidebarOpen && (
-                <button
-                  className="icon-btn"
-                  onClick={() => setSidebarOpen(true)}
-                  aria-label="Show sidebar"
-                >
-                  <PanelIcon />
-                </button>
-              )}
               {selectedRoutine && <span className="routine-chat-title">{selectedRoutine.name}</span>}
               <AgentMenu
                 agents={agents}
@@ -940,7 +932,7 @@ function Sidebar({
   routineError,
   selectedRoutineId,
   onSelectRoutine,
-  onCollapse,
+  onRetry,
   listingSupported,
   error,
 }: {
@@ -957,33 +949,19 @@ function Sidebar({
   onSelectRoutine: (routine: Routine) => void;
   routinesLoading: boolean;
   routineError: string;
-  onCollapse: () => void;
+  onRetry: () => void;
   listingSupported: boolean;
   error: string | null;
 }) {
   return (
-    <aside className="sidebar">
-      <div className="side-head">
-        <span className="brand">
-          <img className="logo" src={LOGO} alt="" />
-          HasteKit
-        </span>
-        <button className="icon-btn" onClick={onCollapse} aria-label="Hide sidebar">
-          <PanelIcon />
-        </button>
-      </div>
-
-      <nav className="side-nav">
-        <button className="nav-item" onClick={onNew}>
-          <ComposeIcon />
-          New chat
-        </button>
+    <ThreadsDrawer threads={listingSupported ? threads : []} activeThreadId={selectedRoutineId ? "" : activeThreadId}
+      error={error} onSelect={onSelect} onNew={onNew} onRetry={onRetry}>
+      <div slot="header" className="drawer-header">
+        <span className="brand"><img className="logo" src={LOGO} alt="" />HasteKit</span>
         {onManageSkills && <button className="nav-item" onClick={onManageSkills}>Skill library</button>}
-
-      </nav>
-
-      <div className="thread-list">
-        {onManageRoutines && <section aria-label="Routines" className="sidebar-routines">
+      </div>
+      <span slot="empty">{listingSupported ? "No conversations yet — start a new chat." : "Conversation history is not available for this agent."}</span>
+        {onManageRoutines && <section slot="footer" aria-label="Routines" className="sidebar-routines">
           <div className="section-label routine-section-heading">
             <span>Routines</span>
             <button className="icon-btn" onClick={onManageRoutines} aria-label="Manage routines" title="Create and manage routines">+</button>
@@ -1000,37 +978,14 @@ function Sidebar({
             </button>;
           })}
         </section>}
-        <div className="section-label">Recents</div>
-        {error && <div className="hint error">{error}</div>}
-        {!listingSupported && (
-          <div className="hint">Conversation history is not available for this agent.</div>
-        )}
-        {listingSupported && !error && threads.length === 0 && (
-          <div className="hint">No conversations yet — start a new chat.</div>
-        )}
-        {threads.map((t) => {
-          const hasUnseen = unseen.has(t.thread_id);
-          return (
-            <button
-              key={t.thread_id}
-              className={
-                "thread-item" +
-                (t.thread_id === activeThreadId ? " selected" : "") +
-                (hasUnseen ? " unseen" : "")
-              }
-              onClick={() => onSelect(t)}
-              title={
-                `${t.title || "Untitled"} · ${relativeTime(t.updated_at)}` +
-                (hasUnseen ? " · new activity" : "")
-              }
-            >
-              <span className="thread-title">{t.title || "Untitled"}</span>
-              {hasUnseen && <span className="thread-dot" aria-label="New activity" />}
-            </button>
-          );
-        })}
-      </div>
-    </aside>
+
+      {threads.map(thread => <span key={thread.thread_id} slot={`row:${thread.thread_id}`}
+        className={"drawer-thread-content" + (unseen.has(thread.thread_id) ? " unseen" : "")}
+        title={`${thread.title || "Untitled"} · ${relativeTime(thread.updated_at)}`}>
+        <span className="thread-title">{thread.title || "Untitled"}</span>
+        {unseen.has(thread.thread_id) && <span className="thread-dot" aria-label="New activity" />}
+      </span>)}
+    </ThreadsDrawer>
   );
 }
 
@@ -1116,24 +1071,6 @@ const svg = {
   strokeLinecap: "round" as const,
   strokeLinejoin: "round" as const,
 };
-
-function PanelIcon() {
-  return (
-    <svg {...svg}>
-      <rect x="3" y="4" width="18" height="16" rx="2" />
-      <path d="M9 4v16" />
-    </svg>
-  );
-}
-
-function ComposeIcon() {
-  return (
-    <svg {...svg}>
-      <path d="M12 4H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-6" />
-      <path d="M18.5 3.5a2.1 2.1 0 0 1 3 3L12 16l-4 1 1-4z" />
-    </svg>
-  );
-}
 
 function ChevronIcon() {
   return (

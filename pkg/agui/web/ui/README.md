@@ -49,3 +49,27 @@ the regenerated `../static` output along with your source changes.
   - `@copilotkit/web-inspector` → `src/web-inspector-stub.ts` drops the
     ~850KB dev console, which only loads when `showDevConsole` is true
     (we always pass `false`).
+
+## Threads drawer
+
+The sidebar uses the public `@copilotkit/web-components/threads-drawer` controlled
+view, wrapped by `src/threads-drawer.tsx` for React 18 property/event binding.
+CopilotKit React and web-components are upgraded together; AG-UI is aligned with
+CopilotKit's dependency versions. Thread data and selection still use HasteKit's
+AG-UI endpoints, preserving paginated history and live-run restoration without
+requiring the CopilotKit Intelligence thread store.
+
+HasteKit supplies header/footer/row slots for skills, routines, and unread
+indicators. The component owns collapse and mobile overlay behavior. Archive,
+delete, and the archived-thread filter are hidden with its public CSS parts
+until the HasteKit history API supports those operations.
+
+## Attachments
+
+The composer uses CopilotKit's `useAttachments` and `CopilotChatAttachmentQueue`
+for file selection, upload state, previews, removal, drag/drop, and scoped paste.
+Its custom `onUpload` sends files to HasteKit's attachment endpoint with the
+current session ID. Preview URLs stay in browser state; messages carry only
+`attachment://` references. The existing steering path supports attachments
+while an agent runs. Attachments are sent together with a text message using
+the composer’s built-in send button.
