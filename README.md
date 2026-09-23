@@ -20,6 +20,7 @@ A powerful Golang SDK for building AI agents and making LLM calls across multipl
 - **💾 Conversation History** - Maintain context across interactions with built-in persistence
 - **🧩 Sub-Agents & Handoffs** - Call a specialist as a tool, or transfer the conversation to it
 - **🎚️ Steering** - Send a correction into a run already in flight
+- **⚛️ React chat hooks** - Standalone headless chat state, conversation lists, and reconnecting streams ([package](packages/react/README.md))
 - **🌊 Streaming Support** - Real-time streaming responses for better UX
 - **🛑 Cancellation** - Stop in-flight runs cleanly, including mid-stream and mid-tool-call
 - **📝 Structured Output** - JSON schema validation for reliable structured responses

@@ -1,0 +1,109 @@
+name: Publish React package
+
+# Release the React package independently of the Go module's v* tags.
+on:
+  push:
+    tags: ['react-v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Serialize publishing across manual and tag-triggered runs.
+concurrency:
+  group: react-publish
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/react
+    outputs:
+      dist-tag: ${{ steps.version.outputs.dist_tag }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      # Use the release tag as the authoritative npm version.
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Validate release version
+        id: version
+        env:
+          RELEASE_REF: ${{ github.ref }}
+        run: |
+          node --input-type=module <<'JS'
+          import { readFileSync, appendFileSync } from 'node:fs';
+          const pkg = JSON.parse(readFileSync('package.json', 'utf8'));
+          const lock = JSON.parse(readFileSync('package-lock.json', 'utf8'));
+          if (pkg.name !== '@hastekit/react') {
+            throw new Error(`Expected @hastekit/react, received ${pkg.name}`);
+          }
+          const ref = process.env.RELEASE_REF;
+          const match = /^refs\/tags\/react-v((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*)?)$/.exec(ref ?? '');
+          if (!match) {
+            throw new Error(`Invalid release ref ${ref}; use react-v<version>, for example react-v0.0.2 or react-v0.0.3-beta.1`);
+          }
+          const version = match[1];
+          if (lock.version !== pkg.version || lock.packages[''].version !== pkg.version) {
+            throw new Error('package-lock.json must match the package version');
+          }
+          console.log(`Publishing ${pkg.name}@${version} from ${ref} (source version: ${pkg.version})`);
+          appendFileSync(process.env.GITHUB_OUTPUT, `version=${version}\ndist_tag=${version.includes('-') ? 'next' : 'latest'}\n`);
+          JS
+
+  test:
+    needs: validate
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        react: [18, 19]
+    defaults:
+      run:
+        working-directory: packages/react
+    steps:
+      # Test both supported React versions before granting the publishing job credentials.
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: npm ci
+      - name: Install React version under test
+        run: npm install --no-save --package-lock=false react@${{ matrix.react }} react-test-renderer@${{ matrix.react }}
+      - run: npm run format:check
+      - run: npm test
+
+  publish:
+    needs: [validate, test]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        working-directory: packages/react
+    steps:
+      # Build from a clean install rather than the test matrix's modified dependencies.
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: https://registry.npmjs.org
+          scope: '@hastekit'
+      - run: npm ci
+      # Stamp both manifests in the release workspace without changing the source commit.
+      - name: Set package version from release tag
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+        run: npm version "$RELEASE_VERSION" --no-git-tag-version --allow-same-version --ignore-scripts
+      - name: Build and pack
+        run: npm pack --pack-destination "$RUNNER_TEMP"
+
+      # Prefer npm trusted publishing; NPM_TOKEN can bootstrap the first release.
+      - name: Publish to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          DIST_TAG: ${{ needs.validate.outputs.dist-tag }}
+        run: npm publish "$RUNNER_TEMP"/hastekit-react-*.tgz --access public --provenance --tag "$DIST_TAG"
