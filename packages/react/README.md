@@ -331,3 +331,30 @@ for the routine's agent (plus agents attributed to existing occurrences). Matchi
 run-start and run-finish notifications automatically refresh the list. Cleanup
 cancels history requests and watchers. For transports or servers without run-feed
 support, it falls back to refreshing every five seconds.
+
+## Publishing to npm
+
+`.github/workflows/react-publish.yml` publishes `@hastekit/react` on a pushed
+`react-v<version>` tag. It checks package and lockfile versions, tests React 18 and
+19, builds the package through `npm pack`, and publishes the tarball with public
+access and provenance. Stable versions use `latest`; prereleases use `next`.
+
+Configure an npm trusted publisher for `@hastekit/react` with GitHub owner
+`hastekit`, repository `agent-sdk-go`, and workflow `react-publish.yml` (no
+environment). See [npm trusted publishing](https://docs.npmjs.com/trusted-publishers/).
+For the initial publication, or token-based publishing, configure the repository
+secret `NPM_TOKEN` with a granular npm token authorized to publish `@hastekit/react`
+and suitable for unattended publishing. Remove the token after trusted publishing
+is configured if you choose that authentication method.
+
+```sh
+# From packages/react, update and commit the package and lockfile versions.
+npm version 0.1.1 --no-git-tag-version
+# Commit the changes, then tag that commit from the repository root.
+git tag react-v0.1.1
+git push origin react-v0.1.1
+```
+
+The workflow can also be dispatched manually against a matching existing tag.
+Dispatching against a branch fails validation. Already published versions cannot
+be overwritten; bump the package version for a new release.

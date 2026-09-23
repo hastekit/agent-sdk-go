@@ -1,0 +1,96 @@
+name: Publish React package
+
+# Release the React package independently of the Go module's v* tags.
+on:
+  push:
+    tags: ['react-v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Serialize retries for a tag without interrupting an active publish.
+concurrency:
+  group: react-publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/react
+    outputs:
+      dist-tag: ${{ steps.version.outputs.dist_tag }}
+    steps:
+      # Publish only a matching release tag, including for manual runs.
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Validate release version
+        id: version
+        env:
+          RELEASE_REF: ${{ github.ref }}
+        run: |
+          node --input-type=module <<'JS'
+          import { readFileSync, appendFileSync } from 'node:fs';
+          const pkg = JSON.parse(readFileSync('package.json', 'utf8'));
+          const lock = JSON.parse(readFileSync('package-lock.json', 'utf8'));
+          if (pkg.name !== '@hastekit/react' || process.env.RELEASE_REF !== `refs/tags/react-v${pkg.version}`) {
+            throw new Error('Run this workflow on a react-v<version> tag matching @hastekit/react package.json');
+          }
+          if (lock.version !== pkg.version || lock.packages[''].version !== pkg.version) {
+            throw new Error('package-lock.json must match the package version');
+          }
+          appendFileSync(process.env.GITHUB_OUTPUT, `dist_tag=${pkg.version.includes('-') ? 'next' : 'latest'}\n`);
+          JS
+
+  test:
+    needs: validate
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        react: [18, 19]
+    defaults:
+      run:
+        working-directory: packages/react
+    steps:
+      # Test both supported React versions before granting the publishing job credentials.
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: npm ci
+      - name: Install React version under test
+        run: npm install --no-save --package-lock=false react@${{ matrix.react }} react-test-renderer@${{ matrix.react }}
+      - run: npm run format:check
+      - run: npm test
+
+  publish:
+    needs: [validate, test]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        working-directory: packages/react
+    steps:
+      # Build from a clean install rather than the test matrix's modified dependencies.
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: https://registry.npmjs.org
+          scope: '@hastekit'
+      - run: npm ci
+      - name: Build and pack
+        run: npm pack --pack-destination "$RUNNER_TEMP"
+
+      # Prefer npm trusted publishing; NPM_TOKEN can bootstrap the first release.
+      - name: Publish to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          DIST_TAG: ${{ needs.validate.outputs.dist-tag }}
+        run: npm publish "$RUNNER_TEMP"/hastekit-react-*.tgz --access public --provenance --tag "$DIST_TAG"

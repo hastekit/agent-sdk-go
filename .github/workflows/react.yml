@@ -1,0 +1,38 @@
+name: React package
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'packages/react/**'
+      - '.github/workflows/react.yml'
+  pull_request:
+    paths:
+      - 'packages/react/**'
+      - '.github/workflows/react.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        react: [18, 19]
+    defaults:
+      run:
+        working-directory: packages/react
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: packages/react/package-lock.json
+      - run: npm ci
+      - name: Install React version under test
+        run: npm install --no-save --package-lock=false react@${{ matrix.react }} react-test-renderer@${{ matrix.react }}
+      - run: npm run format:check
+      - run: npm test
+      - run: npm pack --dry-run
