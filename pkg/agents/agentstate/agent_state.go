@@ -354,8 +354,7 @@ func (s *RunState) ToMeta(opts ...MetaOption) map[string]any {
 	// reconstructed from it on load (LoadRunStateFromMeta) — we don't store
 	// the same FunctionCallMessage three times. It's also the shape the
 	// streaming pause chunk and the UI consume, so reload matches live.
-	// (ToMeta is only persisted at await/complete, so this always covers
-	// PendingToolCalls.)
+	// At an approval pause this covers all PendingToolCalls.
 	if pi := s.PendingInterrupts(); len(pi) > 0 {
 		runStateMap["pending_interrupts"] = pi
 	}

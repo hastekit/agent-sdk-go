@@ -186,7 +186,7 @@ func TestWithoutSteeringNotices(t *testing.T) {
 
 func mustGetMessages(t *testing.T, run *ConversationRunManager) []responses.InputMessageUnion {
 	t.Helper()
-	out, err := run.GetMessages(context.Background(), "agent")
+	out, err := run.GetMessages(context.Background(), "agent", nil)
 	if err != nil {
 		t.Fatalf("GetMessages: %v", err)
 	}

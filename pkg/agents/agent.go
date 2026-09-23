@@ -450,6 +450,14 @@ func (e *Agent) ExecuteLocal(ctx context.Context, in *AgentInput) (*AgentOutput,
 	}
 	run.RunState.TraceID = traceid
 
+	// Make the conversation and its opening message visible before clients
+	// receive run.created or the run feed's start event. SaveMessages uses the
+	// history adapter, including its durable-runtime boundary, and subsequent
+	// saves append to this same run.
+	if err := run.SaveMessages(ctx); err != nil {
+		return &AgentOutput{Status: agentstate.RunStatusError, RunID: runId}, err
+	}
+
 	// Emit run.created once (durable step: not resent on replay).
 	//
 	// The turn that opened the run goes out with it, and after it: a client
@@ -691,7 +699,15 @@ func (e *Agent) ExecuteWithRun(ctx context.Context, in *AgentInput, run *history
 		switch run.RunState.NextStep() {
 
 		case agentstate.StepCallLLM:
-			convMessages, err := run.GetMessages(ctx, e.Name)
+			convMessages, err := run.GetMessages(ctx, e.Name, func(started bool, result *history.SummaryResult, err error) {
+				e.durableStep.Do(func() {
+					if started {
+						publish(&responses.ResponseChunk{OfSummarizationStarted: &responses.ChunkSummarization[constants.ChunkTypeSummarizationStarted]{RunID: runId, AgentName: e.Name}})
+					} else {
+						publish(&responses.ResponseChunk{OfSummarizationCompleted: &responses.ChunkSummarization[constants.ChunkTypeSummarizationCompleted]{RunID: runId, AgentName: e.Name, Compacted: result != nil, Failed: err != nil}})
+					}
+				})
+			})
 			if err != nil {
 				return &AgentOutput{Status: agentstate.RunStatusError, RunID: runId}, err
 			}

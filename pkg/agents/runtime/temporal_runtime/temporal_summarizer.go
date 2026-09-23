@@ -21,14 +21,16 @@ func (t *TemporalConversationSummarizer) Summarize(ctx context.Context, msgIdToR
 }
 
 type TemporalConversationSummarizerProxy struct {
-	workflowCtx workflow.Context
-	prefix      string
+	workflowCtx       workflow.Context
+	prefix            string
+	wrappedSummarizer history.HistorySummarizer
 }
 
-func NewTemporalConversationSummarizerProxy(workflowCtx workflow.Context, prefix string) history.HistorySummarizer {
+func NewTemporalConversationSummarizerProxy(workflowCtx workflow.Context, prefix string, summarizer history.HistorySummarizer) history.HistorySummarizer {
 	return &TemporalConversationSummarizerProxy{
-		workflowCtx: workflowCtx,
-		prefix:      prefix,
+		workflowCtx:       workflowCtx,
+		prefix:            prefix,
+		wrappedSummarizer: summarizer,
 	}
 }
 
@@ -40,4 +42,8 @@ func (t *TemporalConversationSummarizerProxy) Summarize(ctx context.Context, msg
 	}
 
 	return summaryResult, nil
+}
+
+func (t *TemporalConversationSummarizerProxy) ShouldSummarize(ctx context.Context, ids map[string]string, msgs []messages.Message, tokens int) (bool, error) {
+	return t.wrappedSummarizer.ShouldSummarize(ctx, ids, msgs, tokens)
 }

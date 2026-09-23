@@ -1,5 +1,4 @@
-# Keep the SDK small when it is used as a build context
-# (e.g. hastekit-ai-gateway's `--build-context sdk=../hastekit-sdk-go`)
+# Keep the SDK sandbox image build context small.
 .git
 .idea
 .vscode

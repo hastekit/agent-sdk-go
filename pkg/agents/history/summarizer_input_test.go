@@ -64,7 +64,7 @@ func TestSummarizerSeesInFlightMessages(t *testing.T) {
 	run2.AddMessages(ctx, assistantTurn("calling a tool"))
 	run2.AddMessages(ctx, assistantTurn("calling another"))
 
-	if _, err := run2.GetMessages(ctx, "agent"); err != nil {
+	if _, err := run2.GetMessages(ctx, "agent", nil); err != nil {
 		t.Fatalf("GetMessages: %v", err)
 	}
 
@@ -92,7 +92,7 @@ func TestInFlightMessagesCarryRunID(t *testing.T) {
 	run.AddMessages(ctx, first)
 	run.AddMessages(ctx, second)
 
-	if _, err := run.GetMessages(ctx, "agent"); err != nil {
+	if _, err := run.GetMessages(ctx, "agent", nil); err != nil {
 		t.Fatalf("GetMessages: %v", err)
 	}
 
@@ -122,7 +122,7 @@ func TestQueuedMessagesReachTheModel(t *testing.T) {
 	queued := userTurn("queued while the run was working")
 	run.AddMessagesToQueue(ctx, []Message{queued})
 
-	out, err := run.GetMessages(ctx, "agent")
+	out, err := run.GetMessages(ctx, "agent", nil)
 	if err != nil {
 		t.Fatalf("GetMessages: %v", err)
 	}
@@ -160,7 +160,7 @@ func TestSummarizationPreservesSaveBuffer(t *testing.T) {
 	inFlight := userTurn("this turn must still be saved")
 	run.AddMessages(ctx, inFlight)
 
-	out, err := run.GetMessages(ctx, "agent")
+	out, err := run.GetMessages(ctx, "agent", nil)
 	if err != nil {
 		t.Fatalf("GetMessages: %v", err)
 	}
@@ -211,7 +211,7 @@ func TestSummaryBoundaryNeverNamesInFlightRun(t *testing.T) {
 		LastSummarizedRunID: run.GetRunID(),
 	}
 
-	if _, err := run.GetMessages(ctx, "agent"); err != nil {
+	if _, err := run.GetMessages(ctx, "agent", nil); err != nil {
 		t.Fatalf("GetMessages: %v", err)
 	}
 
@@ -242,7 +242,7 @@ func TestGetMessagesDoesNotAliasHistory(t *testing.T) {
 
 	run.AddMessages(ctx, assistantTurn("in flight"))
 
-	if _, err := run.GetMessages(ctx, "agent"); err != nil {
+	if _, err := run.GetMessages(ctx, "agent", nil); err != nil {
 		t.Fatalf("GetMessages: %v", err)
 	}
 
@@ -252,4 +252,8 @@ func TestGetMessagesDoesNotAliasHistory(t *testing.T) {
 	if got := len(run.oldMessages); got != 1 {
 		t.Fatalf("len(oldMessages) = %d, want 1", got)
 	}
+}
+
+func (s *capturingSummarizer) ShouldSummarize(context.Context, map[string]string, []Message, int) (bool, error) {
+	return true, nil
 }

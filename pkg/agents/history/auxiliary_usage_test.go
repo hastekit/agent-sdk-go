@@ -48,7 +48,7 @@ func TestSummarizerUsageBilledWithoutDisturbingContextTokens(t *testing.T) {
 	// The agent's own call sets the context-occupancy signal.
 	run.TrackUsage(&responses.Usage{InputTokens: 120000, OutputTokens: 500, TotalTokens: 120500})
 
-	if _, err := run.GetMessages(ctx, "agent"); err != nil {
+	if _, err := run.GetMessages(ctx, "agent", nil); err != nil {
 		t.Fatalf("GetMessages: %v", err)
 	}
 
@@ -115,4 +115,8 @@ func TestTrackUsageAccumulatesReasoningTokens(t *testing.T) {
 	if got := run.RunState.Usage.OutputTokensDetails.ReasoningTokens; got != 900 {
 		t.Fatalf("ReasoningTokens = %d, want 900", got)
 	}
+}
+
+func (s *usageReportingSummarizer) ShouldSummarize(context.Context, map[string]string, []Message, int) (bool, error) {
+	return true, nil
 }

@@ -191,6 +191,7 @@ export default function App() {
   // transport failure). CopilotKit only logs these to the console, so we
   // surface them as a banner in the chat pane. Cleared when a new run
   // starts or the thread/agent changes.
+  const [compacting, setCompacting] = useState(false);
   const [runError, setRunError] = useState<string | null>(null);
 
   // What the address bar asked for when the page opened, read once at the
@@ -328,6 +329,7 @@ export default function App() {
   // and the client raises onRunFailed for transport errors — CopilotKit
   // only console.errors both, so we lift them into a banner.
   useEffect(() => {
+    setCompacting(false);
     if (!agent) return;
     agent.subscribe({
       onRunInitialized: () => setRunError(null),
@@ -340,9 +342,14 @@ export default function App() {
       // nothing to join. Clearing there wiped a restored approval card the
       // instant it was drawn. This fires only when a run is actually
       // streaming, which is the thing that supersedes it.
-      onRunStartedEvent: () => setRestored(null),
+      onRunStartedEvent: () => {
+        setRestored(null);
+        void refreshThreads();
+      },
       onCustomEvent: ({ event }: any) => {
         const value = event?.value ?? {};
+        if (event?.name === "hastekit.summarization_started") { setCompacting(true); return; }
+        if (event?.name === "hastekit.summarization_completed") { setCompacting(false); return; }
         if (event?.name === "hastekit.background_task_started" && value.taskId) {
           setLiveTasks((current) => {
             const next = new Map(current);
@@ -373,11 +380,15 @@ export default function App() {
           });
         }
       },
-      onRunFinalized: () => refreshThreads(),
-      onRunErrorEvent: ({ event }: any) =>
-        setRunError(event?.message || "The agent run failed."),
-      onRunFailed: ({ error }: any) =>
-        setRunError(error?.message || String(error) || "The agent run failed."),
+      onRunFinalized: () => { setCompacting(false); void refreshThreads(); },
+      onRunErrorEvent: ({ event }: any) => {
+        setCompacting(false);
+        setRunError(event?.message || "The agent run failed.");
+      },
+      onRunFailed: ({ error }: any) => {
+        setCompacting(false);
+        setRunError(error?.message || String(error) || "The agent run failed.");
+      },
     });
     // HttpAgent 0.0.53 has no unsubscribe handle; the agent is replaced
     // by useMemo when threadId changes, dropping the subscription.
@@ -429,9 +440,9 @@ export default function App() {
 
           if (seen.events.length === 0) continue;
 
-          // A run ending is when the thread row is worth re-reading: its
-          // title and timestamp are written server-side as the run saves.
-          if (seen.events.some((e) => e.event === "RUN_FINISHED")) {
+          // The opening user message is saved before RUN_STARTED, so new
+          // conversations already have their title while the agent works.
+          if (seen.events.some((e) => e.event === "RUN_STARTED" || e.event === "RUN_FINISHED")) {
             refreshThreads();
             const history = routineHistoryRefresh.current;
             if (history && seen.events.some(e => e.event === "RUN_FINISHED" && e.groupId === history.id)) {
@@ -761,6 +772,7 @@ export default function App() {
             </header>
             <InterruptHandler agentName={agentName} publish={setLiveInterrupt} />
             <InlineToolRenderer agentName={agentName} />
+            {compacting && <div role="status" aria-live="polite" className="hint">Compacting context...</div>}
             {runError && (
               <div className="run-error" role="alert">
                 <span className="ico">⚠</span>

@@ -47,6 +47,9 @@ type ConversationPersistenceAdapter interface {
 	LoadMessages(ctx context.Context, namespace string, threadID string, previousRunID string) ([]ConversationMessage, error)
 	// SaveMessages assigns the group (empty selects DefaultGroupID) to a new conversation. Implementations
 	// must preserve its group on continuations, incremental saves, and forks.
+	// The loop saves its opening message before generation, then saves later increments under the
+	// same run ID. Append the supplied messages and replace non-nil metadata, including on saves
+	// with no new messages; preserve the run's conversation, thread, and creation time.
 	SaveMessages(ctx context.Context, namespace, groupID, runId, previousRunId, threadID string, conversationId string, messages []Message, meta map[string]any) error
 	SaveSummary(ctx context.Context, namespace string, summary Summary) error
 }
@@ -350,11 +353,11 @@ func (cm *ConversationRunManager) AddMessagesToQueue(ctx context.Context, msgs [
 	}
 }
 
-func (cm *ConversationRunManager) GetMessages(ctx context.Context, agentName string) ([]responses.InputMessageUnion, error) {
+func (cm *ConversationRunManager) GetMessages(ctx context.Context, agentName string, observer SummarizationObserver) ([]responses.InputMessageUnion, error) {
 	cm.RunState.LastAgentName = agentName
 
 	if cm.summarizer != nil {
-		if err := cm.summarize(ctx); err != nil {
+		if err := cm.summarize(ctx, observer); err != nil {
 			return nil, err
 		}
 	}
@@ -407,12 +410,25 @@ func (cm *ConversationRunManager) GetMessages(ctx context.Context, agentName str
 // it here would leave a hole in the thread's history. Both shipped summarizers
 // keep the most recent run whole and every in-flight message belongs to it, so
 // the partition below defends an invariant rather than changing behaviour.
-func (cm *ConversationRunManager) summarize(ctx context.Context) error {
+func (cm *ConversationRunManager) summarize(ctx context.Context, observer SummarizationObserver) (err error) {
 	candidates := make([]Message, 0, len(cm.oldMessages)+len(cm.newMessages))
 	candidates = append(candidates, cm.oldMessages...)
 	candidates = append(candidates, cm.newMessages...)
+	shouldSummarize, err := cm.summarizer.ShouldSummarize(ctx, cm.msgIdToRunId, candidates, cm.contextTokens())
+	if err != nil || !shouldSummarize {
+		return err
+	}
+	var result *SummaryResult
+	if observer != nil {
+		observer(true, nil, nil)
+	}
+	defer func() {
+		if observer != nil {
+			observer(false, result, err)
+		}
+	}()
 
-	result, err := cm.summarizer.Summarize(ctx, cm.msgIdToRunId, candidates, cm.contextTokens())
+	result, err = cm.summarizer.Summarize(ctx, cm.msgIdToRunId, candidates, cm.contextTokens())
 	if err != nil {
 		return err
 	}
@@ -586,9 +602,12 @@ func (cm *ConversationRunManager) GetConversationID() string {
 }
 
 func (cm *ConversationRunManager) SaveMessages(ctx context.Context) error {
-	completedAt := cm.now(ctx)
-
-	meta := cm.RunState.ToMeta(agentstate.WithCompletedAt(completedAt))
+	savedAt := cm.now(ctx)
+	var metaOptions []agentstate.MetaOption
+	if cm.RunState.IsComplete() || cm.RunState.IsPaused() {
+		metaOptions = append(metaOptions, agentstate.WithCompletedAt(savedAt))
+	}
+	meta := cm.RunState.ToMeta(metaOptions...)
 	if meta == nil {
 		meta = map[string]any{}
 	}
@@ -606,7 +625,7 @@ func (cm *ConversationRunManager) SaveMessages(ctx context.Context) error {
 			ID:                  cm.summaries.SummaryID,
 			ThreadID:            cm.threadId,
 			LastSummarizedRunID: cm.summaries.LastSummarizedRunID,
-			CreatedAt:           completedAt,
+			CreatedAt:           savedAt,
 			Meta: map[string]any{
 				"is_summary": true,
 			},

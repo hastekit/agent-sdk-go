@@ -278,3 +278,11 @@ func (s *LLMHistorySummarizer) Summarize(ctx context.Context, msgIdToRunId map[s
 		Usage: resp.Usage,
 	}, nil
 }
+
+func (s *LLMHistorySummarizer) ShouldSummarize(ctx context.Context, ids map[string]string, msgs []messages.Message, tokens int) (bool, error) {
+	if s.instruction == nil {
+		return false, nil
+	}
+	decision, _ := s.shouldSummarize(ctx, groupIntoRuns(ids, msgs), tokens)
+	return decision, nil
+}

@@ -61,9 +61,10 @@ func TestSaveRecordsTheTurnsSpan(t *testing.T) {
 	run, err := NewRun(ctx, cm, "ns", "thread-1", "")
 	require.NoError(t, err)
 	run.AddMessages(ctx, userBundle("ada", "hello"))
+	run.RunState.TransitionToComplete()
 	require.NoError(t, run.SaveMessages(ctx))
 
-	loaded, err := p.LoadMessages(ctx, "ns", "thread-1", run.GetRunID())
+	loaded, err := p.LoadMessages(ctx, "ns", "thread-1", "")
 	require.NoError(t, err)
 	require.Len(t, loaded, 1)
 
@@ -87,15 +88,17 @@ func TestAResumedTurnKeepsItsOriginalStart(t *testing.T) {
 	run, err := NewRun(ctx, cm, "ns", "thread-1", "")
 	require.NoError(t, err)
 	run.AddMessages(ctx, userBundle("ada", "book me a flight"))
+	run.RunState.CurrentStep = agentstate.StepAwaitApproval
 	require.NoError(t, run.SaveMessages(ctx))
 
 	// A fresh manager for the resuming request, as a second call would build.
 	resumed, err := NewRun(ctx, cm, "ns", "thread-1", "")
 	require.NoError(t, err)
 	resumed.AddMessages(ctx, userBundle("ada", "yes, go ahead"))
+	resumed.RunState.TransitionToComplete()
 	require.NoError(t, resumed.SaveMessages(ctx))
 
-	loaded, err := p.LoadMessages(ctx, "ns", "thread-1", resumed.GetRunID())
+	loaded, err := p.LoadMessages(ctx, "ns", "thread-1", "")
 	require.NoError(t, err)
 	require.NotEmpty(t, loaded)
 
@@ -125,9 +128,10 @@ func TestANewTurnStartsItsOwnSpan(t *testing.T) {
 	next, err := NewRun(ctx, cm, "ns", "thread-1", "")
 	require.NoError(t, err)
 	next.AddMessages(ctx, userBundle("ada", "another question"))
+	next.RunState.TransitionToComplete()
 	require.NoError(t, next.SaveMessages(ctx))
 
-	loaded, err := p.LoadMessages(ctx, "ns", "thread-1", next.GetRunID())
+	loaded, err := p.LoadMessages(ctx, "ns", "thread-1", "")
 	require.NoError(t, err)
 	require.NotEmpty(t, loaded)
 
@@ -154,7 +158,7 @@ func TestAResumeWithNoRecordedStartOpensOne(t *testing.T) {
 	resumed.AddMessages(ctx, userBundle("ada", "and again"))
 	require.NoError(t, resumed.SaveMessages(ctx))
 
-	loaded, err := p.LoadMessages(ctx, "ns", "thread-1", resumed.GetRunID())
+	loaded, err := p.LoadMessages(ctx, "ns", "thread-1", "")
 	require.NoError(t, err)
 	require.NotEmpty(t, loaded)
 
@@ -178,12 +182,13 @@ func TestTheSpanRoundTripsThroughTheFileAdapter(t *testing.T) {
 	run, err := NewRun(ctx, cm, "ns", "thread-1", "")
 	require.NoError(t, err)
 	run.AddMessages(ctx, userBundle("ada", "hello"))
+	run.RunState.TransitionToComplete()
 	require.NoError(t, run.SaveMessages(ctx))
 
 	reopened, err := NewFileConversationPersistence(dir)
 	require.NoError(t, err)
 
-	loaded, err := reopened.LoadMessages(ctx, "ns", "thread-1", run.GetRunID())
+	loaded, err := reopened.LoadMessages(ctx, "ns", "thread-1", "")
 	require.NoError(t, err)
 	require.NotEmpty(t, loaded)
 

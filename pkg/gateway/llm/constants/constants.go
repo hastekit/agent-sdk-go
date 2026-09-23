@@ -681,3 +681,21 @@ func (m *WebSearchActionTypeFind) UnmarshalJSON(buf []byte) error {
 // ------------------------- //
 // End Of Web search action //
 // ----------------------- //
+
+type ChunkTypeSummarizationStarted string
+
+func (m *ChunkTypeSummarizationStarted) Value() string               { return "summarization.started" }
+func (m ChunkTypeSummarizationStarted) MarshalJSON() ([]byte, error) { return sonic.Marshal(m.Value()) }
+func (m *ChunkTypeSummarizationStarted) UnmarshalJSON(buf []byte) error {
+	return unmarshalConstantString(m, buf)
+}
+
+type ChunkTypeSummarizationCompleted string
+
+func (m *ChunkTypeSummarizationCompleted) Value() string { return "summarization.completed" }
+func (m ChunkTypeSummarizationCompleted) MarshalJSON() ([]byte, error) {
+	return sonic.Marshal(m.Value())
+}
+func (m *ChunkTypeSummarizationCompleted) UnmarshalJSON(buf []byte) error {
+	return unmarshalConstantString(m, buf)
+}

@@ -65,8 +65,12 @@ func (p *InMemoryConversationPersistence) ListThreads(ctx context.Context, names
 			if m == nil {
 				continue
 			}
-			if m.CreatedAt.After(info.UpdatedAt) {
-				info.UpdatedAt = m.CreatedAt
+			updatedAt := m.UpdatedAt
+			if updatedAt.IsZero() {
+				updatedAt = m.CreatedAt
+			}
+			if updatedAt.After(info.UpdatedAt) {
+				info.UpdatedAt = updatedAt
 			}
 			if info.AgentName == "" {
 				if rc, ok := m.Meta[RunContextMetaKey].(map[string]any); ok {

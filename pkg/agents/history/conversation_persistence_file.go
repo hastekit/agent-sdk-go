@@ -46,6 +46,7 @@ type fileMessageRecord struct {
 	Messages       []Message      `json:"messages"`
 	Meta           map[string]any `json:"meta,omitempty"`
 	CreatedAt      time.Time      `json:"created_at"`
+	UpdatedAt      time.Time      `json:"updated_at,omitempty"`
 }
 
 // fileSummaryRecord is a summary line. The latest record per thread wins on
@@ -116,8 +117,9 @@ func (p *FileConversationPersistence) LoadMessages(ctx context.Context, namespac
 	return p.mem.LoadMessages(ctx, namespace, threadID, previousRunId)
 }
 
-// SaveMessages saves messages in memory and appends them to the
-// conversation's JSONL file
+// SaveMessages appends and syncs each increment, including the opening user
+// message and metadata-only state transitions. Replay merges those increments
+// into one run with its latest metadata and update time.
 func (p *FileConversationPersistence) SaveMessages(ctx context.Context, namespace, groupID, runId, previousRunId, threadId, conversationId string, messages []Message, meta map[string]any) error {
 	ctx, span := tracer.Start(ctx, "FileConversationPersistence.SaveMessages")
 	defer span.End()
@@ -168,6 +170,7 @@ func (p *FileConversationPersistence) SaveMessages(ctx context.Context, namespac
 			Messages:  messages,
 			Meta:      stored.Meta,
 			CreatedAt: stored.CreatedAt,
+			UpdatedAt: stored.UpdatedAt,
 		},
 	})
 }
@@ -315,6 +318,9 @@ func (p *FileConversationPersistence) applyRecord(rec *fileRecord) error {
 func (p *FileConversationPersistence) applyMessageRecord(rec *fileMessageRecord) {
 	m := p.mem
 	rec.GroupID = NormalizeGroupID(rec.GroupID)
+	if rec.UpdatedAt.IsZero() {
+		rec.UpdatedAt = rec.CreatedAt // Records written before incremental save timestamps.
+	}
 
 	// Incremental save replayed: a run saved more than once under the
 	// same run id writes one record per increment. Append to the existing
@@ -323,6 +329,7 @@ func (p *FileConversationPersistence) applyMessageRecord(rec *fileMessageRecord)
 	// InMemory.SaveMessages' merge so replay reconstructs the same state.
 	if existing, ok := m.messages[historyKey(rec.Namespace, rec.RunID)]; ok {
 		existing.Messages = append(existing.Messages, rec.Messages...)
+		existing.UpdatedAt = rec.UpdatedAt
 		if rec.Meta != nil {
 			existing.Meta = rec.Meta
 		}
@@ -369,6 +376,7 @@ func (p *FileConversationPersistence) applyMessageRecord(rec *fileMessageRecord)
 		Messages:       rec.Messages,
 		Meta:           rec.Meta,
 		CreatedAt:      rec.CreatedAt,
+		UpdatedAt:      rec.UpdatedAt,
 	}
 	m.messagesByThread[historyKey(rec.Namespace, rec.ThreadID)] = append(m.messagesByThread[historyKey(rec.Namespace, rec.ThreadID)], rec.RunID)
 }

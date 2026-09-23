@@ -500,3 +500,8 @@ const (
 	CustomNameBackgroundTaskStarted   = "hastekit.background_task_started"
 	CustomNameBackgroundTaskCompleted = "hastekit.background_task_completed"
 )
+
+const (
+	CustomNameSummarizationStarted   = "hastekit.summarization_started"
+	CustomNameSummarizationCompleted = "hastekit.summarization_completed"
+)

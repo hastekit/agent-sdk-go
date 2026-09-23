@@ -1,5 +1,9 @@
 # Sandbox execution
 
+The SDK includes a standalone daemon and a reusable Docker base image. See the
+[image guide](../../../deployments/sandbox/README.md) for building, configuring,
+extending, and publishing it.
+
 All backends implement one contract:
 
 ```

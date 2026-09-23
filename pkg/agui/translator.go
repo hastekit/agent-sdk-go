@@ -408,6 +408,13 @@ func (t *Translator) Translate(chunk *responses.ResponseChunk) []Event {
 	// Started carries the task's own stream: the run that started it is over
 	// long before the task is, so a client that wants the progress subscribes
 	// there rather than here.
+	if event := chunk.OfSummarizationStarted; event != nil {
+		return []Event{&CustomEvent{BaseEvent: baseNow(), Name: CustomNameSummarizationStarted, Value: map[string]any{"runId": event.RunID, "agentName": event.AgentName}}}
+	}
+	if event := chunk.OfSummarizationCompleted; event != nil {
+		return []Event{&CustomEvent{BaseEvent: baseNow(), Name: CustomNameSummarizationCompleted, Value: map[string]any{"runId": event.RunID, "agentName": event.AgentName, "compacted": event.Compacted, "failed": event.Failed}}}
+	}
+
 	if chunk.OfBackgroundTaskStarted != nil {
 		bg := chunk.OfBackgroundTaskStarted
 		return []Event{&CustomEvent{

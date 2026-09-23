@@ -28,7 +28,16 @@ type SummaryResult struct {
 }
 
 type HistorySummarizer interface {
-	// Summarize takes a list of messages and returns a summary result.
-	// If summarization is not needed, returns a result with KeepFromIndex = -1.
+	// ShouldSummarize is a deterministic, side-effect-free decision based on the
+	// supplied history, current context size, and summarizer configuration.
+	// It runs locally, including during durable workflow replay: no I/O,
+	// model calls, wall-clock reads, or mutable external state.
+	ShouldSummarize(ctx context.Context, msgIdToRunId map[string]string, messages []messages.Message, contextTokens int) (bool, error)
+	// Summarize takes a list of messages and returns a summary result (nil when skipped).
 	Summarize(ctx context.Context, msgIdToRunId map[string]string, messages []messages.Message, contextTokens int) (*SummaryResult, error)
 }
+
+// SummarizationObserver receives start and end notifications around a summarizer
+// execution after its decision to compact. End includes the result or error. Observers
+// run in the caller, outside any durable summarizer activity.
+type SummarizationObserver func(started bool, result *SummaryResult, err error)

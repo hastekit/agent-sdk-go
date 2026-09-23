@@ -87,7 +87,7 @@ func TestGetMessages_FirstCallOfTurnSeesContextTokens(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRun (turn 1): %v", err)
 	}
-	if _, err := run1.GetMessages(ctx, "agent"); err != nil {
+	if _, err := run1.GetMessages(ctx, "agent", nil); err != nil {
 		t.Fatalf("GetMessages (turn 1): %v", err)
 	}
 	run1.AddMessages(ctx, userTurn("hello"))
@@ -101,7 +101,7 @@ func TestGetMessages_FirstCallOfTurnSeesContextTokens(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRun (turn 2): %v", err)
 	}
-	if _, err := run2.GetMessages(ctx, "agent"); err != nil {
+	if _, err := run2.GetMessages(ctx, "agent", nil); err != nil {
 		t.Fatalf("GetMessages (turn 2): %v", err)
 	}
 
@@ -116,4 +116,8 @@ func TestGetMessages_FirstCallOfTurnSeesContextTokens(t *testing.T) {
 			t.Fatalf("summarizer saw %v, want %v", rec.seen, want)
 		}
 	}
+}
+
+func (s *recordingSummarizer) ShouldSummarize(context.Context, map[string]string, []Message, int) (bool, error) {
+	return true, nil
 }

@@ -71,3 +71,7 @@ func (s *SlidingWindowHistorySummarizer) Summarize(ctx context.Context, msgIdToR
 		MessagesToKeep:      messagesToKeep,
 	}, nil
 }
+
+func (s *SlidingWindowHistorySummarizer) ShouldSummarize(ctx context.Context, ids map[string]string, msgs []messages.Message, tokens int) (bool, error) {
+	return len(groupIntoRuns(ids, msgs)) > s.keepCount, nil
+}

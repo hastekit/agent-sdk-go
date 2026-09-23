@@ -23,6 +23,7 @@ type inMemoryMessage struct {
 	Messages       []Message
 	Meta           map[string]any
 	CreatedAt      time.Time
+	UpdatedAt      time.Time
 }
 
 // inMemoryThread represents a thread with its message chain
@@ -234,10 +235,16 @@ func (p *InMemoryConversationPersistence) SaveMessages(ctx context.Context, name
 	// the earlier messages, often the user turn that opened the run) and
 	// don't re-index the run in its thread.
 	if existing, ok := p.messages[historyKey(namespace, runId)]; ok {
-		if existing.ThreadID != threadId {
-			return fmt.Errorf("run ID %q already belongs to another thread", runId)
+		if threadId != "" && existing.ThreadID != threadId {
+			// A fork is assigned a new thread on its first save. Its manager
+			// still supplies the source thread and parent run on later saves.
+			parent := p.messages[historyKey(namespace, previousRunId)]
+			if parent == nil || parent.ThreadID != threadId || existing.PreviousRunID != previousRunId {
+				return fmt.Errorf("run ID %q already belongs to another thread", runId)
+			}
 		}
 		existing.Messages = append(existing.Messages, messages...)
+		existing.UpdatedAt = now
 		if meta != nil {
 			existing.Meta = meta
 		}
@@ -356,6 +363,7 @@ func (p *InMemoryConversationPersistence) SaveMessages(ctx context.Context, name
 		Messages:       messages,
 		Meta:           meta,
 		CreatedAt:      now,
+		UpdatedAt:      now,
 	}
 
 	// Add message to the thread's message list

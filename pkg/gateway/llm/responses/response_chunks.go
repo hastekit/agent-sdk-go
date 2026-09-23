@@ -13,6 +13,9 @@ import (
 // -----------------//
 
 type ResponseChunk struct {
+	OfSummarizationStarted   *ChunkSummarization[constants.ChunkTypeSummarizationStarted]   `json:",omitempty"`
+	OfSummarizationCompleted *ChunkSummarization[constants.ChunkTypeSummarizationCompleted] `json:",omitempty"`
+
 	// OfError is a terminal provider or transport failure. It survives broker
 	// serialization so remote consumers see the same failure as local callers.
 	OfError *StreamError `json:",omitempty"`
@@ -98,6 +101,17 @@ func (u *ResponseChunk) UnmarshalJSON(data []byte) error {
 		return err
 	} else if streamErr != nil {
 		*u = ResponseChunk{OfError: streamErr}
+		return nil
+	}
+
+	var started *ChunkSummarization[constants.ChunkTypeSummarizationStarted]
+	if err := sonic.Unmarshal(data, &started); err == nil {
+		*u = ResponseChunk{OfSummarizationStarted: started}
+		return nil
+	}
+	var completed *ChunkSummarization[constants.ChunkTypeSummarizationCompleted]
+	if err := sonic.Unmarshal(data, &completed); err == nil {
+		*u = ResponseChunk{OfSummarizationCompleted: completed}
 		return nil
 	}
 
@@ -333,6 +347,12 @@ func (u *ResponseChunk) UnmarshalJSON(data []byte) error {
 }
 
 func (u *ResponseChunk) MarshalJSON() ([]byte, error) {
+	if u.OfSummarizationStarted != nil {
+		return sonic.Marshal(u.OfSummarizationStarted)
+	}
+	if u.OfSummarizationCompleted != nil {
+		return sonic.Marshal(u.OfSummarizationCompleted)
+	}
 	if u.OfError != nil {
 		return sonic.Marshal(u.OfError)
 	}
@@ -493,6 +513,12 @@ func (u *ResponseChunk) MarshalJSON() ([]byte, error) {
 }
 
 func (u *ResponseChunk) ChunkType() string {
+	if u.OfSummarizationStarted != nil {
+		return u.OfSummarizationStarted.Type.Value()
+	}
+	if u.OfSummarizationCompleted != nil {
+		return u.OfSummarizationCompleted.Type.Value()
+	}
 	if u.OfError != nil {
 		return "error"
 	}
@@ -990,4 +1016,14 @@ type ChunkResponseUsage struct {
 		ReasoningTokens int `json:"reasoning_tokens"`
 	} `json:"output_tokens_details"`
 	TotalTokens int `json:"total_tokens"`
+}
+
+// ChunkSummarization brackets a summarizer invocation. Compacted distinguishes
+// a changed history from a no-op; Failed indicates the invocation failed.
+type ChunkSummarization[T any] struct {
+	Type      T      `json:"type"`
+	RunID     string `json:"run_id"`
+	AgentName string `json:"agent_name"`
+	Compacted bool   `json:"compacted,omitempty"`
+	Failed    bool   `json:"failed,omitempty"`
 }

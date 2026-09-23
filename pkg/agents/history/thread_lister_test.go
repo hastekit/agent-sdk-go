@@ -2,6 +2,7 @@ package history
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -166,6 +167,29 @@ func TestSaveMessagesMergesSameRunID(t *testing.T) {
 	assert.Contains(t, texts, "how are you")
 	assert.Contains(t, texts, "tell me a joke")
 	assert.Contains(t, texts, "here is a joke")
+}
+
+func TestIncrementalSaveRetainsAssignedThread(t *testing.T) {
+	for _, fork := range []bool{false, true} {
+		t.Run(fmt.Sprintf("fork=%v", fork), func(t *testing.T) {
+			ctx := t.Context()
+			p := NewInMemoryConversationPersistence()
+			thread, parent := "", ""
+			if fork {
+				thread, parent = "source", "first"
+				require.NoError(t, p.SaveMessages(ctx, "ns", "default", "first", "", thread, "C", []Message{userBundle("user", "first")}, nil))
+				require.NoError(t, p.SaveMessages(ctx, "ns", "default", "second", "first", thread, "C", []Message{userBundle("user", "second")}, nil))
+			}
+			require.NoError(t, p.SaveMessages(ctx, "ns", "default", "run", parent, thread, "C", []Message{userBundle("user", "question")}, nil))
+			assigned := p.getMessage("ns", "run").ThreadID
+			require.NotEmpty(t, assigned)
+			require.NotEqual(t, thread, assigned)
+			require.NoError(t, p.SaveMessages(ctx, "ns", "default", "run", parent, thread, "C", []Message{userBundle("agent", "answer")}, nil))
+			require.Equal(t, assigned, p.getMessage("ns", "run").ThreadID)
+			require.Len(t, p.getMessage("ns", "run").Messages, 2)
+			require.ErrorContains(t, p.SaveMessages(ctx, "ns", "default", "run", parent, "unrelated", "C", nil, nil), "another thread")
+		})
+	}
 }
 
 func TestFileReplayMergesSameRunID(t *testing.T) {

@@ -25,3 +25,7 @@ func (t *RestateConversationSummarizer) Summarize(ctx context.Context, msgIdToRu
 		return t.wrappedSummarizer.Summarize(ctx, msgIdToRunId, msgs, contextTokens)
 	})
 }
+
+func (t *RestateConversationSummarizer) ShouldSummarize(ctx context.Context, ids map[string]string, msgs []messages.Message, tokens int) (bool, error) {
+	return t.wrappedSummarizer.ShouldSummarize(ctx, ids, msgs, tokens)
+}
