@@ -20,6 +20,19 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// streamTestContext bounds hangs without imposing a one-second performance
+// requirement on decoding under the race detector or a loaded CI runner.
+func streamTestContext(t *testing.T) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	t.Cleanup(func() {
+		err := ctx.Err()
+		cancel()
+		require.NoError(t, err, "stream test exhausted its safety deadline")
+	})
+	return ctx
+}
+
 type responseProvider interface {
 	NewResponses(context.Context, *responses.Request) (*responses.Response, error)
 	NewStreamingResponses(context.Context, *responses.Request) (chan *responses.ResponseChunk, error)
@@ -152,8 +165,7 @@ func TestProviderStreamingIntegrity(t *testing.T) {
 			client := &http.Client{Transport: transportFunc(func(*http.Request) (*http.Response, error) {
 				return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(tc.payload))}, nil
 			})}
-			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-			defer cancel()
+			ctx := streamTestContext(t)
 			chunks, err := providers[tc.provider](client).NewStreamingResponses(ctx, &responses.Request{})
 			require.NoError(t, err)
 			completed := false
@@ -225,8 +237,7 @@ func TestProviderStreamingToleratesUnknownEvents(t *testing.T) {
 				client := &http.Client{Transport: transportFunc(func(*http.Request) (*http.Response, error) {
 					return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(payload))}, nil
 				})}
-				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-				defer cancel()
+				ctx := streamTestContext(t)
 				stream, err := providers[provider](client).NewStreamingResponses(ctx, &responses.Request{})
 				require.NoError(t, err)
 				completed := false
@@ -281,8 +292,7 @@ func TestProviderStreamingSurvivesDamagedFrames(t *testing.T) {
 					body := frame + completion[provider]
 					return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
 				})}
-				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-				defer cancel()
+				ctx := streamTestContext(t)
 				stream, err := providers[provider](client).NewStreamingResponses(ctx, &responses.Request{})
 				require.NoError(t, err)
 				completed := false
@@ -316,8 +326,7 @@ func TestProviderStreamingAcceptsEventsWithoutBlankLines(t *testing.T) {
 			client := &http.Client{Transport: transportFunc(func(*http.Request) (*http.Response, error) {
 				return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(payload))}, nil
 			})}
-			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-			defer cancel()
+			ctx := streamTestContext(t)
 			stream, err := providers[provider](client).NewStreamingResponses(ctx, &responses.Request{})
 			require.NoError(t, err)
 			completed := false
@@ -336,8 +345,7 @@ func TestProviderStreamingAcceptsEventsWithoutBlankLines(t *testing.T) {
 // working: a single event whose payload is split across data lines is joined.
 func TestResponseStreamJoinsMultiLineDataFrames(t *testing.T) {
 	body := io.NopCloser(strings.NewReader("data: {\"type\":\"response.completed\",\ndata: \"response\":{}}\n\n"))
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
+	ctx := streamTestContext(t)
 	stream := base.StreamResponsesSSE(ctx, body, func(data []byte) ([]*responses.ResponseChunk, error) {
 		var chunk responses.ResponseChunk
 		if err := json.Unmarshal(data, &chunk); err != nil {
@@ -360,8 +368,7 @@ func TestResponseStreamJoinsMultiLineDataFrames(t *testing.T) {
 // and the message should say so rather than blaming the transport.
 func TestResponseStreamReportsDoneWithoutCompletion(t *testing.T) {
 	body := io.NopCloser(strings.NewReader("data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\ndata: [DONE]\n\n"))
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
+	ctx := streamTestContext(t)
 	stream := base.StreamResponsesSSE(ctx, body, func(data []byte) ([]*responses.ResponseChunk, error) {
 		var chunk responses.ResponseChunk
 		if err := json.Unmarshal(data, &chunk); err != nil {
