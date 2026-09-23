@@ -1,6 +1,6 @@
 {
   "name": "@hastekit/react",
-  "version": "0.1.0",
+  "version": "0.0.1",
   "description": "Headless React chat state and resumable streaming for HasteKit AG-UI servers",
   "license": "Apache-2.0",
   "type": "module",

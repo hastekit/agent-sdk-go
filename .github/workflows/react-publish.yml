@@ -9,9 +9,9 @@ on:
 permissions:
   contents: read
 
-# Serialize retries for a tag without interrupting an active publish.
+# Serialize publishing across manual and tag-triggered runs.
 concurrency:
-  group: react-publish-${{ github.ref }}
+  group: react-publish
   cancel-in-progress: false
 
 jobs:
@@ -23,7 +23,7 @@ jobs:
     outputs:
       dist-tag: ${{ steps.version.outputs.dist_tag }}
     steps:
-      # Publish only a matching release tag, including for manual runs.
+      # Publish only a release tag matching the checked-out package version.
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
@@ -37,12 +37,18 @@ jobs:
           import { readFileSync, appendFileSync } from 'node:fs';
           const pkg = JSON.parse(readFileSync('package.json', 'utf8'));
           const lock = JSON.parse(readFileSync('package-lock.json', 'utf8'));
-          if (pkg.name !== '@hastekit/react' || process.env.RELEASE_REF !== `refs/tags/react-v${pkg.version}`) {
-            throw new Error('Run this workflow on a react-v<version> tag matching @hastekit/react package.json');
+          if (pkg.name !== '@hastekit/react') {
+            throw new Error(`Expected @hastekit/react, received ${pkg.name}`);
+          }
+          const ref = process.env.RELEASE_REF;
+          const expected = `refs/tags/react-v${pkg.version}`;
+          if (ref !== expected) {
+            throw new Error(`Release ref ${ref} does not match package version ${pkg.version}; expected ${expected}`);
           }
           if (lock.version !== pkg.version || lock.packages[''].version !== pkg.version) {
             throw new Error('package-lock.json must match the package version');
           }
+          console.log(`Publishing ${pkg.name}@${pkg.version} from ${ref}`);
           appendFileSync(process.env.GITHUB_OUTPUT, `dist_tag=${pkg.version.includes('-') ? 'next' : 'latest'}\n`);
           JS
 
