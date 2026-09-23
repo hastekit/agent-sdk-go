@@ -742,6 +742,48 @@ agent := hastekit.MustNewAgent(&hastekit.AgentConfig{
 })
 ```
 
+For older MCP servers that omit `cacheScope`, configure a fallback alongside
+your schema cache and TTL:
+
+```go
+mcpclient.WithSchemaCache(cache),
+mcpclient.WithCacheTTL(5 * time.Minute),
+mcpclient.WithDefaultCacheScope(mcpclient.CacheScopePublic),
+```
+
+Use `CacheScopePublic` only when all users see the same tool list. The default
+is `CacheScopePrivate` (per requester). Explicit server scopes take precedence;
+this option only applies when `cacheScope` is absent. A positive server TTL or
+`WithCacheTTL` is still required for caching.
+
+#### Per-call MCP metadata
+
+Use `WithMeta` for changing request context such as thread and run IDs.
+String values use the same `{{key}}` templates as headers, resolved against
+`ToolCall.RunContext` immediately before each tool execution:
+
+```go
+mcpclient.WithMeta(map[string]any{
+    "hastekit.ai/context": map[string]any{
+        "thread_id": "{{thread_id}}",
+        "run_id":    "{{run_id}}",
+    },
+    "source": "agent", // static values are also supported
+})
+```
+
+Supply `thread_id` and `run_id` in your run context. Nested maps and arrays are
+resolved recursively; non-string JSON values keep their types. The MCP server
+reads the values from `req.Params.Meta`. They are request metadata, not tool
+arguments, and do not affect connection or schema cache keys. Resolved values
+never enter cached schemas or tool descriptors. SDK-generated progress tokens
+take precedence over a configured `progressToken`.
+
+Metadata is resolved inside the Temporal tool activity or Restate run step,
+using the call's persisted run context. Completed activities/steps replay their
+recorded results; retries resolve the templates again from those inputs. Keep
+authentication and values that determine tool visibility in credentials or headers.
+
 #### MCP Servers over stdio
 
 Many MCP servers ship as a command rather than a URL. `WithCommand` runs one as a

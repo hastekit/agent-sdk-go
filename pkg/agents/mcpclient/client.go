@@ -36,6 +36,7 @@ type MCPClient struct {
 	CacheTTL             time.Duration `json:"-"`
 	DisableStandaloneSSE bool          `json:"-"`
 	schemaCache          SchemaCache   // injected cache (required for caching)
+	defaultCacheScope    string
 
 	// credentials resolves this server's access token per call
 	credentials CredentialProvider
@@ -53,6 +54,9 @@ func NewClient(ctx context.Context, name string, endpoint string, options ...Mcp
 
 	for _, option := range options {
 		option(srv)
+	}
+	if srv.defaultCacheScope != "" && srv.defaultCacheScope != CacheScopePublic && srv.defaultCacheScope != CacheScopePrivate {
+		return nil, fmt.Errorf("invalid default MCP cache scope %q: want public or private", srv.defaultCacheScope)
 	}
 
 	// Copied, not written into: WithMeta stores the caller's own map, and two
@@ -160,6 +164,16 @@ func WithCacheTTL(ttl time.Duration) McpServerOption {
 	}
 }
 
+// WithDefaultCacheScope selects the schema cache scope when the server omits
+// cacheScope. Empty means private, the default. Explicit server scopes always
+// take precedence. Use public only when the tool list is the same for all users.
+// Legacy servers also need WithCacheTTL to enable caching when they omit ttlMs.
+func WithDefaultCacheScope(scope string) McpServerOption {
+	return func(srv *MCPClient) {
+		srv.defaultCacheScope = scope
+	}
+}
+
 // WithDisableStandaloneSSE disables the post-init server→client SSE stream
 // on the streamable-http transport. Enable it for servers that don't
 // support the standalone GET stream (the client otherwise hangs waiting
@@ -179,6 +193,10 @@ func WithSchemaCache(cache SchemaCache) McpServerOption {
 	}
 }
 
+// WithMeta configures tools/call metadata. String values (including nested maps
+// and arrays) use the same {{key}} templates as headers, resolved against each
+// ToolCall.RunContext at execution time. Non-string values retain their types.
+// Resolved values never enter schema caches, tool descriptors, or connection keys.
 func WithMeta(m map[string]any) McpServerOption {
 	return func(srv *MCPClient) {
 		srv.Meta = m
@@ -195,15 +213,19 @@ func (srv *MCPClient) GetName() string {
 // That answers, from the server, the question this client used to have to
 // guess at — whether one user's tool list may be served to another.
 const (
-	cacheScopePublic  = "public"
-	cacheScopePrivate = "private"
+	// CacheScopePublic shares tool schemas across users of a named MCP client.
+	CacheScopePublic = "public"
+	// CacheScopePrivate keeps tool schemas scoped to each requester.
+	CacheScopePrivate = "private"
+
+	cacheScopePublic  = CacheScopePublic
+	cacheScopePrivate = CacheScopePrivate
 )
 
 // toolListing is one tools/list response: the schemas, and the terms the server
 // offered them on.
 type toolListing struct {
 	Tools []*mcp.Tool
-	Meta  mcp.Meta
 
 	// TTL and CacheScope are the server's cache directives. CacheScope is empty
 	// from a server older than 2026-07-28, which is not the same as it saying
@@ -212,9 +234,15 @@ type toolListing struct {
 	CacheScope string
 }
 
-// shareable reports whether this listing may be stored where another run will
-// read it.
-func (l toolListing) shareable() bool { return l.CacheScope == cacheScopePublic }
+// shareable applies the fallback only to an omitted scope. Unknown explicit
+// scopes remain private. Keep the original scope in cached entries so changing
+// the fallback cannot turn an old public fallback into an explicit promise.
+func (srv *MCPClient) shareable(scope string) bool {
+	if scope == "" {
+		scope = srv.defaultCacheScope
+	}
+	return scope == CacheScopePublic
+}
 
 func (srv *MCPClient) ListTools(ctx context.Context, runContext map[string]any) ([]agents.Tool, error) {
 	conn, err := srv.connFor(ctx, runContext)
@@ -227,13 +255,13 @@ func (srv *MCPClient) ListTools(ctx context.Context, runContext map[string]any) 
 		if err != nil {
 			return nil, err
 		}
-		return srv.buildLazyTools(listing.Tools, listing.Meta, conn), nil
+		return srv.buildLazyTools(listing.Tools, srv.Meta, conn), nil
 	}
 
 	sharedKey, privateKey := srv.schemaCacheKeys(conn)
 
-	// The shared key first: an entry only ever lands there when the server
-	// called its listing public, so whatever is found is safe for this run.
+	// Re-check shared entries against this client's fallback: another client
+	// may have opted into public caching for a server that omitted its scope.
 	for _, key := range []string{sharedKey, privateKey} {
 		data, found, err := srv.schemaCache.Get(ctx, key)
 		if err != nil {
@@ -241,7 +269,10 @@ func (srv *MCPClient) ListTools(ctx context.Context, runContext map[string]any) 
 		}
 		var cached CachedToolEntry
 		if found && json.Unmarshal(data, &cached) == nil && !cached.ExpiresAt.IsZero() && !cached.expired() {
-			return srv.buildLazyTools(cached.Tools, cached.Meta, conn), nil
+			if key == sharedKey && !srv.shareable(cached.CacheScope) {
+				continue
+			}
+			return srv.buildLazyTools(cached.Tools, srv.Meta, conn), nil
 		}
 	}
 
@@ -253,16 +284,15 @@ func (srv *MCPClient) ListTools(ctx context.Context, runContext map[string]any) 
 	// A non-positive server TTL may use an explicit local TTL override.
 	// Without one, bypass caching instead of storing an unbounded entry.
 	if listing.TTL <= 0 && srv.CacheTTL <= 0 {
-		return srv.buildLazyTools(listing.Tools, listing.Meta, conn), nil
+		return srv.buildLazyTools(listing.Tools, srv.Meta, conn), nil
 	}
 
 	key := privateKey
-	if listing.shareable() {
+	if srv.shareable(listing.CacheScope) {
 		key = sharedKey
 	}
 	entry := &CachedToolEntry{
 		Tools:      listing.Tools,
-		Meta:       listing.Meta,
 		CacheScope: listing.CacheScope,
 	}
 	ttl := srv.cacheTTL(listing)
@@ -277,7 +307,7 @@ func (srv *MCPClient) ListTools(ctx context.Context, runContext map[string]any) 
 		return nil, fmt.Errorf("write MCP schema cache: %w", err)
 	}
 
-	return srv.buildLazyTools(listing.Tools, listing.Meta, conn), nil
+	return srv.buildLazyTools(listing.Tools, srv.Meta, conn), nil
 }
 
 // cacheTTL is how long a listing may be held: what the server asked for,
@@ -393,11 +423,8 @@ func resolveTemplates(values map[string]string, runContext map[string]any) map[s
 // under a key that does name one: the tool list a server shows an admin is not
 // the one it shows everybody, and one user's must never be served to another.
 //
-// A server that said nothing is treated as private, though the spec's default
-// for an absent cacheScope is public. The default is written for servers that
-// could have said "private" and chose not to; one older than 2026-07-28 never
-// had the words, and reading silence from it as a promise is how a privileged
-// tool list ends up in front of the wrong user.
+// An omitted scope is private unless WithDefaultCacheScope explicitly opts
+// into public sharing for a server known to expose the same tools to everyone.
 //
 // The connector's name is the whole of the server's identity here. It is
 // required, it is what the durable runtimes already build activity names from,
@@ -432,7 +459,6 @@ func (srv *MCPClient) fetchToolSchemas(ctx context.Context, conn serverConn) (to
 
 	return toolListing{
 		Tools:      res.Tools,
-		Meta:       srv.Meta,
 		TTL:        time.Duration(res.GetTTLMs()) * time.Millisecond,
 		CacheScope: res.GetCacheScope(),
 	}, nil
@@ -452,7 +478,8 @@ func (srv *MCPClient) buildLazyTools(tools []*mcp.Tool, meta mcp.Meta, conn serv
 		requiresApproval := slices.Contains(srv.ApprovalRequiredTools, tool.Name)
 		deferred := slices.Contains(srv.DeferredTools, tool.Name) || slices.Contains(srv.DeferredTools, "*")
 
-		result = append(result, NewLazyMcpTool(tool, conn, meta, requiresApproval, deferred, srv.ToolPrefix))
+		lazy := NewLazyMcpTool(tool, conn, meta, requiresApproval, deferred, srv.ToolPrefix)
+		result = append(result, lazy)
 	}
 	return result
 }

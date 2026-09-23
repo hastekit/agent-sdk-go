@@ -344,3 +344,74 @@ func TestSchemaCacheSharesKVWithSkills(t *testing.T) {
 	require.NoError(t, json.Unmarshal(data, &entry))
 	require.Len(t, entry.Tools, 1)
 }
+
+func TestDefaultCacheScope(t *testing.T) {
+	for _, tc := range []struct {
+		name, serverScope, fallback string
+		legacy                      bool
+		wantFetches                 int
+	}{
+		{"legacy public", "", CacheScopePublic, true, 1},
+		{"legacy private", "", CacheScopePrivate, true, 2},
+		{"legacy unset", "", "", true, 2},
+		{"explicit private wins", CacheScopePrivate, CacheScopePublic, false, 2},
+		{"explicit public wins", CacheScopePublic, CacheScopePrivate, false, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var versions []string
+			if tc.legacy {
+				versions = []string{"2025-11-25"}
+			}
+			url, lists := cacheableServer(t, time.Minute, tc.serverScope, versions...)
+			cache := newMemCache()
+			client := cachingClient(t, url, cache,
+				WithDefaultCacheScope(tc.fallback), WithCacheTTL(time.Minute),
+				WithCredentialProvider(keyed(&stubProvider{tokens: map[string]string{"cached/ada": "a", "cached/grace": "g"}})))
+			for _, user := range []string{"ada", "grace", "ada"} {
+				_, err := client.ListTools(t.Context(), map[string]any{"user": user})
+				require.NoError(t, err)
+			}
+			require.Equal(t, tc.wantFetches, lists())
+			require.Len(t, cache.keys(), tc.wantFetches)
+		})
+	}
+}
+
+func TestDefaultCacheScopeDoesNotTrustAnotherClientsFallback(t *testing.T) {
+	url, lists := cacheableServer(t, 0, "", "2025-11-25")
+	cache := newMemCache()
+	makeClient := func(scope string) *MCPClient {
+		return cachingClient(t, url, cache, WithDefaultCacheScope(scope), WithCacheTTL(time.Minute),
+			WithCredentialProvider(keyed(&stubProvider{tokens: map[string]string{"cached/ada": "a", "cached/grace": "g"}})))
+	}
+	public := makeClient(CacheScopePublic)
+	_, err := public.ListTools(t.Context(), map[string]any{"user": "ada"})
+	require.NoError(t, err)
+	private := makeClient(CacheScopePrivate)
+	for range 2 {
+		_, err = private.ListTools(t.Context(), map[string]any{"user": "grace"})
+		require.NoError(t, err)
+	}
+	require.Equal(t, 2, lists(), "private client must fetch its own list, then reuse its private entry")
+	require.Len(t, cache.keys(), 2)
+}
+
+func TestDefaultCacheScopeValidation(t *testing.T) {
+	_, err := NewClient(t.Context(), "test", "http://localhost", WithDefaultCacheScope("publci"))
+	require.ErrorContains(t, err, "invalid default MCP cache scope")
+	client, err := NewClient(t.Context(), "test", "http://localhost", WithDefaultCacheScope(CacheScopePublic))
+	require.NoError(t, err)
+	require.False(t, client.shareable("unknown"), "an unknown explicit scope must not use the fallback")
+}
+
+func TestPublicDefaultCacheScopeStillNeedsTTL(t *testing.T) {
+	url, lists := cacheableServer(t, 0, "", "2025-11-25")
+	cache := newMemCache()
+	client := cachingClient(t, url, cache, WithDefaultCacheScope(CacheScopePublic))
+	for range 2 {
+		_, err := client.ListTools(t.Context(), nil)
+		require.NoError(t, err)
+	}
+	require.Equal(t, 2, lists())
+	require.Empty(t, cache.keys())
+}

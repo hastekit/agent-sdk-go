@@ -101,7 +101,7 @@ func (c *McpTool) Execute(ctx context.Context, params *agents.ToolCall) (*agents
 	// Call the MCP tool. When the run wired a progress sink, attach a
 	// progress token so the server streams notifications/progress back
 	// through handleProgressNotification for the duration of the call.
-	callParams, cleanup := newCallToolParams(c.Meta, params.Name, args, params)
+	callParams, cleanup := newCallToolParams(resolveMeta(c.Meta, params.RunContext), params.Name, args, params)
 	defer cleanup()
 
 	// When resuming, carry the user's answer to the question the server asked
@@ -199,6 +199,8 @@ func (c *LazyMcpTool) Execute(ctx context.Context, params *agents.ToolCall) (*ag
 		}
 	}
 
+	meta := resolveMeta(c.meta, params.RunContext)
+
 	cli, release, err := checkoutSession(ctx, c.conn)
 	if err != nil {
 		return toolOutput(params, err.Error()), nil
@@ -208,7 +210,7 @@ func (c *LazyMcpTool) Execute(ctx context.Context, params *agents.ToolCall) (*ag
 	// Call the MCP tool directly by name — no ListTools needed. When the run
 	// wired a progress sink, attach a progress token so the server streams
 	// notifications/progress back through handleProgressNotification.
-	callParams, cleanup := newCallToolParams(c.meta, c.Name, args, params)
+	callParams, cleanup := newCallToolParams(meta, c.Name, args, params)
 	defer cleanup()
 
 	// When resuming, carry the user's answer to the question the server asked
