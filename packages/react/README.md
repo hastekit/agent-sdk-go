@@ -335,9 +335,11 @@ support, it falls back to refreshing every five seconds.
 ## Publishing to npm
 
 `.github/workflows/react-publish.yml` publishes `@hastekit/react` on a pushed
-`react-v<version>` tag. It checks package and lockfile versions, tests React 18 and
-19, builds the package through `npm pack`, and publishes the tarball with public
-access and provenance. Stable versions use `latest`; prereleases use `next`.
+`react-v<version>` tag. The tag determines the published npm version; you do not
+need to bump `package.json` before tagging. The workflow validates the tag, tests
+React 18 and 19, updates both manifests in the release workspace, builds through
+`npm pack`, and publishes with public access and provenance. Stable versions use
+`latest`; prereleases use `next`. The source commit is not modified.
 
 Configure an npm trusted publisher for `@hastekit/react` with GitHub owner
 `hastekit`, repository `agent-sdk-go`, and workflow `react-publish.yml` (no
@@ -348,13 +350,13 @@ and suitable for unattended publishing. Remove the token after trusted publishin
 is configured if you choose that authentication method.
 
 ```sh
-# From packages/react, update and commit the package and lockfile versions.
-npm version 0.1.1 --no-git-tag-version
-# Commit the changes, then tag that commit from the repository root.
-git tag react-v0.1.1
-git push origin react-v0.1.1
+# Tag the committed source you want to publish from the repository root.
+git tag react-v0.0.2
+git push origin react-v0.0.2
 ```
 
-The workflow can also be dispatched manually against a matching existing tag.
-Dispatching against a branch fails validation. Already published versions cannot
-be overwritten; bump the package version for a new release.
+The workflow can also be dispatched manually against an existing `react-v<version>`
+tag. Dispatching against a branch fails validation. Already published npm versions
+cannot be overwritten; use a new release tag for each new version. The tag must
+point to a commit containing this workflow; rerunning an older failed job still
+uses the workflow from its original commit.

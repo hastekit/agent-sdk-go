@@ -22,8 +22,9 @@ jobs:
         working-directory: packages/react
     outputs:
       dist-tag: ${{ steps.version.outputs.dist_tag }}
+      version: ${{ steps.version.outputs.version }}
     steps:
-      # Publish only a release tag matching the checked-out package version.
+      # Use the release tag as the authoritative npm version.
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
@@ -41,15 +42,16 @@ jobs:
             throw new Error(`Expected @hastekit/react, received ${pkg.name}`);
           }
           const ref = process.env.RELEASE_REF;
-          const expected = `refs/tags/react-v${pkg.version}`;
-          if (ref !== expected) {
-            throw new Error(`Release ref ${ref} does not match package version ${pkg.version}; expected ${expected}`);
+          const match = /^refs\/tags\/react-v((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*)?)$/.exec(ref ?? '');
+          if (!match) {
+            throw new Error(`Invalid release ref ${ref}; use react-v<version>, for example react-v0.0.2 or react-v0.0.3-beta.1`);
           }
+          const version = match[1];
           if (lock.version !== pkg.version || lock.packages[''].version !== pkg.version) {
             throw new Error('package-lock.json must match the package version');
           }
-          console.log(`Publishing ${pkg.name}@${pkg.version} from ${ref}`);
-          appendFileSync(process.env.GITHUB_OUTPUT, `dist_tag=${pkg.version.includes('-') ? 'next' : 'latest'}\n`);
+          console.log(`Publishing ${pkg.name}@${version} from ${ref} (source version: ${pkg.version})`);
+          appendFileSync(process.env.GITHUB_OUTPUT, `version=${version}\ndist_tag=${version.includes('-') ? 'next' : 'latest'}\n`);
           JS
 
   test:
@@ -91,6 +93,11 @@ jobs:
           registry-url: https://registry.npmjs.org
           scope: '@hastekit'
       - run: npm ci
+      # Stamp both manifests in the release workspace without changing the source commit.
+      - name: Set package version from release tag
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+        run: npm version "$RELEASE_VERSION" --no-git-tag-version --allow-same-version --ignore-scripts
       - name: Build and pack
         run: npm pack --pack-destination "$RUNNER_TEMP"
 
