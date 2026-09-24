@@ -204,7 +204,7 @@ func pumpEvents(w http.ResponseWriter, r *http.Request, chunks <-chan *responses
 			if err := emit(events); err != nil {
 				return
 			}
-			if chunk.OfRunCompleted != nil || chunk.OfRunPaused != nil {
+			if chunk.OfRunCompleted != nil || chunk.OfRunPaused != nil || chunk.OfRunFailed != nil {
 				if !resumed || state.translator == nil {
 					fail(errReplayUnavailable)
 				}

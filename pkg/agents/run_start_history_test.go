@@ -2,6 +2,7 @@ package agents_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 
@@ -92,4 +93,42 @@ func TestOpeningSaveFailureStopsBeforeModelAndStartEvent(t *testing.T) {
 	require.ErrorIs(t, err, failure)
 	require.Equal(t, agentstate.RunStatusError, out.Status)
 	require.Zero(t, llm.callCount())
+}
+
+// Failure diagnostics are UI metadata, never synthetic messages in the next model request.
+func TestFailedRunErrorIsExcludedFromFollowUpModelInput(t *testing.T) {
+	for _, backend := range []string{"memory", "file"} {
+		t.Run(backend, func(t *testing.T) {
+			var store history.ConversationPersistenceAdapter = history.NewInMemoryConversationPersistence()
+			if backend == "file" {
+				var err error
+				store, err = history.NewFileConversationPersistence(t.TempDir())
+				require.NoError(t, err)
+			}
+
+			// Exhaust the model once so the real failure path persists a diagnostic.
+			model := &scriptedLLM{}
+			agent := newScriptedAgent("test", model, history.NewConversationManager(store), streambroker.NewMemoryStreamBroker(), nil, nil)
+			failed, failure := agent.ExecuteLocal(t.Context(), &agents.AgentInput{Namespace: "default", ThreadID: "thread", Message: userMessage("original question")})
+			require.Error(t, failure)
+			rows, err := store.LoadMessages(t.Context(), "default", "thread", "")
+			require.NoError(t, err)
+			require.Equal(t, failure.Error(), agentstate.LoadRunStateFromMeta(rows[0].Meta).Error)
+
+			// Recreate the agent to exercise reloading persisted history rather than in-memory state.
+			nextModel := &scriptedLLM{script: []*responses.Response{textResponse("recovered")}}
+			nextAgent := newScriptedAgent("test", nextModel, history.NewConversationManager(store), streambroker.NewMemoryStreamBroker(), nil, nil)
+			next, err := nextAgent.ExecuteLocal(t.Context(), &agents.AgentInput{Namespace: "default", ThreadID: "thread", Message: userMessage("please try again")})
+			require.NoError(t, err)
+			require.NotEqual(t, failed.RunID, next.RunID)
+
+			// Inspect the complete provider request, not only its displayed transcript.
+			request, err := json.Marshal(nextModel.request(0))
+			require.NoError(t, err)
+			require.Contains(t, string(request), "original question")
+			require.Contains(t, string(request), "please try again")
+			require.NotContains(t, string(request), failure.Error())
+			require.NotContains(t, string(request), "scripted LLM exhausted")
+		})
+	}
 }

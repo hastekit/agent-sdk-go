@@ -285,6 +285,10 @@ export class ChatController {
       this.update({
         messages: page.messages,
         run: page.run,
+        error:
+          page.run?.status === "error"
+            ? new Error(page.run.error || "Agent run failed")
+            : null,
         sessionId: page.sessionId,
         hasOlderMessages: Boolean(this.cursor),
         loadingMessages: false,
@@ -477,7 +481,7 @@ export class ChatController {
     this.update({
       connection: "connecting",
       isRunning: Boolean(input),
-      error: null,
+      error: input ? null : this.snapshot.error,
     });
     try {
       const events = this.options.transport.stream(
@@ -514,6 +518,10 @@ export class ChatController {
           this.update({
             messages: prependMessages(this.snapshot.messages, page.messages),
             run: page.run,
+            error:
+              page.run?.status === "error"
+                ? new Error(page.run.error || "Agent run failed")
+                : null,
             sessionId: page.sessionId,
             hasOlderMessages: Boolean(this.cursor),
           });
@@ -560,8 +568,11 @@ export class ChatController {
     this.update({
       ...reducer.apply(this.snapshot, event),
       lastEvent: event,
-      connection: "streaming",
-      isRunning: true,
+      connection:
+        event.type === "RUN_ERROR" || event.type === "RUN_FINISHED"
+          ? "idle"
+          : "streaming",
+      isRunning: event.type !== "RUN_ERROR" && event.type !== "RUN_FINISHED",
     });
     if (event.type === "RUN_STARTED")
       void this.refreshThreads().catch(() => {});

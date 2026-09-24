@@ -192,7 +192,7 @@ func NewRun(ctx context.Context, cm *CommonConversationManager, namespace string
 
 	// Load the run state
 	var runID string
-	if cr.RunState == nil || cr.RunState.IsComplete() {
+	if cr.RunState == nil || cr.RunState.IsComplete() || cr.RunState.IsFailed() {
 		// Create a new run id
 		runID = cr.ConversationPersistenceAdapter.NewRunID(ctx)
 
@@ -604,7 +604,7 @@ func (cm *ConversationRunManager) GetConversationID() string {
 func (cm *ConversationRunManager) SaveMessages(ctx context.Context) error {
 	savedAt := cm.now(ctx)
 	var metaOptions []agentstate.MetaOption
-	if cm.RunState.IsComplete() || cm.RunState.IsPaused() {
+	if cm.RunState.IsComplete() || cm.RunState.IsPaused() || cm.RunState.IsFailed() {
 		metaOptions = append(metaOptions, agentstate.WithCompletedAt(savedAt))
 	}
 	meta := cm.RunState.ToMeta(metaOptions...)

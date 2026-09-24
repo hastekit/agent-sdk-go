@@ -254,6 +254,7 @@ export class EventReducer {
     // Run lifecycle events retain approval data supplied by custom events.
     if (event.type === "RUN_STARTED")
       return {
+        error: null,
         run: {
           runId: text(event, "runId"),
           status: "running",

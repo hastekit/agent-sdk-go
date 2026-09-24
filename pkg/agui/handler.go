@@ -590,6 +590,8 @@ func runIDOf(chunk *responses.ResponseChunk) string {
 		return chunk.OfRunCreated.RunState.Id
 	case chunk.OfRunInProgress != nil:
 		return chunk.OfRunInProgress.RunState.Id
+	case chunk.OfRunFailed != nil:
+		return chunk.OfRunFailed.RunState.Id
 	case chunk.OfRunCompleted != nil:
 		return chunk.OfRunCompleted.RunState.Id
 	case chunk.OfRunPaused != nil:

@@ -2,6 +2,7 @@ package agui
 
 import (
 	"encoding/json"
+	"fmt"
 	"sort"
 	"time"
 
@@ -272,6 +273,9 @@ func (t *Translator) Translate(chunk *responses.ResponseChunk) []Event {
 			},
 		)
 		return out
+
+	case chunk.OfRunFailed != nil:
+		return t.Error(fmt.Errorf("%s", chunk.OfRunFailed.RunState.Error), "agent_error")
 
 	case chunk.OfRunCompleted != nil:
 		out := t.closeOpenItems()

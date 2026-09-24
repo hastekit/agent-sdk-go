@@ -332,7 +332,6 @@ export default function App() {
     setCompacting(false);
     if (!agent) return;
     agent.subscribe({
-      onRunInitialized: () => setRunError(null),
       // A live run says what is happening, so the snapshot the page loaded
       // with is behind it and goes.
       //
@@ -343,6 +342,7 @@ export default function App() {
       // instant it was drawn. This fires only when a run is actually
       // streaming, which is the thing that supersedes it.
       onRunStartedEvent: () => {
+        setRunError(null);
         setRestored(null);
         void refreshThreads();
       },
@@ -493,7 +493,8 @@ export default function App() {
   }, [agentName, refreshThreads]);
 
   // Clear a stale run error when the user switches thread or agent.
-  useEffect(() => setRunError(null), [active.threadId, agentName]);
+  // Restore terminal failures when opening history after the replay log has expired.
+  useEffect(() => setRunError(active.run?.status === "error" ? active.run.error || "The agent run failed." : null), [active.threadId, agentName, active.run]);
 
   // What the thread was left waiting on, as the page found it. Held apart
   // from `active` because it is transient: the moment a run starts, the run

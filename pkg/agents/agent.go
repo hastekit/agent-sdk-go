@@ -415,7 +415,7 @@ func (e *Agent) ExecuteWithoutTrace(ctx context.Context, in *AgentInput) (*Agent
 // ExecuteLocal owns the broker stream's lifecycle: it closes the stream
 // channel on return so subscribers terminate cleanly. Callers (Agent.Execute,
 // the gateway's runtime workflows, etc.) don't need to call Close themselves.
-func (e *Agent) ExecuteLocal(ctx context.Context, in *AgentInput) (*AgentOutput, error) {
+func (e *Agent) ExecuteLocal(ctx context.Context, in *AgentInput) (output *AgentOutput, executionErr error) {
 	// Whoever the run enters at owns it. Set before the sticky-handoff routing
 	// below, so a run that resumes straight into a specialist still records the
 	// agent it entered at rather than the one it ended up in.
@@ -479,6 +479,30 @@ func (e *Agent) ExecuteLocal(ctx context.Context, in *AgentInput) (*AgentOutput,
 	defer func() {
 		e.durableStep.Do(func() {
 			e.publishRunEvent(context.WithoutCancel(ctx), RunEventFinished, in, runId, run.GetGroupID())
+		})
+	}()
+
+	// Persist and publish terminal failures before the broker closes, including handoff failures.
+	defer func() {
+		if executionErr == nil {
+			return
+		}
+		failureCtx := context.WithoutCancel(ctx)
+		run.RunState.TransitionToError(executionErr)
+		if saveErr := run.SaveMessages(failureCtx); saveErr != nil {
+			executionErr = errors.Join(executionErr, fmt.Errorf("persist failed run: %w", saveErr))
+		}
+		e.durableStep.Do(func() {
+			e.publisher(in.StreamID)(&responses.ResponseChunk{
+				OfRunFailed: &responses.ChunkRun[constants.ChunkTypeRunFailed]{RunState: responses.ChunkRunData{
+					Id:      run.GetRunID(),
+					Object:  "run",
+					Status:  "error",
+					Error:   executionErr.Error(),
+					Usage:   run.RunState.Usage,
+					TraceID: run.RunState.TraceID,
+				}},
+			})
 		})
 	}()
 

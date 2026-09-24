@@ -68,6 +68,7 @@ type ResponseChunk struct {
 	OfRunCreated         *ChunkRun[constants.ChunkTypeRunCreated]    `json:",omitempty"`
 	OfRunInProgress      *ChunkRun[constants.ChunkTypeRunInProgress] `json:",omitempty"`
 	OfRunPaused          *ChunkRun[constants.ChunkTypeRunPaused]     `json:",omitempty"`
+	OfRunFailed          *ChunkRun[constants.ChunkTypeRunFailed]     `json:",omitempty"`
 	OfRunCompleted       *ChunkRun[constants.ChunkTypeRunCompleted]  `json:",omitempty"`
 	OfFunctionCallOutput *FunctionCallOutputMessage                  `json:",omitempty"`
 
@@ -160,6 +161,11 @@ func (u *ResponseChunk) UnmarshalJSON(data []byte) error {
 	var runCompleted *ChunkRun[constants.ChunkTypeRunCompleted]
 	if err := sonic.Unmarshal(data, &runCompleted); err == nil {
 		u.OfRunCompleted = runCompleted
+		return nil
+	}
+	var runFailed *ChunkRun[constants.ChunkTypeRunFailed]
+	if err := sonic.Unmarshal(data, &runFailed); err == nil {
+		u.OfRunFailed = runFailed
 		return nil
 	}
 
@@ -469,6 +475,9 @@ func (u *ResponseChunk) MarshalJSON() ([]byte, error) {
 	if u.OfRunCompleted != nil {
 		return sonic.Marshal(u.OfRunCompleted)
 	}
+	if u.OfRunFailed != nil {
+		return sonic.Marshal(u.OfRunFailed)
+	}
 
 	if u.OfFunctionCallOutput != nil {
 		return sonic.Marshal(u.OfFunctionCallOutput)
@@ -655,6 +664,9 @@ func (u *ResponseChunk) ChunkType() string {
 	if u.OfRunCompleted != nil {
 		return u.OfRunCompleted.Type.Value()
 	}
+	if u.OfRunFailed != nil {
+		return u.OfRunFailed.Type.Value()
+	}
 
 	if u.OfFunctionCallOutput != nil {
 		return u.OfFunctionCallOutput.Type.Value()
@@ -742,6 +754,7 @@ type ChunkInputMessage[T any] struct {
 }
 
 type ChunkRunData struct {
+	Error             string      `json:"error,omitempty"`
 	Id                string      `json:"id"`
 	Object            string      `json:"object"` // "run"
 	Status            string      `json:"status"` // "created", "in_progress", "paused", "resumed", "completed", "aborted"

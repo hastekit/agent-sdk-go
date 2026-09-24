@@ -3,6 +3,7 @@ package agui
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,9 @@ import (
 	"testing"
 
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
+	"github.com/hastekit/agent-sdk-go/pkg/agents/agentstate"
+	"github.com/hastekit/agent-sdk-go/pkg/agents/history"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
 	"github.com/stretchr/testify/require"
 )
 
@@ -165,4 +169,80 @@ func TestCursorRoundTrip(t *testing.T) {
 	require.Equal(t, "stream", cursor.Stream)
 	_, err = parseEventCursor("42")
 	require.Error(t, err)
+}
+
+// Model failures must survive persistence and broker replay with the same terminal event.
+func TestFailedRunPersistsAndReplays(t *testing.T) {
+	for _, backend := range []string{"memory", "file"} {
+		t.Run(backend, func(t *testing.T) {
+			var store history.ConversationPersistenceAdapter = history.NewInMemoryConversationPersistence()
+			if backend == "file" {
+				var err error
+				store, err = history.NewFileConversationPersistence(t.TempDir())
+				require.NoError(t, err)
+			}
+			model := &scriptedLLM{}
+			a := agents.NewAgent(&agents.AgentOptions{Name: "Helper", History: history.NewConversationManager(store)}).WithLLM(model)
+			h := NewHandler(registry{"Helper": a})
+			start := func() *httptest.ResponseRecorder {
+				w := httptest.NewRecorder()
+				h.ServeHTTP(w, httptest.NewRequest("POST", "/agents/Helper/run", strings.NewReader(`{"threadId":"failed-thread","messages":[{"id":"msg_user","role":"user","content":"hello"}]}`)))
+				return w
+			}
+			live := start()
+			require.Equal(t, 200, live.Code)
+			require.Contains(t, live.Body.String(), `"type":"RUN_ERROR"`)
+			require.NotContains(t, live.Body.String(), `"type":"RUN_FINISHED"`)
+			replay := httptest.NewRecorder()
+			h.ServeHTTP(replay, httptest.NewRequest("GET", "/agents/Helper/threads/failed-thread/stream", nil))
+			require.Contains(t, replay.Body.String(), `"type":"RUN_ERROR"`)
+			require.NotContains(t, replay.Body.String(), `"type":"RUN_FINISHED"`)
+			require.Equal(t, replayIDs(live.Body.String()), replayIDs(replay.Body.String()))
+
+			// Rejoin from immediately before the failure must deliver it with its stable cursor.
+			ids := replayIDs(live.Body.String())
+			require.GreaterOrEqual(t, len(ids), 2)
+			request := httptest.NewRequest("GET", "/agents/Helper/threads/failed-thread/stream", nil)
+			request.Header.Set("Last-Event-ID", ids[len(ids)-2])
+			resumed := httptest.NewRecorder()
+			h.ServeHTTP(resumed, request)
+			require.Equal(t, ids[len(ids)-1:], replayIDs(resumed.Body.String()))
+			require.Contains(t, resumed.Body.String(), `"type":"RUN_ERROR"`)
+
+			// The history API restores errors even after broker retention expires.
+			page := httptest.NewRecorder()
+			h.ServeHTTP(page, httptest.NewRequest("GET", "/agents/Helper/threads/failed-thread/messages", nil))
+			var body struct {
+				Run *ThreadRunState `json:"run"`
+			}
+			require.NoError(t, json.Unmarshal(page.Body.Bytes(), &body))
+			require.Equal(t, "error", body.Run.Status)
+			require.Contains(t, body.Run.Error, "scripted LLM exhausted")
+			rows, err := store.LoadMessages(t.Context(), "default", "failed-thread", "")
+			require.NoError(t, err)
+			require.Len(t, rows, 1)
+			require.Contains(t, rows[0].Meta, agentstate.CompletedAtMetaKey)
+			failedID := rows[0].RunID
+
+			// A follow-up gets a distinct run and can complete normally.
+			model.steps = []scriptedStep{{response: assistantTextResponse("recovered")}}
+			success := start()
+			require.Contains(t, success.Body.String(), `"type":"RUN_FINISHED"`)
+			rows, err = store.LoadMessages(t.Context(), "default", "failed-thread", "")
+			require.NoError(t, err)
+			require.Len(t, rows, 2)
+			require.NotEqual(t, failedID, rows[1].RunID)
+		})
+	}
+}
+
+// JSON-backed brokers must preserve the failed lifecycle discriminator and payload.
+func TestFailedChunkRoundTrip(t *testing.T) {
+	var chunk responses.ResponseChunk
+	require.NoError(t, json.Unmarshal([]byte(`{"type":"run.failed","run_state":{"id":"r","status":"error","error":"provider unavailable"}}`), &chunk))
+	require.NotNil(t, chunk.OfRunFailed)
+	require.Equal(t, "provider unavailable", chunk.OfRunFailed.RunState.Error)
+	data, err := json.Marshal(chunk)
+	require.NoError(t, err)
+	require.Contains(t, string(data), `"type":"run.failed"`)
 }

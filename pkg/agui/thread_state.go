@@ -16,6 +16,7 @@ import (
 // while the run sits waiting for it. Everything here is read from the same
 // transcript the messages come from, so the two cannot disagree.
 type ThreadRunState struct {
+	Error  string `json:"error,omitempty"`
 	RunID  string `json:"runId,omitempty"`
 	Status string `json:"status,omitempty"`
 
@@ -67,6 +68,10 @@ func threadRunState(rows []history.ConversationMessage) *ThreadRunState {
 	}
 
 	out := &ThreadRunState{RunID: last.RunID}
+	if runState.IsFailed() {
+		out.Status = string(agentstate.RunStatusError)
+		out.Error = runState.Error
+	}
 	if pending := runState.PendingInterrupts(); len(pending) > 0 {
 		out.Status = string(agentstate.RunStatusPaused)
 		out.Interrupts = projectInterrupts(pending)

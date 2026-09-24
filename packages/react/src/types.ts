@@ -57,6 +57,7 @@ export interface Thread {
 
 // Restore outstanding approvals and background task metadata with history.
 export interface RunState {
+  error?: string;
   runId?: string;
   status?: string;
   awaitingApproval: boolean;

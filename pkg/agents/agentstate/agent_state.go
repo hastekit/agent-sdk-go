@@ -18,6 +18,7 @@ const (
 	StepExecuteTools  Step = "execute_tools"
 	StepAwaitApproval Step = "await_approval"
 	StepComplete      Step = "complete"
+	StepError         Step = "error"
 )
 
 // RunStatus represents the overall status of a run
@@ -32,6 +33,7 @@ const (
 
 // RunState encapsulates the execution state of an agent run
 type RunState struct {
+	Error         string          `json:"error,omitempty"`
 	CurrentStep   Step            `json:"current_step"`
 	LoopIteration int             `json:"loop_iteration"`
 	Usage         responses.Usage `json:"usage"`
@@ -340,6 +342,7 @@ func (s *RunState) ToMeta(opts ...MetaOption) map[string]any {
 
 	runStateMap := map[string]any{
 		"status":                 s.getStatus(),
+		"error":                  s.Error,
 		"current_step":           string(s.CurrentStep),
 		"loop_iteration":         s.LoopIteration,
 		"usage":                  s.Usage,
@@ -453,6 +456,8 @@ func LoadRunStateFromMeta(meta map[string]any) *RunState {
 	state := &RunState{
 		Usage: responses.Usage{},
 	}
+
+	state.Error, _ = runStateData["error"].(string)
 
 	// Read from the top level, where ToMeta put it — see StartedAtMetaKey.
 	if raw, ok := meta[StartedAtMetaKey].(string); ok {
@@ -631,4 +636,18 @@ func contains(haystack []string, needle string) bool {
 		}
 	}
 	return false
+}
+
+// IsFailed identifies a terminal run that must not be resumed as in-progress work.
+func (s *RunState) IsFailed() bool { return s.CurrentStep == StepError }
+
+// TransitionToError closes pending foreground work while retaining background task records.
+func (s *RunState) TransitionToError(err error) {
+	s.TransitionToComplete()
+	s.CurrentStep = StepError
+	s.ToolsAwaitingApproval = nil
+	s.PendingNestedToolCalls = nil
+	s.PausedToolCalls = nil
+	s.Interrupts = nil
+	s.Error = err.Error()
 }

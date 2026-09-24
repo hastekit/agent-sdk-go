@@ -304,3 +304,108 @@ test("run-feed starts rejoin with publication wait and refresh sidebar", async (
   await until(() => controller.getSnapshot().connection === "idle");
   cleanup();
 });
+
+// An expired failure stream must not erase the error restored from persisted history.
+test("failed history remains visible after an idle rejoin", async () => {
+  const controller = new ChatController({
+    agent: "a",
+    transport: transport({
+      loadMessages: async () => ({
+        ...page(),
+        run: {
+          runId: "failed",
+          status: "error",
+          error: "Provider unavailable",
+          awaitingApproval: false,
+        },
+      }),
+    }),
+  });
+  await controller.selectThread("thread");
+  await until(() => controller.getSnapshot().connection === "idle");
+  assert.equal(controller.getSnapshot().error.message, "Provider unavailable");
+  assert.equal(controller.getSnapshot().isRunning, false);
+});
+
+// Terminal error delivery must clear the busy state before the transport finishes cleanup.
+test("RUN_ERROR clears running state immediately", async () => {
+  const cleanup = deferred();
+  const controller = new ChatController({
+    agent: "a",
+    createId: () => "id",
+    transport: transport({
+      stream: async function* () {
+        yield { type: "RUN_STARTED", runId: "failed" };
+        yield { type: "RUN_ERROR", message: "Provider unavailable" };
+        await cleanup.promise;
+      },
+    }),
+  });
+  const sending = controller.sendMessage("hello");
+  await until(() => !!controller.getSnapshot().error);
+  assert.equal(controller.getSnapshot().isRunning, false);
+  cleanup.resolve();
+  await sending;
+});
+
+// Failure banners must remain outside outgoing messages even when the client sends full history.
+for (const fullHistory of [false, true]) {
+  for (const restored of [false, true]) {
+    test(`failure diagnostics stay out of follow-up payloads (fullHistory=${fullHistory}, restored=${restored})`, async () => {
+      const diagnostic = "provider_internal_failure_123";
+      let input;
+      let sends = 0;
+      const controller = new ChatController({
+        agent: "a",
+        fullHistory,
+        transport: transport({
+          loadMessages: async () => ({
+            ...page([
+              {
+                id: "msg_original",
+                role: "user",
+                content: "original question",
+              },
+            ]),
+            run: {
+              runId: "failed",
+              status: "error",
+              error: diagnostic,
+              awaitingApproval: false,
+            },
+          }),
+          stream: async function* (_agent, _thread, value) {
+            if (!value) return;
+            sends++;
+            if (!restored && sends === 1) {
+              yield { type: "RUN_ERROR", message: diagnostic };
+            } else {
+              input = value;
+              yield { type: "RUN_FINISHED" };
+            }
+          },
+        }),
+      });
+
+      // Exercise either live failure delivery or restoration after a page reload.
+      if (restored) {
+        await controller.selectThread("thread");
+        await until(() => controller.getSnapshot().connection === "idle");
+      } else {
+        await controller.sendMessage("original question");
+      }
+      assert.equal(controller.getSnapshot().error.message, diagnostic);
+
+      // The new turn carries user content but no failure metadata or synthetic assistant error.
+      await controller.sendMessage("please try again");
+      assert.ok(!JSON.stringify(input).includes(diagnostic));
+      assert.deepEqual(
+        input.messages.map((message) => message.content),
+        fullHistory
+          ? ["original question", "please try again"]
+          : ["please try again"],
+      );
+      assert.ok(input.messages.every((message) => message.role === "user"));
+    });
+  }
+}

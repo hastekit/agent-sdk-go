@@ -58,6 +58,7 @@ export async function fetchThreads(
 // ThreadRunState is what the thread's last run left outstanding. Absent means
 // nothing is: a settled thread reports no run at all.
 export interface ThreadRunState {
+  error?: string;
   runId?: string;
   status?: string;
   awaitingApproval: boolean;
