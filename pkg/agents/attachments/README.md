@@ -454,7 +454,14 @@ separate durable step.
 Middlewares nest in registration order, the first outermost, so a result flows from
 the tool through the last middleware's wrap to the first's. Register the attachment
 middleware first, so a result another middleware's wrap adds media to still passes through
-it. A wrap can run multiple times: once per result-producing boundary, and
+it. When using `ToolResponseMiddleware`, register that limiter before the attachment
+middleware so it measures the result after media externalization. The limiter stores
+oversized output as a separate file named using the tool call ID and returns text metadata with a
+bounded excerpt; attachment inlining does not expand that text reference again.
+Without a store, the limiter returns only the excerpt and guidance for retrieving
+a smaller result, with no file reference.
+
+A wrap can run multiple times: once per result-producing boundary, and
 again if that boundary retries. Use immutable, retry-safe uploads. FileStore
 creates fresh immutable objects, so retries may leave unused uploads; it does
 not promise cross-attempt deduplication. The middleware's own errors retain middleware-abort

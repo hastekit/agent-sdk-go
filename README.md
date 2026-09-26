@@ -1322,6 +1322,57 @@ Embed `agents.NoopMiddleware` for the operations you do not override. The root
 package exposes `AgentMiddleware`; its existing `Middleware` alias continues
 referring to gateway middleware.
 
+#### Limiting tool response size
+
+`ToolResponseMiddleware` replaces oversized tool output with a bounded text excerpt.
+When an attachment store is configured, it also saves the full response and
+includes file metadata. It runs inside the
+tool's execution step, before the result enters conversation or workflow history:
+
+```go
+Middlewares: []agents.Middleware{
+    middleware.NewToolResponseMiddleware(middleware.ToolResponseMiddlewareConfig{
+        Store:            attachmentStore,
+        MaxResponseBytes: 32 << 10, // 32 KiB, including the replacement metadata
+        MaxSummaryBytes:  2 << 10,  // 2 KiB excerpt; no extra LLM call
+    }),
+    middleware.NewAttachmentMiddleware(middleware.AttachmentMiddlewareConfig{
+        Store: attachmentStore,
+    }),
+},
+```
+
+Text output is saved verbatim as `.txt` or `.json`; multipart output is saved as
+a JSON array. Filenames use `tool-response-<call_id>`, remaining stable across retries
+of the same call. The store may choose a distinct stored filename to keep uploads
+immutable. The limit counts UTF-8 bytes for strings and JSON bytes for multipart
+content, rather than tokens. Output at or below the limit is unchanged. Zero or
+negative settings use the defaults shown above.
+
+The replacement includes `file_id`, `original_filename`, `mime_type`, `size_bytes`,
+`summary`, and the store's `mount_path` when configured. The excerpt previews text;
+for multipart results it also reports content counts without repeating inline
+media bytes. It is shortened further if necessary to keep the replacement within
+`MaxResponseBytes`. Attachment hydration does not reload the offloaded file into
+the model request. Provide attachment-reading tools or a sandbox mount so the
+agent can inspect the saved response selectively.
+
+`Store` is optional. Without it, the replacement includes only the original size,
+media type, excerpt, and guidance to request fewer results, paginate, filter, or
+use another tool to read smaller sections from the source. It explicitly says the
+full response was not saved and contains no file ID, filename, or mount path.
+
+Uploads use `ToolCall.Namespace` and `ToolCall.SessionID`. IDs, state updates,
+interrupts, and background-task metadata are preserved and are not counted toward
+the output limit. Tool errors pass through unchanged. Upload or metadata failures
+from a configured store, and a limit too small to hold replacement metadata, abort the middleware
+instead of leaking the oversized result. The store's own upload limit still applies;
+configure it for the largest result you expect to offload. Retried tool steps may
+create another immutable attachment.
+
+When combining the two middlewares, register the response limiter first as shown.
+Results pass through attachment externalization first, then through the size check.
+
 ### Conversation History
 
 Enable conversation memory across interactions:

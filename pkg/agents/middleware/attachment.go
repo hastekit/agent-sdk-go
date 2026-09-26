@@ -68,6 +68,8 @@ type AttachmentMiddlewareConfig struct {
 //
 // Register it first among an agent's middlewares, so it is outermost: a result that
 // another middleware's wrap adds media to on its way back still passes through it.
+// When using ToolResponseMiddleware, put that limiter before this middleware so
+// it measures the result after inline media has been externalized.
 // Adding this middleware to an agent is what turns attachment support on for it;
 // removing it turns it off. Nothing about the LLM client changes either way.
 type AttachmentMiddleware struct {

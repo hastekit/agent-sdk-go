@@ -43,7 +43,10 @@ func attachmentResult() *agents.ToolCallResponse {
 func externalized(middleware agents.ToolCallMiddleware, ctx context.Context, result *agents.ToolCallResponse) (*agents.ToolCallResponse, error) {
 	return middleware.WrapToolCall(func(context.Context, *agents.BaseTool, *agents.ToolCall) (*agents.ToolCallResponse, error) {
 		return result, nil
-	})(ctx, nil, &agents.ToolCall{ThreadID: "forked-thread", SessionID: "thread", Namespace: "test"})
+	})(ctx, nil, &agents.ToolCall{
+		FunctionCallMessage: &responses.FunctionCallMessage{ID: "item", CallID: "call"},
+		ThreadID:            "forked-thread", SessionID: "thread", Namespace: "test",
+	})
 }
 
 // prepared runs request through the middleware's wrap and reports what the wrap
