@@ -51,7 +51,7 @@ func TestToolPrefixKeepsUnprefixedOptionsWorking(t *testing.T) {
 		ToolPrefix:            "xyz__",
 		ToolFilter:            ToolFilter{Include: []string{"search", "book"}},
 		ApprovalRequiredTools: []string{"book"},
-		DeferredTools:         []string{"search"},
+		DeferredTools:         &ToolFilter{Include: []string{"search"}},
 	}
 
 	tools := srv.buildLazyTools([]*mcp.Tool{
@@ -74,7 +74,7 @@ func TestOptionsWithoutToolPrefix(t *testing.T) {
 	srv := &MCPClient{
 		ToolFilter:            ToolFilter{Include: []string{"search", "book"}},
 		ApprovalRequiredTools: []string{"book"},
-		DeferredTools:         []string{"search"},
+		DeferredTools:         &ToolFilter{Include: []string{"search"}},
 	}
 
 	tools := srv.buildLazyTools([]*mcp.Tool{
@@ -90,7 +90,7 @@ func TestOptionsWithoutToolPrefix(t *testing.T) {
 // The "defer everything" wildcard is not a tool name, so a prefix leaves it
 // alone.
 func TestToolPrefixKeepsDeferredWildcard(t *testing.T) {
-	srv := &MCPClient{ToolPrefix: "xyz__", DeferredTools: []string{"*"}}
+	srv := &MCPClient{ToolPrefix: "xyz__", DeferredTools: &ToolFilter{Include: []string{"*"}}}
 
 	tools := srv.buildLazyTools([]*mcp.Tool{{Name: "search"}, {Name: "book"}}, nil, serverConn{})
 

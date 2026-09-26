@@ -25,7 +25,7 @@ type MCPClient struct {
 	Meta                  mcp.Meta           `json:"-"`
 	ToolFilter            ToolFilter         `json:"-"`
 	ApprovalRequiredTools []string           `json:"-"`
-	DeferredTools         []string           `json:"-"`
+	DeferredTools         *ToolFilter        `json:"-"`
 	ToolPrefix            string             `json:"-"`
 
 	// Command is a stdio server's argv, program first, and Env is added to the
@@ -116,9 +116,14 @@ func WithApprovalRequiredTools(tools ...string) McpServerOption {
 	}
 }
 
-func WithDeferredTools(tools ...string) McpServerOption {
+// WithDeferredTools selects which exposed tools require discovery through ToolSearch.
+// Omitting this option defers no tools. An empty Include or "*" includes all tools;
+// Exclude takes precedence and keeps those tools directly available to the model.
+// Names match the server's original names, before any prefix. "*" in Exclude
+// keeps all tools directly available. WithToolFilter still controls visibility.
+func WithDeferredTools(tools ToolFilter) McpServerOption {
 	return func(srv *MCPClient) {
-		srv.DeferredTools = tools
+		srv.DeferredTools = &tools
 	}
 }
 
@@ -486,11 +491,29 @@ func (srv *MCPClient) buildLazyTools(tools []*mcp.Tool, meta mcp.Meta, conn serv
 			continue
 		}
 
+		// Deferral changes initial model availability, without removing an exposed tool.
 		requiresApproval := slices.Contains(srv.ApprovalRequiredTools, tool.Name)
-		deferred := slices.Contains(srv.DeferredTools, tool.Name) || slices.Contains(srv.DeferredTools, "*")
+		deferred := srv.isDeferred(tool.Name)
 
 		lazy := NewLazyMcpTool(tool, conn, meta, requiresApproval, deferred, srv.ToolPrefix)
 		result = append(result, lazy)
 	}
 	return result
+}
+
+// isDeferred applies the configured selection to the server's original tool name.
+func (srv *MCPClient) isDeferred(name string) bool {
+	// The default client exposes every allowed tool directly.
+	filter := srv.DeferredTools
+	if filter == nil {
+		return false
+	}
+
+	// Exclusions keep tools directly available even when they also match Include.
+	if slices.Contains(filter.Exclude, name) || slices.Contains(filter.Exclude, "*") {
+		return false
+	}
+
+	// An explicit empty selection defers all allowed tools, as does the wildcard.
+	return len(filter.Include) == 0 || slices.Contains(filter.Include, name) || slices.Contains(filter.Include, "*")
 }

@@ -794,6 +794,24 @@ before any tool prefix is applied. To expose all tools except specific ones:
 mcpclient.WithToolFilter(mcpclient.ToolFilter{Exclude: []string{"delete_user"}})
 ```
 
+`WithDeferredTools` also accepts a `ToolFilter`. It selects exposed tools that
+require discovery through `ToolSearch`. Excluded tools remain directly available
+to the model from the first call. To defer all tools except `search`:
+
+```go
+mcpclient.WithDeferredTools(mcpclient.ToolFilter{
+    Include: []string{"*"},
+    Exclude: []string{"search"},
+})
+```
+
+Without `WithDeferredTools`, no tools are deferred. When the option is supplied,
+an empty `Include` selects all exposed tools; `Exclude` takes precedence. Names
+match before prefixes are applied. `"*"` matches all tools in either deferral list.
+`WithToolFilter` still removes tools entirely, regardless of deferral settings.
+Replace previous calls such as `WithDeferredTools("search")` with
+`WithDeferredTools(mcpclient.ToolFilter{Include: []string{"search"}})`.
+
 #### MCP Servers over stdio
 
 Many MCP servers ship as a command rather than a URL. `WithCommand` runs one as a
