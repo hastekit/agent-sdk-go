@@ -102,6 +102,9 @@ func (s *BackgroundTaskService) Await(ctx restate.Context, in *BackgroundTaskInp
 	// makes the task a background task — and its outcome is journaled, so a
 	// restart after it finishes does not wait for it again.
 	outcome, err := restate.Run(ctx, func(runCtx restate.RunContext) (*awaitOutcome, error) {
+		// Keep the task stream alive only while its wait step is executing.
+		defer s.broker.StartHeartbeat(runCtx, in.Ref.TaskStreamID)()
+
 		progress := agents.NewStreamProgressReporter(s.broker, in.Ref.TaskStreamID, in.Ref.CallID, in.Ref.ToolName)
 		res, err := tool.AwaitTask(runCtx, in.Ref, progress)
 		if err != nil {

@@ -38,7 +38,7 @@ type MemoryStreamBroker struct {
 
 // maxTranscript caps retained chunks per channel, mirroring the Redis
 // broker's MAXLEN: a rejoiner wants the run, not unbounded history.
-const maxTranscript = 2000
+const maxTranscript = 50_000
 
 // NewMemoryStreamBroker creates a new in-memory stream broker.
 func NewMemoryStreamBroker() *MemoryStreamBroker {
@@ -315,4 +315,9 @@ func (s *memorySubscriber) close() {
 		defer s.mu.Unlock()
 		close(s.ch)
 	})
+}
+
+// StartHeartbeat is a no-op because in-memory streams have no expiring retention keys.
+func (*MemoryStreamBroker) StartHeartbeat(context.Context, string) func() {
+	return func() {}
 }

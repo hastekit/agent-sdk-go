@@ -59,10 +59,13 @@ func StreamIDForTask(namespace, threadID, taskID string) string {
 		[]byte("hastekit:task:"+namespace+"\x00"+threadID+"\x00"+taskID)).String()
 }
 
-// StreamBroker provides an abstraction for streaming response chunks
-// between activities/workers and clients. This enables streaming support
-// for both Restate and Temporal runtimes.
+// StreamBroker provides streaming between workers and clients, including execution-scoped liveness.
+// Runtime-specific proxies implement StartHeartbeat with their own scheduling semantics.
 type StreamBroker interface {
+	// StartHeartbeat starts liveness for this execution and returns an idempotent stop function.
+	// Stop must finish before Close applies replay retention. Runtime proxies own their scheduling.
+	StartHeartbeat(ctx context.Context, channel string) (stop func())
+
 	// Publish sends a response chunk to subscribers of the given channel.
 	// The channel is typically the run ID or a unique identifier for the execution.
 	Publish(ctx context.Context, channel string, chunk *responses.ResponseChunk) error

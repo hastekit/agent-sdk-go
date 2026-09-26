@@ -175,7 +175,7 @@ func TestTemporalBackgroundWorkflow_ClosesTheStreamThenDelivers(t *testing.T) {
 	var order []string
 	registerBackgroundActivities(env, &order, &temporal_runtime.DeliverTaskOutput{Start: false})
 
-	env.ExecuteWorkflow(temporal_runtime.NewBackgroundTaskWorkflow(bgAgent).Execute, bgInput())
+	env.ExecuteWorkflow(temporal_runtime.NewBackgroundTaskWorkflow(bgAgent, nil).Execute, bgInput())
 
 	require.True(t, env.IsWorkflowCompleted())
 	require.NoError(t, env.GetWorkflowError())
@@ -202,7 +202,7 @@ func TestTemporalBackgroundWorkflow_StartsARunWhenTheThreadIsIdle(t *testing.T) 
 		workflow.RegisterOptions{Name: bgAgent + "_AgentWorkflow"},
 	)
 
-	env.ExecuteWorkflow(temporal_runtime.NewBackgroundTaskWorkflow(bgAgent).Execute, bgInput())
+	env.ExecuteWorkflow(temporal_runtime.NewBackgroundTaskWorkflow(bgAgent, nil).Execute, bgInput())
 
 	require.True(t, env.IsWorkflowCompleted())
 	require.NoError(t, env.GetWorkflowError())
@@ -229,7 +229,7 @@ func TestTemporalBackgroundWorkflow_DoesNotStartARunWhenOneIsLive(t *testing.T) 
 		workflow.RegisterOptions{Name: bgAgent + "_AgentWorkflow"},
 	)
 
-	env.ExecuteWorkflow(temporal_runtime.NewBackgroundTaskWorkflow(bgAgent).Execute, bgInput())
+	env.ExecuteWorkflow(temporal_runtime.NewBackgroundTaskWorkflow(bgAgent, nil).Execute, bgInput())
 
 	require.True(t, env.IsWorkflowCompleted())
 	require.NoError(t, env.GetWorkflowError())
@@ -262,7 +262,7 @@ func TestTemporalBackgroundWorkflow_DeliversAFailedWait(t *testing.T) {
 		activity.RegisterOptions{Name: bgAgent + "_DeliverTaskActivity"},
 	)
 
-	env.ExecuteWorkflow(temporal_runtime.NewBackgroundTaskWorkflow(bgAgent).Execute, bgInput())
+	env.ExecuteWorkflow(temporal_runtime.NewBackgroundTaskWorkflow(bgAgent, nil).Execute, bgInput())
 
 	require.True(t, env.IsWorkflowCompleted())
 	require.NoError(t, env.GetWorkflowError(), "a wait that failed is news, not a broken workflow")

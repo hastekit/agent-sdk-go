@@ -3,6 +3,7 @@ package streambroker
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"sync"
 	"time"
@@ -26,8 +27,10 @@ import (
 //   - Multiple independent readers per channel (no coordination needed)
 //   - TTL-based automatic cleanup after a stream terminates
 type RedisStreamBroker struct {
-	client *redis.Client
-	prefix string
+	client                 *redis.Client
+	heartbeatInterval      time.Duration
+	slowOperationThreshold time.Duration
+	prefix                 string
 
 	// runFeed is this process's window of run lifecycle events, filled by the
 	// pub/sub subscriptions below rather than by local publishes — so a run
@@ -48,6 +51,10 @@ type RedisStreamBroker struct {
 
 // RedisStreamBrokerOptions configures the Redis stream broker.
 type RedisStreamBrokerOptions struct {
+	// SlowOperationThreshold controls warning logs for Redis operations and subscriber backpressure.
+	// Default 250ms. Blocking reads allow their intentional block time in addition to this threshold.
+	SlowOperationThreshold time.Duration
+
 	// Addr is the Redis server address (e.g., "localhost:6379").
 	Addr string
 
@@ -65,15 +72,18 @@ type RedisStreamBrokerOptions struct {
 	// If provided, Addr/Password/DB are ignored.
 	Client *redis.Client
 
-	// ActiveTTL bounds the lifetime of a channel's stream while it is
-	// still active. Default 30 minutes.
+	// ActiveTTL is the expiry after the last successful heartbeat. Default 30 minutes.
 	ActiveTTL time.Duration
+
+	// HeartbeatInterval controls how often the broker renews active stream retention.
+	// Default is the smaller of one minute and ActiveTTL / 3; must be less than ActiveTTL.
+	HeartbeatInterval time.Duration
 
 	// ReplayTTL is the rejoin window applied after Close. Default 10 minutes.
 	ReplayTTL time.Duration
 
 	// MaxLen caps the approximate number of entries retained per stream
-	// (XADD MAXLEN ~). Default 2000.
+	// (XADD MAXLEN ~). Default 50,000. This limits event count, not bytes.
 	MaxLen int64
 
 	// StopPollInterval is how often WatchStop re-reads the stop flag,
@@ -85,7 +95,7 @@ type RedisStreamBrokerOptions struct {
 const (
 	defaultActiveTTL = 30 * time.Minute
 	defaultReplayTTL = 10 * time.Minute
-	defaultMaxLen    = int64(2000)
+	defaultMaxLen    = int64(50_000)
 	defaultReadCount = int64(500)
 	defaultBlock     = 5 * time.Second
 	defaultStopPoll  = 500 * time.Millisecond
@@ -136,21 +146,34 @@ func NewRedisStreamBroker(opts RedisStreamBrokerOptions) (*RedisStreamBroker, er
 		stopPoll = defaultStopPoll
 	}
 
+	slowThreshold := opts.SlowOperationThreshold
+	if slowThreshold <= 0 {
+		slowThreshold = 250 * time.Millisecond
+	}
+	heartbeatInterval := opts.HeartbeatInterval
+	if heartbeatInterval <= 0 {
+		heartbeatInterval = min(time.Minute, activeTTL/3)
+	}
+	if heartbeatInterval <= 0 || heartbeatInterval >= activeTTL {
+		return nil, fmt.Errorf("heartbeat interval must be positive and less than active TTL")
+	}
 	feedCtx, feedStop := context.WithCancel(context.Background())
 
 	return &RedisStreamBroker{
-		client:       client,
-		prefix:       prefix,
-		runFeed:      newFeedHub(),
-		feedSubs:     map[string]bool{},
-		feedCtx:      feedCtx,
-		feedStop:     feedStop,
-		activeTTL:    activeTTL,
-		replayTTL:    replayTTL,
-		maxLen:       maxLen,
-		readCount:    defaultReadCount,
-		blockTime:    defaultBlock,
-		stopPollTime: stopPoll,
+		client:                 client,
+		heartbeatInterval:      heartbeatInterval,
+		slowOperationThreshold: slowThreshold,
+		prefix:                 prefix,
+		runFeed:                newFeedHub(),
+		feedSubs:               map[string]bool{},
+		feedCtx:                feedCtx,
+		feedStop:               feedStop,
+		activeTTL:              activeTTL,
+		replayTTL:              replayTTL,
+		maxLen:                 maxLen,
+		readCount:              defaultReadCount,
+		blockTime:              defaultBlock,
+		stopPollTime:           stopPoll,
 	}, nil
 }
 
@@ -172,44 +195,80 @@ func (b *RedisStreamBroker) queueKey(channel string) string {
 
 // liveKey holds the run-claim flag for a channel — set while a run is in
 // flight on a (deterministic) stream id and released by Close. Its TTL is
-// a crash backstop and is refreshed on every Publish.
+// a crash backstop and is refreshed by the agent heartbeat.
 func (b *RedisStreamBroker) liveKey(channel string) string {
 	return b.prefix + "live:" + channel
 }
 
-// Publish appends a chunk to the channel's Redis Stream. The stream
-// key has its active TTL refreshed on first write so a long-lived
-// stream doesn't silently expire.
+// Publish appends a chunk and initializes expiry only when creating the stream.
 func (b *RedisStreamBroker) Publish(ctx context.Context, channel string, chunk *responses.ResponseChunk) error {
+	started := time.Now()
 	data, err := sonic.Marshal(chunk)
 	if err != nil {
+		b.observe(ctx, "publish", channel, started, 0, err)
 		return fmt.Errorf("failed to serialize chunk: %w", err)
 	}
 
-	key := b.streamKey(channel)
-	id, err := b.client.XAdd(ctx, &redis.XAddArgs{
-		Stream: key,
-		MaxLen: b.maxLen,
-		Approx: true,
-		Values: map[string]any{
-			"type":    chunk.ChunkType(),
-			"payload": data,
-		},
-	}).Result()
+	// Atomic initialization avoids a crash leaving the first chunk without an expiry.
+	err = appendStream.Run(ctx, b.client, []string{b.streamKey(channel)},
+		b.activeTTL.Milliseconds(), b.maxLen, chunk.ChunkType(), data).Err()
+	b.observe(ctx, "publish", channel, started, 0, err)
 	if err != nil {
 		return fmt.Errorf("failed to publish chunk: %w", err)
 	}
-
-	// Refresh TTL on first write (id ends in "-0" for the very first
-	// entry of a millisecond — cheap best-effort; re-EXPIRE is idempotent).
-	// The run-claim flag rides the same liveness so it survives long runs
-	// and only expires after the run goes silent (crash backstop).
-	if id != "" {
-		_ = b.client.Expire(ctx, key, b.activeTTL).Err()
-		_ = b.client.Expire(ctx, b.liveKey(channel), b.activeTTL).Err()
-	}
-
 	return nil
+}
+
+// PoolStats exposes cumulative connection pressure to application metrics collectors.
+func (b *RedisStreamBroker) PoolStats() *redis.PoolStats { return b.client.PoolStats() }
+
+// Log latency and pool pressure without logging prompts, tokens, or Redis credentials.
+func (b *RedisStreamBroker) observe(ctx context.Context, operation, channel string, started time.Time, expectedWait time.Duration, err error) {
+	if ctx.Err() != nil {
+		return
+	}
+	elapsed := time.Since(started)
+	if err == redis.Nil {
+		err = nil
+	}
+	if err == nil && elapsed <= expectedWait+b.slowOperationThreshold {
+		return
+	}
+	stats := b.PoolStats()
+	attrs := []any{"operation", operation, "stream_id", channel, "duration", elapsed,
+		"expected_wait", expectedWait, "pool_total_conns", stats.TotalConns,
+		"pool_idle_conns", stats.IdleConns, "pool_timeouts", stats.Timeouts,
+		"pool_wait_count", stats.WaitCount, "pool_wait_duration", time.Duration(stats.WaitDurationNs)}
+	if err != nil {
+		attrs = append(attrs, "error", err)
+		slog.ErrorContext(ctx, "redis stream operation failed", attrs...)
+		return
+	}
+	slog.WarnContext(ctx, "redis stream operation slow", attrs...)
+}
+
+// Retry failed reads without dropping the subscriber or losing its last delivered cursor.
+func waitForRedisReadRetry(ctx context.Context) bool {
+	timer := time.NewTimer(time.Second)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+// Measure downstream backpressure separately from Redis read latency.
+func (b *RedisStreamBroker) deliver(ctx context.Context, channel string, out chan<- *responses.ResponseChunk, chunk *responses.ResponseChunk) bool {
+	started := time.Now()
+	select {
+	case out <- chunk:
+		b.observe(ctx, "subscriber_delivery", channel, started, 0, nil)
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
 
 // Subscribe returns a channel that delivers every chunk of `channel`
@@ -234,8 +293,16 @@ func (b *RedisStreamBroker) Subscribe(ctx context.Context, channel string) (<-ch
 		lastID := "0"
 		cursor := "-"
 		for {
+			started := time.Now()
 			entries, err := b.client.XRangeN(ctx, key, cursor, "+", b.readCount).Result()
-			if err != nil || len(entries) == 0 {
+			b.observe(ctx, "replay_read", channel, started, 0, err)
+			if err != nil {
+				if !waitForRedisReadRetry(ctx) {
+					return
+				}
+				continue
+			}
+			if len(entries) == 0 {
 				break
 			}
 			endSeen := false
@@ -249,9 +316,7 @@ func (b *RedisStreamBroker) Subscribe(ctx context.Context, channel string) (<-ch
 				if !ok {
 					continue
 				}
-				select {
-				case out <- chunk:
-				case <-ctx.Done():
+				if !b.deliver(ctx, channel, out, chunk) {
 					return
 				}
 			}
@@ -267,16 +332,21 @@ func (b *RedisStreamBroker) Subscribe(ctx context.Context, channel string) (<-ch
 			if ctx.Err() != nil {
 				return
 			}
+			started := time.Now()
 			res, err := b.client.XRead(ctx, &redis.XReadArgs{
 				Streams: []string{key, lastID},
 				Count:   b.readCount,
 				Block:   b.blockTime,
 			}).Result()
+			b.observe(ctx, "live_read", channel, started, b.blockTime, err)
 			if err == redis.Nil {
 				continue
 			}
 			if err != nil {
-				return
+				if !waitForRedisReadRetry(ctx) {
+					return
+				}
+				continue
 			}
 			for _, stream := range res {
 				for _, entry := range stream.Messages {
@@ -288,9 +358,7 @@ func (b *RedisStreamBroker) Subscribe(ctx context.Context, channel string) (<-ch
 					if !ok {
 						continue
 					}
-					select {
-					case out <- chunk:
-					case <-ctx.Done():
+					if !b.deliver(ctx, channel, out, chunk) {
 						return
 					}
 				}
@@ -305,23 +373,21 @@ func (b *RedisStreamBroker) Subscribe(ctx context.Context, channel string) (<-ch
 // their XREAD BLOCK loops, then shortens the stream's TTL to the
 // replay window. Idempotent.
 func (b *RedisStreamBroker) Close(ctx context.Context, channel string) error {
+	started := time.Now()
 	key := b.streamKey(channel)
 
-	if _, err := b.client.XAdd(ctx, &redis.XAddArgs{
-		Stream: key,
-		MaxLen: b.maxLen,
-		Approx: true,
-		Values: map[string]any{
-			"type":    streamEndType,
-			"payload": "{}",
-		},
-	}).Result(); err != nil {
-		return fmt.Errorf("failed to write stream-end sentinel: %w", err)
+	// Publish the sentinel, set replay retention, and release the claim atomically with heartbeats.
+	_, err := b.client.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+		pipe.XAdd(ctx, &redis.XAddArgs{Stream: key, MaxLen: b.maxLen, Approx: true,
+			Values: map[string]any{"type": streamEndType, "payload": "{}"}})
+		pipe.PExpire(ctx, key, b.replayTTL)
+		pipe.Del(ctx, b.liveKey(channel))
+		return nil
+	})
+	b.observe(ctx, "close", channel, started, 0, err)
+	if err != nil {
+		return fmt.Errorf("failed to close stream: %w", err)
 	}
-
-	_ = b.client.Expire(ctx, key, b.replayTTL).Err()
-	// Release the run claim so the next turn for this channel starts fresh.
-	_ = b.client.Del(ctx, b.liveKey(channel)).Err()
 	return nil
 }
 
@@ -399,9 +465,10 @@ func (b *RedisStreamBroker) EnqueueOrStart(ctx context.Context, channel string, 
 		return false, nil
 	}
 
-	// Won the claim — clear any stale transcript / queue / stop so a reused
-	// channel never replays a previous turn into the fresh run.
-	b.client.Del(ctx, b.streamKey(channel), b.queueKey(channel), b.stopKey(channel))
+	// Clear the previous turn before the agent starts publishing or emitting heartbeats.
+	if err := b.client.Del(ctx, b.streamKey(channel), b.queueKey(channel), b.stopKey(channel)).Err(); err != nil {
+		return false, fmt.Errorf("failed to reset stream: %w", err)
+	}
 	return true, nil
 }
 

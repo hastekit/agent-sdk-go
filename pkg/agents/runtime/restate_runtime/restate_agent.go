@@ -41,8 +41,8 @@ func (w *AgentWorkflow) Run(restateCtx restate.WorkflowContext, input *WorkflowI
 	agent := w.newRestateAgentProxy(restateCtx, agentOptions, input.ProviderConfigKey, streamID)
 
 	// The proxy agent receives the broker via AgentOptions and publishes
-	// chunks itself using StreamID. The caller's Execute owns the broker
-	// stream's lifecycle (subscribe + close), so we don't close here.
+	// chunks itself using StreamID. ExecuteLocal owns both stream closure
+	// and heartbeat setup through the broker proxy.
 	return agent.ExecuteWithoutTrace(restateCtx, &agents.AgentInput{
 		Namespace:     input.Namespace,
 		GroupID:       input.GroupID,
@@ -111,6 +111,7 @@ func (w *AgentWorkflow) proxyAgent(
 	for _, set := range agentOptions.Skills {
 		skillSets = append(skillSets, NewRestateSkillSet(restateCtx, set, w.broker, agents.ToolCallMiddlewaresOf(agentOptions.Middlewares)...))
 	}
+	// Keep durable broker operations separate from non-durable heartbeat delivery.
 	opts := &agents.AgentOptions{
 		Name:       agentOptions.Name,
 		Output:     agentOptions.Output,

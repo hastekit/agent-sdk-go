@@ -327,8 +327,13 @@ func (s *backgroundSupervisor) startTask(tool BackgroundTool, ref BackgroundTask
 		// about whether the work is still worth waiting for.
 		ctx := context.Background()
 
+		// Background execution owns its own liveness after the initiating run ends.
+		stopHeartbeat := agent.streamBroker.StartHeartbeat(ctx, ref.TaskStreamID)
+		defer stopHeartbeat()
+
 		progress := NewStreamProgressReporter(agent.streamBroker, ref.TaskStreamID, ref.CallID, ref.ToolName)
 		result, err := tool.AwaitTask(ctx, ref, progress)
+		stopHeartbeat()
 
 		// Close before delivering: a subscriber watching the task sees it end
 		// when it ends, rather than when the agent has finished reacting to it.

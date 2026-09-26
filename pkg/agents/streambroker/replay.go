@@ -2,6 +2,7 @@ package streambroker
 
 import (
 	"context"
+	"time"
 
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
 )
@@ -19,7 +20,9 @@ func (b *MemoryStreamBroker) Replay(ctx context.Context, channel string) ([]*res
 
 // Replay returns the currently retained Redis stream, excluding its close marker.
 func (b *RedisStreamBroker) Replay(ctx context.Context, channel string) ([]*responses.ResponseChunk, error) {
+	started := time.Now()
 	entries, err := b.client.XRange(ctx, b.streamKey(channel), "-", "+").Result()
+	b.observe(ctx, "replay_snapshot", channel, started, 0, err)
 	if err != nil {
 		return nil, err
 	}

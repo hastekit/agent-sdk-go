@@ -16,7 +16,8 @@ import (
 // remaining methods are pass-through to the wrapped broker — they are
 // either called from outside the workflow (Subscribe/Stop/Enqueue/IsActive),
 // or their durability is owned by the corresponding proxy (e.g. the LLM
-// proxy publishes from inside its own restate.Run).
+// proxy publishes from inside its own restate.Run). Heartbeats delegate directly
+// without Restate calls, leaving renewal scheduling to the wrapped broker.
 type RestateStreamBroker struct {
 	restateCtx    restate.WorkflowContext
 	wrappedBroker agents.StreamBroker
@@ -94,4 +95,9 @@ func (b *RestateStreamBroker) DrainMessages(ctx context.Context, channel string)
 	return restate.Run(b.restateCtx, func(ctx restate.RunContext) ([]messages.Message, error) {
 		return b.wrappedBroker.DrainMessages(ctx, channel)
 	}, restate.WithName("DrainMessages"))
+}
+
+// StartHeartbeat delegates live invocation ownership without adding any Restate journal steps.
+func (b *RestateStreamBroker) StartHeartbeat(ctx context.Context, channel string) func() {
+	return b.wrappedBroker.StartHeartbeat(ctx, channel)
 }

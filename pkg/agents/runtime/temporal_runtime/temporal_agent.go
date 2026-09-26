@@ -29,6 +29,9 @@ func NewTemporalAgent(configs map[string]*agents.AgentOptions, options *agents.A
 func (a *TemporalAgentV2) GetActivities() map[string]interface{} {
 	activities := map[string]interface{}{}
 
+	// One activity owns retention for the whole run, including gaps between model and tool calls.
+	activities[a.options.Name+heartbeatActivitySuffix] = (&streamHeartbeatActivity{broker: a.broker}).Run
+
 	temporalPrompt := NewTemporalPrompt(a.options.Instruction, agents.PromptMiddlewaresOf(a.options.Middlewares)...)
 	activities[a.options.Name+"_GetPromptActivity"] = temporalPrompt.GetPrompt
 
@@ -93,7 +96,7 @@ func (a *TemporalAgentV2) GetActivities() map[string]interface{} {
 func (a *TemporalAgentV2) GetWorkflows() map[string]any {
 	return map[string]any{
 		a.options.Name + "_AgentWorkflow":         a.Execute,
-		a.options.Name + backgroundWorkflowSuffix: NewBackgroundTaskWorkflow(a.options.Name).Execute,
+		a.options.Name + backgroundWorkflowSuffix: NewBackgroundTaskWorkflow(a.options.Name, a.broker).Execute,
 	}
 }
 

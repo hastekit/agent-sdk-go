@@ -91,13 +91,18 @@ func (r *TemporalBackgroundRunner) StartTask(_ context.Context, tool agents.Back
 // per tool per agent — the same scoping every other activity here uses.
 type BackgroundTaskWorkflow struct {
 	agentName string
+	broker    agents.StreamBroker
 }
 
-func NewBackgroundTaskWorkflow(agentName string) *BackgroundTaskWorkflow {
-	return &BackgroundTaskWorkflow{agentName: agentName}
+func NewBackgroundTaskWorkflow(agentName string, broker agents.StreamBroker) *BackgroundTaskWorkflow {
+	return &BackgroundTaskWorkflow{agentName: agentName, broker: broker}
 }
 
 func (w *BackgroundTaskWorkflow) Execute(ctx workflow.Context, in *BackgroundTaskInput) error {
+	// A background task owns retention for its separate stream until its wait finishes.
+	stopHeartbeat := NewTemporalStreamBrokerProxy(ctx, w.agentName, w.broker).StartHeartbeat(context.Background(), in.Ref.TaskStreamID)
+	defer stopHeartbeat()
+
 	awaitCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
 		StartToCloseTimeout: DefaultAwaitTaskTimeout,
 	})
@@ -109,6 +114,9 @@ func (w *BackgroundTaskWorkflow) Execute(ctx workflow.Context, in *BackgroundTas
 	shortCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
 		StartToCloseTimeout: 30 * time.Second,
 	})
+
+	// Stop renewal before closing so the replay TTL cannot be extended by an active emitter.
+	stopHeartbeat()
 
 	// Close first: a client watching the task sees it end when it ends, not
 	// when the agent has finished reacting to it.

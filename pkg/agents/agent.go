@@ -425,6 +425,9 @@ func (e *Agent) ExecuteLocal(ctx context.Context, in *AgentInput) (output *Agent
 
 	if e.streamBroker != nil && in.StreamID != "" {
 		defer e.streamBroker.Close(context.Background(), in.StreamID)
+
+		// Stop broker-owned liveness before applying replay retention.
+		defer e.streamBroker.StartHeartbeat(ctx, in.StreamID)()
 	}
 
 	run, err := history.NewRun(ctx, e.history, in.Namespace, in.ThreadID, in.PreviousRunID, history.WithGroupID(in.GroupID), history.WithRunContext(in.RunContext), history.WithRunID(in.RunID), history.WithDefaultConversationID(in.SessionID))
@@ -1157,7 +1160,9 @@ func (e *Agent) publisher(streamID string) func(chunk *responses.ResponseChunk) 
 	}
 	broker := e.streamBroker
 	return func(chunk *responses.ResponseChunk) {
-		_ = broker.Publish(context.Background(), streamID, chunk)
+		if err := broker.Publish(context.Background(), streamID, chunk); err != nil {
+			slog.Error("agent stream publish failed", "stream_id", streamID, "chunk_type", chunk.ChunkType(), "error", err)
+		}
 	}
 }
 

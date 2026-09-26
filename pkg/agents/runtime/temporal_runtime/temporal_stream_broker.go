@@ -41,7 +41,8 @@ func (s *TemporalStreamBroker) DrainMessages(ctx context.Context, channel string
 
 // TemporalStreamBrokerProxy is the workflow-side StreamBroker. It
 // routes IsStopped and DrainMessages through workflow activities so
-// the loop's broker reads are durable, and delegates the rest to the
+// the loop's broker reads are durable, schedules the heartbeat activity,
+// and delegates the remaining calls to the
 // wrapped broker (whose remaining call sites either run outside the
 // workflow or are themselves inside activities).
 type TemporalStreamBrokerProxy struct {
@@ -51,7 +52,8 @@ type TemporalStreamBrokerProxy struct {
 }
 
 // The proxy must offer every optional capability the loop looks for, or that
-// capability silently disappears inside a workflow.
+// capability silently disappears inside a workflow. StartHeartbeat schedules an
+// activity that owns the wrapped broker's renewal lifecycle.
 var (
 	_ agents.StreamBroker = (*TemporalStreamBrokerProxy)(nil)
 	_ agents.RunFeed      = (*TemporalStreamBrokerProxy)(nil)
@@ -137,4 +139,9 @@ func (p *TemporalStreamBrokerProxy) DrainMessages(ctx context.Context, channel s
 		return nil, err
 	}
 	return msgs, nil
+}
+
+// StartHeartbeat owns a dedicated Temporal activity for the execution's stream.
+func (p *TemporalStreamBrokerProxy) StartHeartbeat(_ context.Context, channel string) func() {
+	return startHeartbeatActivity(p.workflowCtx, p.prefix, p.wrappedBroker, channel)
 }
