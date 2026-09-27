@@ -750,3 +750,15 @@ body {
   .hastekit-threads-drawer { flex-basis: 0; width: 0; }
   .topbar { padding-left: 108px; }
 }
+
+/* MCP servers dialog: reuses the skill library and routine form styles. */
+.mcp-library .skill-summary small { display: block; margin-top: 4px; }
+.mcp-library .skill-summary p { margin: 6px 0 0; }
+.mcp-headers { display: grid; gap: 6px; font-size: 14px; }
+.mcp-headers > button { justify-self: start; }
+.mcp-header-row { display: grid; grid-template-columns: 1fr 1.4fr auto; gap: 8px; }
+.routine-form label.mcp-oauth-toggle { display: flex; align-items: center; gap: 8px; }
+.routine-form .mcp-oauth-toggle input { width: auto; }
+.mcp-connect { padding: 8px 12px; border: 1px solid #555; border-radius: 6px; background: #303030; color: #91c9ff; text-decoration: none; }
+.mcp-connect:hover { background: #414141; }
+@media (max-width: 640px) { .mcp-header-row { grid-template-columns: 1fr; } }

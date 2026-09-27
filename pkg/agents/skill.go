@@ -5,10 +5,9 @@ package agents
 const SkillFileName = "SKILL.md"
 
 type Skill struct {
-	// Availability is host-controlled, never read from uploaded frontmatter.
-	Required       bool `json:"required,omitempty"`
-	DefaultEnabled bool `json:"defaultEnabled,omitempty"`
-	// Global skills take precedence over user skills with the same name.
+	// Global marks a developer-owned skill. Users cannot disable it, and it
+	// shadows a user-owned skill with the same name. Set by the SkillClient,
+	// never read from uploaded frontmatter.
 	Global       bool   `json:"global,omitempty"`
 	Name         string `json:"name"`          // Skill name from SKILL.md frontmatter
 	Description  string `json:"description"`   // Skill description from SKILL.md frontmatter

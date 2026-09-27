@@ -5,6 +5,7 @@ import type {
   ChatOptions,
   ChatSnapshot,
   ContentPart,
+  MCPServerConfig,
   Message,
   RunInput,
 } from "./types.js";
@@ -18,9 +19,13 @@ function asError(value: unknown): Error {
 export class ChatController {
   private snapshot: ChatSnapshot = {
     skills: [],
-    skillSelection: { enable: [], disable: [] },
+    skillSelection: { disable: [] },
     loadingSkills: false,
     skillsError: null,
+    mcpServers: [],
+    mcpSelection: { disable: [] },
+    loadingMCPServers: false,
+    mcpServersError: null,
     threads: [],
     threadsSupported: true,
     loadingThreads: false,
@@ -47,7 +52,7 @@ export class ChatController {
   private streamId?: string;
   private selectionAbort = new AbortController();
   private skillsAbort?: AbortController;
-  private skillDefaults = new Map<string, boolean>();
+  private mcpAbort?: AbortController;
   private listAbort?: AbortController;
   private streamAbort?: AbortController;
   private feedAbort?: AbortController;
@@ -83,6 +88,7 @@ export class ChatController {
     this.mounted = true;
     void this.refreshThreads().catch(() => {});
     void this.refreshSkills().catch(() => {});
+    void this.refreshMCPServers().catch(() => {});
     // Restore the initial selection once, including effect replay in development mode.
     if (!this.initialized) {
       this.initialized = true;
@@ -100,6 +106,7 @@ export class ChatController {
       this.feedAbort?.abort();
       this.listAbort?.abort();
       this.skillsAbort?.abort();
+      this.mcpAbort?.abort();
       this.resetSelection();
     };
   };
@@ -159,30 +166,19 @@ export class ChatController {
     this.update({ loadingSkills: true, skillsError: null });
     try {
       const catalog =
-        (await this.options.transport.listSkills?.(
-          this.options.agent,
-          abort.signal,
-        )) ?? [];
+        (await this.options.transport.listSkills?.(abort.signal)) ?? [];
       if (abort.signal.aborted) return;
 
-      // Retain choices only for skills that remain available and optional.
-      this.skillDefaults = new Map(
-        catalog.map((skill) => [skill.name, skill.enabled]),
-      );
-      const optional = new Set(
-        catalog.filter((skill) => !skill.required).map((skill) => skill.name),
-      );
-      const selection = this.snapshot.skillSelection;
+      // Retain choices only for skills that still exist.
+      const available = new Set(catalog.map((skill) => skill.name));
       const skillSelection = {
-        enable: selection.enable.filter((name) => optional.has(name)),
-        disable: selection.disable.filter((name) => optional.has(name)),
+        disable: this.snapshot.skillSelection.disable.filter((name) =>
+          available.has(name),
+        ),
       };
       const skills = catalog.map((skill) => ({
         ...skill,
-        enabled:
-          !!skill.required ||
-          (!skillSelection.disable.includes(skill.name) &&
-            (skill.enabled || skillSelection.enable.includes(skill.name))),
+        enabled: !skillSelection.disable.includes(skill.name),
       }));
       this.update({ skills, skillSelection });
     } catch (error) {
@@ -195,40 +191,128 @@ export class ChatController {
     }
   };
 
-  // Apply composer choices to subsequent runs while preserving required skills.
+  // Apply composer choices to subsequent runs. Agents' global skills are not
+  // listed here and are always on.
   setSkillEnabled = (name: string, enabled: boolean): void => {
     const skill = this.snapshot.skills.find((item) => item.name === name);
     if (!skill) throw new Error(`Unknown skill: ${name}`);
-    if (skill.required && !enabled)
-      throw new Error(`Skill is required: ${name}`);
 
-    // Store only deviations from the catalog defaults.
-    const enable = this.snapshot.skillSelection.enable.filter(
-      (item) => item !== name,
-    );
+    // Every skill starts enabled, so the selection only records disabled ones.
     const disable = this.snapshot.skillSelection.disable.filter(
       (item) => item !== name,
     );
-    if (!skill.required && enabled !== this.skillDefaults.get(name))
-      (enabled ? enable : disable).push(name);
+    if (!enabled) disable.push(name);
     this.update({
-      skillSelection: { enable, disable },
+      skillSelection: { disable },
       skills: this.snapshot.skills.map((item) =>
         item.name === name ? { ...item, enabled } : item,
       ),
     });
   };
 
-  // Restore the server defaults without changing the selected conversation.
+  // Turn every skill back on without changing the selected conversation.
   resetSkills = (): void => {
     this.update({
-      skillSelection: { enable: [], disable: [] },
+      skillSelection: { disable: [] },
       skills: this.snapshot.skills.map((skill) => ({
         ...skill,
-        enabled: !!skill.required || !!this.skillDefaults.get(skill.name),
+        enabled: true,
       })),
     });
   };
+
+  // Refresh MCP servers independently of chat errors and discard stale responses.
+  refreshMCPServers = async (): Promise<void> => {
+    this.mcpAbort?.abort();
+    const abort = new AbortController();
+    this.mcpAbort = abort;
+    this.update({ loadingMCPServers: true, mcpServersError: null });
+    try {
+      const listed =
+        (await this.options.transport.mcp?.list(abort.signal)) ?? [];
+      if (abort.signal.aborted) return;
+
+      // Only the user's own servers can be turned off; drop choices for the rest.
+      const optional = new Set(
+        listed
+          .filter((server) => !!server.namespace)
+          .map((server) => server.name),
+      );
+      const mcpSelection = {
+        disable: this.snapshot.mcpSelection.disable.filter((name) =>
+          optional.has(name),
+        ),
+      };
+      const mcpServers = listed.map((server) => ({
+        ...server,
+        enabled:
+          !optional.has(server.name) ||
+          !mcpSelection.disable.includes(server.name),
+      }));
+      this.update({ mcpServers, mcpSelection });
+    } catch (error) {
+      if (!abort.signal.aborted) {
+        this.update({ mcpServersError: asError(error) });
+        throw error;
+      }
+    } finally {
+      if (!abort.signal.aborted) this.update({ loadingMCPServers: false });
+    }
+  };
+
+  // Apply composer choices to subsequent runs; global servers cannot be turned off.
+  setMCPServerEnabled = (name: string, enabled: boolean): void => {
+    const server = this.snapshot.mcpServers.find((item) => item.name === name);
+    if (!server) throw new Error(`Unknown MCP server: ${name}`);
+    if (!server.namespace && !enabled)
+      throw new Error(`MCP server is global and always enabled: ${name}`);
+    const disable = this.snapshot.mcpSelection.disable.filter(
+      (item) => item !== name,
+    );
+    if (!enabled) disable.push(name);
+    this.update({
+      mcpSelection: { disable },
+      mcpServers: this.snapshot.mcpServers.map((item) =>
+        item.name === name ? { ...item, enabled } : item,
+      ),
+    });
+  };
+
+  // Turn every MCP server back on without changing the selected conversation.
+  resetMCPServers = (): void => {
+    this.update({
+      mcpSelection: { disable: [] },
+      mcpServers: this.snapshot.mcpServers.map((server) => ({
+        ...server,
+        enabled: true,
+      })),
+    });
+  };
+
+  // Add or replace one of the user's servers, then reload the list.
+  saveMCPServer = async (
+    name: string,
+    config: MCPServerConfig,
+  ): Promise<void> => {
+    if (!this.options.transport.mcp)
+      throw new Error("MCP server management is not supported");
+    await this.options.transport.mcp.save(name, config);
+    await this.refreshMCPServers();
+  };
+
+  // Remove one of the user's servers and its OAuth grant, then reload the list.
+  removeMCPServer = async (name: string): Promise<void> => {
+    if (!this.options.transport.mcp)
+      throw new Error("MCP server management is not supported");
+    await this.options.transport.mcp.remove(name);
+    await this.refreshMCPServers();
+  };
+
+  // URLs for OAuth servers: open connectUrl in a new tab; register callbackUrl with the provider.
+  mcpConnectUrl = (name: string): string | undefined =>
+    this.options.transport.mcp?.connectUrl(name);
+  mcpCallbackUrl = (name: string): string | undefined =>
+    this.options.transport.mcp?.callbackUrl(name);
 
   // Allocate a local draft; the backend creates its persisted conversation on send.
   newThread = (): string => {
@@ -346,14 +430,15 @@ export class ChatController {
       context: this.options.context ?? [],
       forwardedProps: {
         ...this.options.forwardedProps,
-        ...(this.snapshot.skillSelection.enable.length ||
-        this.snapshot.skillSelection.disable.length
+        ...(this.snapshot.skillSelection.disable.length
           ? {
               skills: {
-                enable: [...this.snapshot.skillSelection.enable],
                 disable: [...this.snapshot.skillSelection.disable],
               },
             }
+          : {}),
+        ...(this.snapshot.mcpSelection.disable.length
+          ? { mcp: { disable: [...this.snapshot.mcpSelection.disable] } }
           : {}),
         ...forwardedProps,
       },

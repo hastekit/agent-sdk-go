@@ -13,10 +13,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+var defaultNamespace = WithNamespaceResolver(func(*http.Request) (string, error) { return "default", nil })
+
 func TestHTTPUploadListReadIsolation(t *testing.T) {
 	store, err := NewFileStore(t.TempDir())
 	require.NoError(t, err)
-	handler := NewHandler(store, func(r *http.Request) (string, error) { return r.Header.Get("Tenant"), nil })
+	handler := NewHandler(store, WithNamespaceResolver(func(r *http.Request) (string, error) { return r.Header.Get("Tenant"), nil }))
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
 	b := bundle("review", "Instructions")
@@ -52,7 +54,7 @@ func TestHTTPUploadListReadIsolation(t *testing.T) {
 func TestHTTPValidationAndErrors(t *testing.T) {
 	store, err := NewFileStore(t.TempDir())
 	require.NoError(t, err)
-	handler := NewHandler(store, nil)
+	handler := NewHandler(store, defaultNamespace)
 	invalid := bundle("review", "content")
 	invalid.Files["../escape"] = []byte("secret")
 	encoded, _ := json.Marshal(invalid)
@@ -67,16 +69,52 @@ func TestHTTPValidationAndErrors(t *testing.T) {
 	resp = httptest.NewRecorder()
 	handler.ServeHTTP(resp, req)
 	require.Equal(t, 400, resp.Code)
-	denied := NewHandler(store, func(*http.Request) (string, error) { return "", fmt.Errorf("denied") })
+	denied := NewHandler(store, WithNamespaceResolver(func(*http.Request) (string, error) { return "", fmt.Errorf("denied") }))
 	resp = httptest.NewRecorder()
 	denied.ServeHTTP(resp, httptest.NewRequest("GET", "/skills", nil))
 	require.Equal(t, 403, resp.Code)
+
+	// Without a trusted namespace resolver, every route fails closed.
+	resp = httptest.NewRecorder()
+	NewHandler(store).ServeHTTP(resp, httptest.NewRequest("GET", "/skills", nil))
+	require.Equal(t, 403, resp.Code)
+}
+
+func TestHTTPRejectsGlobalSkillNames(t *testing.T) {
+	store, err := NewFileStore(t.TempDir())
+	require.NoError(t, err)
+	handler := NewHandler(store, defaultNamespace, WithReservedNames(func(*http.Request) ([]string, error) { return []string{"review"}, nil }))
+	upload := func(name string) int {
+		encoded, err := json.Marshal(bundle(name, "content"))
+		require.NoError(t, err)
+		req := httptest.NewRequest("POST", "/skills", bytes.NewReader(encoded))
+		req.Header.Set("Content-Type", "application/json")
+		resp := httptest.NewRecorder()
+		handler.ServeHTTP(resp, req)
+		return resp.Code
+	}
+	require.Equal(t, http.StatusConflict, upload("review"))
+	_, err = store.Get(context.Background(), "default", "review")
+	require.ErrorIs(t, err, ErrNotFound)
+	require.Equal(t, http.StatusOK, upload("mine"))
+
+	// A failing reservation check never lets the upload through.
+	failing := NewHandler(store, defaultNamespace, WithReservedNames(func(*http.Request) ([]string, error) { return nil, fmt.Errorf("catalog unavailable") }))
+	encoded, err := json.Marshal(bundle("other", "content"))
+	require.NoError(t, err)
+	req := httptest.NewRequest("POST", "/skills", bytes.NewReader(encoded))
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	failing.ServeHTTP(resp, req)
+	require.Equal(t, http.StatusInternalServerError, resp.Code)
+	_, err = store.Get(context.Background(), "default", "other")
+	require.ErrorIs(t, err, ErrNotFound)
 }
 
 func TestHTTPRejectsOversizedAndDuplicateUploads(t *testing.T) {
 	store, err := NewFileStore(t.TempDir())
 	require.NoError(t, err)
-	handler := NewHandler(store, nil)
+	handler := NewHandler(store, defaultNamespace)
 	for _, duplicate := range []bool{false, true} {
 		var body bytes.Buffer
 		w := multipart.NewWriter(&body)

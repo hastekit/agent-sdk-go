@@ -52,7 +52,7 @@ func TestCatalogSelectionAndStatusesCrossTemporalBoundary(t *testing.T) {
 	env := suite.NewTestWorkflowEnvironment()
 	env.RegisterActivityWithOptions(wrapper.ListTools, activity.RegisterOptions{Name: "catalog_ListMCPToolsActivity"})
 	env.RegisterActivityWithOptions(wrapper.ExecuteTool, activity.RegisterOptions{Name: "catalog_ExecuteMCPToolActivity"})
-	selection := agents.MCPSelection{Enable: []string{"docs"}, Disable: []string{"other"}, Tools: map[string]agents.MCPToolSelection{"docs": {Exclude: []string{"write"}}}}
+	selection := agents.MCPSelection{Disable: []string{"other"}, Tools: map[string]agents.MCPToolSelection{"docs": {Exclude: []string{"write"}}}}
 
 	// The workflow receives auth status as data and can still execute another connector's tool.
 	env.ExecuteWorkflow(func(ctx workflow.Context) ([]agents.ConnectorStatus, error) {

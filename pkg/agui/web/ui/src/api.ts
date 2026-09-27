@@ -34,12 +34,13 @@ export async function fetchAgents(): Promise<{
   fullHistory: boolean;
   attachmentsEnabled: boolean;
   skillStoreEnabled: boolean;
+  mcpStoreEnabled: boolean;
   routinesEnabled: boolean;
 }> {
   const r = await fetch(`${API}/agents`);
   if (!r.ok) throw new Error(`agents → ${r.status}`);
   const body = await r.json();
-  return { routinesEnabled: body.routines === true, agents: body.agents ?? [], fullHistory: body.full_history === true, attachmentsEnabled: body.attachments === true, skillStoreEnabled: body.skill_store === true };
+  return { routinesEnabled: body.routines === true, agents: body.agents ?? [], fullHistory: body.full_history === true, attachmentsEnabled: body.attachments === true, skillStoreEnabled: body.skill_store === true, mcpStoreEnabled: body.mcp_store === true };
 }
 
 // fetchThreads returns supported=false when the agent's persistence
@@ -220,18 +221,27 @@ export async function uploadAttachment(file: File, sessionId: string): Promise<U
   return response.json();
 }
 
+// The user's own skills, shared by every agent and on unless turned off. Agents'
+// global skills are configured on the server, always on, and never listed.
 export interface SkillInfo {
   name: string;
   description: string;
-  required?: boolean;
-  defaultEnabled?: boolean;
-  global?: boolean;
-  enabled: boolean;
 }
-export async function fetchSkills(agent: string): Promise<SkillInfo[]> {
-  const r = await fetch(`${API}/agents/${encodeURIComponent(agent)}/skills`);
-  if (!r.ok) throw new Error(`skills → ${r.status}`);
-  return (await r.json()).skills ?? [];
+export async function fetchSkillCatalog(): Promise<SkillInfo[]> {
+  const skills: SkillInfo[] = [];
+  const seen = new Set<string>();
+  let cursor = "";
+  for (;;) {
+    const r = await fetch(`${API}/skills?limit=200&cursor=${encodeURIComponent(cursor)}`);
+    if (r.status === 404) return []; // no skill store configured
+    if (!r.ok) throw new Error(`skills → ${r.status}`);
+    const page: { skills?: SkillInfo[]; nextCursor?: string } = await r.json();
+    skills.push(...(page.skills ?? []));
+    if (!page.nextCursor) return skills;
+    if (seen.has(page.nextCursor)) throw new Error("skills → repeated pagination cursor");
+    seen.add(page.nextCursor);
+    cursor = page.nextCursor;
+  }
 }
 
 export interface StoredSkill { name: string; description: string; resources: string[] }
@@ -302,4 +312,66 @@ export async function fetchRoutine(id: string): Promise<Routine> {
 
 export async function runRoutineNow(id: string): Promise<{ id: string }> {
   return routineRequest(`/${encodeURIComponent(id)}/run`, { method: "POST" });
+}
+
+// One MCP server the user can see. Global servers (no namespace) are the
+// developer's: always on and read-only. The user's own are on unless turned off.
+export interface MCPServerInfo {
+  name: string;
+  namespace?: string;
+  transport?: string;
+  readOnly: boolean;
+  oauth: boolean;
+  // Present when OAuth connect is available: whether this user has connected.
+  connected?: boolean;
+  error?: string;
+}
+
+// A user-owned remote server. Headers are literal (API keys); the server rejects
+// templates, private addresses, and names taken by global servers.
+export interface MCPServerConfig {
+  endpoint: string;
+  transport?: "streamable-http" | "sse";
+  toolPrefix?: string;
+  headers?: Record<string, string>;
+  authorization?: {
+    clientId: string;
+    clientSecret?: string;
+    authUrl: string;
+    tokenUrl: string;
+    redirectUrl: string;
+    scopes?: string[];
+  };
+}
+
+const mcpPath = (name: string) => `${API}/mcp/${encodeURIComponent(name)}`;
+
+export function isGlobalMCPServer(server: MCPServerInfo): boolean {
+  return !server.namespace;
+}
+
+export async function fetchMCPServers(): Promise<MCPServerInfo[]> {
+  const r = await fetch(`${API}/mcp/`);
+  if (r.status === 404) return []; // no MCP store configured
+  if (!r.ok) throw new Error(`MCP servers → ${r.status}`);
+  return (await r.json()) ?? [];
+}
+
+export async function saveMCPServer(name: string, config: MCPServerConfig): Promise<void> {
+  const r = await fetch(mcpPath(name), { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(config) });
+  if (!r.ok) throw new Error(await r.text());
+}
+
+export async function deleteMCPServer(name: string): Promise<void> {
+  const r = await fetch(mcpPath(name), { method: "DELETE" });
+  if (!r.ok) throw new Error(await r.text());
+}
+
+// Open in a new tab to sign in; the provider must redirect to mcpCallbackUrl.
+export function mcpConnectUrl(name: string): string {
+  return `${mcpPath(name)}/connect`;
+}
+
+export function mcpCallbackUrl(name: string): string {
+  return new URL(`${mcpPath(name)}/callback`, window.location.href).toString();
 }

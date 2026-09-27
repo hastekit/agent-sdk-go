@@ -159,30 +159,31 @@ func TestInvalidBundles(t *testing.T) {
 		require.Error(t, err)
 	}
 }
-func TestStoredSkillSetUsesNamespaceAndHostPolicy(t *testing.T) {
+func TestClientUsesTheExecutionNamespace(t *testing.T) {
 	store, err := NewFileStore(t.TempDir())
 	require.NoError(t, err)
 	_, err = store.Put(context.Background(), "tenant", bundle("review", "content"))
 	require.NoError(t, err)
-	set, err := NewSkillSet("library", store)
-	require.NoError(t, err)
-	empty, err := set.ListSkills(context.Background(), "default", nil)
+	client := NewClient(store)
+	empty, err := client.ListSkills(context.Background(), "other", nil)
 	require.NoError(t, err)
 	require.Empty(t, empty)
-	rc := map[string]any{"user": "alice"}
-	listed, err := set.ListSkills(context.Background(), "tenant", rc)
+
+	// Run context is application data; a Namespace key there never selects storage.
+	rc := map[string]any{"Namespace": "tenant"}
+	empty, err = client.ListSkills(context.Background(), "", rc)
+	require.NoError(t, err)
+	require.Empty(t, empty)
+	listed, err := client.ListSkills(context.Background(), "tenant", rc)
 	require.NoError(t, err)
 	require.Len(t, listed, 1)
-	require.False(t, listed[0].DefaultEnabled)
-	required, err := NewSkillSet("library", store, WithGlobalNamespace("global"), WithRequiredSkills("review"))
-	require.NoError(t, err)
-	listed, err = required.ListSkills(context.Background(), "tenant", rc)
-	require.NoError(t, err)
-	require.False(t, listed[0].Required, "user-owned skills cannot be required")
-	content, err := set.ResolveSkill(context.Background(), "tenant", rc, "review", "refs/check.md")
+	require.False(t, listed[0].Global, "user-owned skills are never global")
+	content, err := client.ReadSkill(context.Background(), "tenant", rc, "review", "refs/check.md")
 	require.NoError(t, err)
 	require.Equal(t, "check", content)
-	_, err = set.ResolveSkill(context.Background(), "tenant", rc, "review", "../secret")
+	_, err = client.ReadSkill(context.Background(), "tenant", rc, "review", "../secret")
+	require.ErrorIs(t, err, ErrNotFound)
+	_, err = client.ReadSkill(context.Background(), "other", rc, "review", "")
 	require.ErrorIs(t, err, ErrNotFound)
 }
 
@@ -197,42 +198,4 @@ func TestFileStoreSurvivesReopen(t *testing.T) {
 	got, err := second.Get(context.Background(), "tenant", "saved")
 	require.NoError(t, err)
 	require.Equal(t, bundle("saved", "persistent"), got)
-}
-
-func TestSkillSetUsesCallerNamespace(t *testing.T) {
-	ctx := context.Background()
-	store, err := NewFileStore(t.TempDir())
-	require.NoError(t, err)
-	_, err = store.Put(ctx, "default", bundle("local", "default content"))
-	require.NoError(t, err)
-	_, err = store.Put(ctx, "global", bundle("builtin", "shared content"))
-	require.NoError(t, err)
-	source, err := NewSkillSet("user", store)
-	require.NoError(t, err)
-	listed, err := source.ListSkills(ctx, "", map[string]any{"Namespace": "global"})
-	require.NoError(t, err)
-	require.Len(t, listed, 1)
-	require.Equal(t, "local", listed[0].Name)
-	content, err := source.ResolveSkill(ctx, "", nil, "local", "")
-	require.NoError(t, err)
-	require.Contains(t, content, "default content")
-	_, err = store.Put(ctx, "tenant", bundle("tenant-skill", "tenant content"))
-	require.NoError(t, err)
-	rc := map[string]any{"Namespace": "global"}
-	listed, err = source.ListSkills(ctx, "tenant", rc)
-	require.NoError(t, err)
-	require.Len(t, listed, 1)
-	require.Equal(t, "tenant-skill", listed[0].Name)
-	content, err = source.ResolveSkill(ctx, "tenant", rc, "tenant-skill", "")
-	require.NoError(t, err)
-	require.Contains(t, content, "tenant content")
-	_, err = source.ResolveSkill(ctx, "tenant", rc, "builtin", "")
-	require.ErrorIs(t, err, ErrNotFound)
-	listed, err = source.ListSkills(ctx, "global", nil)
-	require.NoError(t, err)
-	require.Len(t, listed, 1)
-	require.Equal(t, "builtin", listed[0].Name)
-	content, err = source.ResolveSkill(ctx, "global", nil, "builtin", "")
-	require.NoError(t, err)
-	require.Contains(t, content, "shared content")
 }

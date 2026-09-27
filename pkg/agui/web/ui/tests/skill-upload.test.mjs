@@ -17,21 +17,18 @@ function file(text, path = "") {
   return { name: "SKILL.md", webkitRelativePath: path, text: async () => text };
 }
 
-test("rejects global name conflicts including quoted YAML and Windows line endings", async () => {
-  await assert.rejects(validateSkillUpload([file('\uFEFF---\r\nname: "review" # comment\r\ndescription: Review\r\n---\r\nInstructions', "folder/SKILL.md")], ["review"]), /global skill/);
-});
-
-test("allows new user names and same-named user replacements", async () => {
-  await validateSkillUpload([file("---\nname: personal\ndescription: Personal\n---\nInstructions")], ["review"]);
+test("reads names from quoted YAML with Windows line endings", async () => {
+  await validateSkillUpload([file('\uFEFF---\r\nname: "review" # comment\r\ndescription: Review\r\n---\r\nInstructions', "folder/SKILL.md")]);
+  await assert.rejects(validateSkillUpload([file('---\r\nname: "  "\r\ndescription: Review\r\n---\r\n')]), /skill name/);
 });
 
 test("validates the bundle root rather than nested SKILL.md resources", async () => {
-  await assert.rejects(validateSkillUpload([file("", "folder/nested/SKILL.md")], []), /at its root/);
+  await assert.rejects(validateSkillUpload([file("", "folder/nested/SKILL.md")]), /at its root/);
   assert.equal(skillUploadPath({name: "help.md", webkitRelativePath: "folder/refs/help.md"}), "refs/help.md");
 });
 
 test("rejects malformed or missing frontmatter", async () => {
   for (const content of ["plain text", "---\nname: review", "---\nname: [\n---", "---\ndescription: Missing name\n---"]) {
-    await assert.rejects(validateSkillUpload([file(content)], []));
+    await assert.rejects(validateSkillUpload([file(content)]));
   }
 });

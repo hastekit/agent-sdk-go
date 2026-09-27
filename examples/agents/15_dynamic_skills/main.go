@@ -18,29 +18,30 @@ import (
 
 func main() {
 	serve := flag.Bool("serve", false, "serve the embedded UI")
-	storeDir := flag.String("skill-store", "./data/skills", "directory for uploaded skills")
+	storeDir := flag.String("skill-store", "./data/skills", "directory for users' uploaded skills")
 	flag.Parse()
+
+	// Users' own skills, shared by every agent that uses this store.
 	store, err := skills.NewFileStore(*storeDir)
 	if err != nil {
 		log.Fatal(err)
 	}
-	library, err := skills.NewSkillSet("library", store)
-	if err != nil {
-		log.Fatal(err)
-	}
-	builtins, err := hastekit.NewFilesystemSkillSet("builtin", "./samples/skills/skills")
+	userSkills := skills.NewClient(store)
+
+	// Developer-owned global skills for this agent: always on, never shadowed by a user's.
+	builtins, err := skills.NewDirSource("./samples/skills/skills")
 	if err != nil {
 		log.Fatal(err)
 	}
 	// Implement teamSkills with a database or HTTP-backed catalog and reader.
-	// ListSkills runs at the start of each run, so newly saved skills appear without
-	// rebuilding the agent. Policies come from the host, never the model.
+	// List runs at the start of each run, so new skills appear without rebuilding the agent.
 	team := &teamSkills{}
+
 	client := hastekit.NewLLMClient([]hastekit.ProviderConfig{{ProviderName: hastekit.ProviderOpenAI, ApiKeys: []*hastekit.APIKeyConfig{{APIKey: os.Getenv("OPENAI_API_KEY")}}}})
 	agent, err := hastekit.NewAgent(&hastekit.AgentConfig{
 		Name: "ReleaseAssistant", LLM: client.Model("OpenAI/gpt-4.1-mini"),
 		Instruction: hastekit.NewPrompt("Help prepare releases. Read relevant skills before answering.", prompts.WithResolver(prompts.DefaultResolvers()...)),
-		Skills:      []hastekit.SkillSet{builtins, team, library},
+		SkillClient: userSkills.WithGlobalSkills(builtins, team),
 	})
 	if err != nil {
 		log.Fatal(err)
@@ -52,16 +53,19 @@ func main() {
 		}
 		log.Fatal(web.Serve(":8080", registry, agui.WithSkillStore(store)))
 	}
-	selection := hastekit.SkillSelection{Enable: []string{"release-review"}, Disable: []string{"writing"}}
+
+	// A run can turn off the user's own skills; naming a global here has no effect.
+	selection := hastekit.SkillSelection{Disable: []string{"my-drafts"}}
 	catalog, err := agent.ListSkills(context.Background(), "default", nil, selection)
 	if err != nil {
 		log.Fatal(err)
 	}
 	for _, skill := range catalog {
-		fmt.Printf("%s: enabled=%t required=%t\n", skill.Name, skill.Enabled, skill.Required)
+		fmt.Printf("%s: enabled=%t global=%t\n", skill.Name, skill.Enabled, skill.Global)
 	}
 	result, err := agent.Run(context.Background(), &hastekit.Input{
-		Skills: selection, Message: hastekit.UserTurn("What should we check before shipping a release?"),
+		Namespace: "default",
+		Skills:    selection, Message: hastekit.UserTurn("What should we check before shipping a release?"),
 	})
 	if err != nil {
 		log.Fatal(err)
@@ -69,18 +73,17 @@ func main() {
 	fmt.Println(result.Text())
 }
 
+// teamSkills is a custom global source; any skills.Source can back an agent's globals.
 type teamSkills struct{}
 
-func (s *teamSkills) GetName() string { return "team" }
-
-func (s *teamSkills) ListSkills(ctx context.Context, namespace string, rc map[string]any) ([]hastekit.Skill, error) {
+func (s *teamSkills) List(ctx context.Context) ([]hastekit.Skill, error) {
 	return []hastekit.Skill{
-		{Name: "release-review", Description: "Review a release before shipping.", Global: true, Resources: []string{"checklist.md"}},
-		{Name: "writing", Description: "Write concise release notes.", Global: true, DefaultEnabled: true},
+		{Name: "release-review", Description: "Review a release before shipping.", Resources: []string{"checklist.md"}},
+		{Name: "writing", Description: "Write concise release notes."},
 	}, ctx.Err()
 }
 
-func (s *teamSkills) ResolveSkill(ctx context.Context, namespace string, rc map[string]any, name, file string) (string, error) {
+func (s *teamSkills) Read(ctx context.Context, name, file string) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}

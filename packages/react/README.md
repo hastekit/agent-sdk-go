@@ -238,23 +238,26 @@ text, tool calls/results, message snapshots, state snapshots/deltas, lifecycle,
 input echoes, approvals, and compaction. Unhandled protocol events are retained
 in `lastEvent` and delivered to `onEvent` without changing the transcript.
 
-## Agent skills
+## Skills
 
-The client loads the agent's catalog from `GET /agents/{agent}/skills` on mount.
-`skills` contains names, descriptions, host policy, and effective `enabled` state.
-Use `loadingSkills`, `skillsError`, and `refreshSkills()` for the picker lifecycle.
-A catalog failure does not prevent chatting; custom transports may omit `listSkills`.
+The client loads the user's own skills from `GET /skills` on mount. That library
+is not scoped to an agent: every agent using the server's skill store reads the
+same skills. Each entry has a name, description, resources, and effective
+`enabled` state; skills are on unless turned off. An agent's global skills are
+configured on the server, always on, and not listed. Use `loadingSkills`,
+`skillsError`, and `refreshSkills()` for the picker lifecycle. A server without a
+skill store returns an empty list, a catalog failure does not prevent chatting,
+and custom transports may omit `listSkills`.
 
 ```tsx
 const chat = useChatContext();
 
-// Render optional choices and keep host-required skills enabled.
+// Let users turn off their own skills for this conversation's runs.
 return chat.skills.map((skill) => (
   <label key={skill.name}>
     <input
       type="checkbox"
       checked={skill.enabled}
-      disabled={skill.required}
       onChange={(event) =>
         chat.setSkillEnabled(skill.name, event.target.checked)
       }
@@ -266,16 +269,64 @@ return chat.skills.map((skill) => (
 
 Selections apply to subsequent sends and resumes in this controller, including
 new conversations. They do not alter an active run or server configuration, and
-are not persisted across page reloads. `resetSkills()` restores catalog defaults.
-Refresh retains valid optional choices and removes unavailable or required overrides.
+are not persisted across page reloads. `resetSkills()` turns every skill back on.
+Refresh keeps choices for skills that still exist and drops the rest.
 
-The client sends deviations from defaults as `forwardedProps.skills` with
-`enable` and `disable` arrays. Unrelated forwarded properties are preserved.
+The client sends turned-off skills as `forwardedProps.skills` with a `disable`
+array. Unrelated forwarded properties are preserved.
 Explicit per-message forwarded properties take precedence, so a caller can use
-`sendMessage("Review this", { skills: { enable: ["review"], disable: [] } })`
+`sendMessage("Review this", { skills: { disable: ["drafts"] } })`
 for a single run without changing the picker's selection. If no picker overrides
 exist, configured `forwardedProps.skills` is passed through unchanged; the picker
 reflects catalog defaults, not manually supplied forwarded properties.
+
+## MCP servers
+
+When the server has an MCP store, the client loads the user's MCP servers from
+`GET /mcp/` on mount. The list is not scoped to an agent. Global servers are the
+developer's: always on and read-only. The user's own servers are on unless
+turned off. Use `mcpServers`, `loadingMCPServers`, `mcpServersError`, and
+`refreshMCPServers()` for the list. A server without an MCP store returns an
+empty list, and custom transports may omit `transport.mcp`.
+
+```tsx
+const chat = useChatContext();
+
+return chat.mcpServers.map((server) => (
+  <div key={server.name}>
+    <label>
+      <input
+        type="checkbox"
+        checked={server.enabled}
+        disabled={!server.namespace} // global servers stay on
+        onChange={(event) =>
+          chat.setMCPServerEnabled(server.name, event.target.checked)
+        }
+      />
+      {server.name}
+    </label>
+    {server.connected === false && (
+      <a href={chat.mcpConnectUrl(server.name)} target="_blank">
+        Connect
+      </a>
+    )}
+    {server.namespace && (
+      <button onClick={() => chat.removeMCPServer(server.name)}>Remove</button>
+    )}
+  </div>
+));
+```
+
+`saveMCPServer(name, config)` adds or replaces one of the user's servers: an
+`endpoint`, optional `transport` (`streamable-http` or `sse`), `toolPrefix`,
+literal `headers` for API keys, and optional OAuth `authorization`. For OAuth,
+set `redirectUrl` to `mcpCallbackUrl(name)` and open `mcpConnectUrl(name)` in a
+new tab to sign in; `connected` reports whether the user has. The server rejects
+templates, private network addresses, and names taken by global servers.
+`removeMCPServer(name)` also forgets the user's OAuth grant for that server.
+
+The client sends turned-off servers as `forwardedProps.mcp` with a `disable`
+array, like skills. `resetMCPServers()` turns every server back on.
 
 ## Routines
 

@@ -61,10 +61,12 @@ func WithRoutines(service *routines.Service, schedulers ...routines.Scheduler) O
 	}
 }
 
-// WithSkillStore enables namespace-scoped skill management APIs and the embedded
-// UI library, shared across agents. Configure an adapter over the same store
-// in each participating agent's Skills. Agent names do not scope stored content.
-// Protect management routes with application authorization middleware.
+// WithSkillStore mounts /skills for users' own skills, independent of any agent:
+// the embedded UI's library and Skills menu both use it. Pass the same store to
+// skills.NewClient for each participating agent. Global skills are configured
+// per agent in code, are always on, and never appear here; uploads cannot reuse
+// a registered agent's global skill name. Protect management routes with
+// application authorization middleware.
 func WithSkillStore(store skills.Store) Option { return func(o *options) { o.skillStore = store } }
 
 // WithAttachmentStore enables upload/download endpoints and owned file references.
@@ -144,10 +146,14 @@ func buildOptions(opts []Option) options {
 //	GET  /a2a/{agent}/.well-known/agent-card.json  → A2A discovery card
 //	POST /a2a/{agent}                            → A2A 1.0 JSON-RPC (including SSE)
 //	GET  /agents                                  → {"agents": ["name", ...]}
-//	GET  /agents/{agent}/skills                   → visible skill catalog and default enablement
 //	POST /agents/{agent}/run                      → run the agent; SSE stream of AG-UI events
 //	GET  /agents/{agent}/threads                  → stored conversation threads, newest first
 //	GET  /agents/{agent}/threads/{thread}/messages → thread history as AG-UI messages
+//	GET  /skills                                  → the caller's own skills (WithSkillStore)
+//
+// Skills are not scoped to an agent: /skills manages the caller's own skills,
+// which every agent using the store can read. Runs turn them off with
+// forwardedProps.skills.disable; an agent's global skills are always on.
 //
 // The run endpoint accepts the canonical AG-UI RunAgentInput body and
 // streams back the canonical event wire format, so any AG-UI client
@@ -183,7 +189,10 @@ func NewHandler(registry Registry, opts ...Option) http.Handler {
 		mux.Handle(pattern, o.withNamespace(fn))
 	}
 	if o.skillStore != nil {
-		h := o.withNamespace(skills.NewHandler(o.skillStore, func(r *http.Request) (string, error) { return requestNamespace(r), nil }))
+		h := o.withNamespace(skills.NewHandler(o.skillStore,
+			skills.WithNamespaceResolver(func(r *http.Request) (string, error) { return requestNamespace(r), nil }),
+			skills.WithReservedNames(func(r *http.Request) ([]string, error) { return globalSkillNames(r, registry) }),
+		))
 		mux.Handle("/skills", h)
 		mux.Handle("/skills/", h)
 	}
@@ -275,26 +284,9 @@ func NewHandler(registry Registry, opts ...Option) http.Handler {
 			"full_history": o.fullHistory,
 			"attachments":  o.attachmentStore != nil,
 			"skill_store":  o.skillStore != nil,
+			"mcp_store":    o.mcpStore != nil,
 			"routines":     o.routineService != nil,
 		})
-	})
-
-	handleFunc("GET /agents/{agent}/skills", func(w http.ResponseWriter, r *http.Request) {
-		agent, ok := registry.Agent(r.PathValue("agent"))
-		if !ok {
-			writeJSONError(w, http.StatusNotFound, "agent not found")
-			return
-		}
-		catalog, err := agent.ListSkills(r.Context(), requestNamespace(r), map[string]any{"Header": collectHeaders(r.Header)}, agents.SkillSelection{})
-		if err != nil {
-			writeJSONError(w, http.StatusInternalServerError, "unable to list skills: "+err.Error())
-			return
-		}
-		if catalog == nil {
-			catalog = []agents.ListedSkill{}
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"skills": catalog})
 	})
 
 	handleFunc("POST /agents/{agent}/run", func(w http.ResponseWriter, r *http.Request) {
@@ -801,4 +793,26 @@ func collectHeaders(headers http.Header) map[string]string {
 		}
 	}
 	return out
+}
+
+// globalSkillNames lists every registered agent's developer-owned skills, which
+// user uploads may not reuse. An empty namespace asks each client for globals only.
+func globalSkillNames(r *http.Request, registry Registry) ([]string, error) {
+	var names []string
+	for _, name := range registry.AgentNames() {
+		agent, ok := registry.Agent(name)
+		if !ok {
+			continue
+		}
+		catalog, err := agent.ListSkills(r.Context(), "", map[string]any{"Header": collectHeaders(r.Header)}, agents.SkillSelection{})
+		if err != nil {
+			return nil, err
+		}
+		for _, skill := range catalog {
+			if skill.Global {
+				names = append(names, skill.Name)
+			}
+		}
+	}
+	return names, nil
 }

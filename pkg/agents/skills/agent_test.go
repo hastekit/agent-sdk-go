@@ -28,10 +28,8 @@ func TestAgentBindsStoreToInputNamespace(t *testing.T) {
 	require.NoError(t, err)
 	_, err = store.Put(context.Background(), "tenant", skills.Bundle{Files: map[string][]byte{"SKILL.md": []byte("---\nname: review\ndescription: Review work\n---\nInstructions")}})
 	require.NoError(t, err)
-	source, err := skills.NewSkillSet("library", store, skills.WithDefaultEnabled(true))
-	require.NoError(t, err)
 	prompt := &promptRecorder{}
-	agent := agents.NewAgent(&agents.AgentOptions{Name: "tester", Skills: []agents.SkillSet{source}, Instruction: prompt}).WithLLM(doneLLM{})
+	agent := agents.NewAgent(&agents.AgentOptions{Name: "tester", SkillClient: skills.NewClient(store), Instruction: prompt}).WithLLM(doneLLM{})
 	// A caller-supplied RunContext namespace must not override the execution's namespace.
 	_, err = agent.Run(context.Background(), &agents.AgentInput{Namespace: "tenant", RunContext: map[string]any{"Namespace": "other"}})
 	require.NoError(t, err)
@@ -43,12 +41,10 @@ func TestSkillStoreIsSharedAcrossAgents(t *testing.T) {
 	ctx := context.Background()
 	store, err := skills.NewFileStore(t.TempDir())
 	require.NoError(t, err)
+	base := skills.NewClient(store)
 	var configured []*agents.Agent
 	for _, name := range []string{"reviewer", "writer"} {
-		// Each agent can construct its own adapter over the shared store.
-		source, err := skills.NewSkillSet(name+"-library", store)
-		require.NoError(t, err)
-		configured = append(configured, agents.NewAgent(&agents.AgentOptions{Name: name, Skills: []agents.SkillSet{source}}))
+		configured = append(configured, agents.NewAgent(&agents.AgentOptions{Name: name, SkillClient: base}))
 	}
 	unconfigured := agents.NewAgent(&agents.AgentOptions{Name: "without-skills"})
 	for _, agent := range configured {
@@ -62,11 +58,11 @@ func TestSkillStoreIsSharedAcrossAgents(t *testing.T) {
 		}})
 		require.NoError(t, err)
 		for _, agent := range configured {
-			catalog, err := agent.ListSkills(ctx, "tenant", nil, agents.SkillSelection{Enable: []string{"review"}})
+			catalog, err := agent.ListSkills(ctx, "tenant", nil, agents.SkillSelection{})
 			require.NoError(t, err)
 			require.Len(t, catalog, 1)
 			require.Equal(t, description, catalog[0].Description)
-			require.True(t, catalog[0].Enabled)
+			require.True(t, catalog[0].Enabled, "user skills are on unless disabled")
 		}
 	}
 	catalog, err := unconfigured.ListSkills(ctx, "tenant", nil, agents.SkillSelection{})

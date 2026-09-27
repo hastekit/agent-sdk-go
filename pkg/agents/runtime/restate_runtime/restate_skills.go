@@ -7,41 +7,41 @@ import (
 	restate "github.com/restatedev/sdk-go"
 )
 
-// RestateSkillSet journals skill listing and resolution in Restate workflow steps.
-type RestateSkillSet struct {
-	restateCtx      restate.WorkflowContext
-	wrappedSkillSet agents.SkillSet
-	middlewares     []agents.ToolCallMiddleware
+// RestateSkillClient journals the agent's skill listing and reads in Restate
+// run steps, so store access stays inside the step and only results are journaled.
+type RestateSkillClient struct {
+	restateCtx  restate.WorkflowContext
+	client      agents.SkillClient
+	middlewares []agents.ToolCallMiddleware
 }
 
-var _ agents.SkillSet = (*RestateSkillSet)(nil)
-var _ agents.SkillReadExecutor = (*RestateSkillSet)(nil)
+var _ agents.SkillClient = (*RestateSkillClient)(nil)
+var _ agents.SkillReadExecutor = (*RestateSkillClient)(nil)
 
-func NewRestateSkillSet(restateCtx restate.WorkflowContext, set agents.SkillSet, broker agents.StreamBroker, middlewares ...agents.ToolCallMiddleware) *RestateSkillSet {
-	return &RestateSkillSet{
-		restateCtx:      restateCtx,
-		wrappedSkillSet: set,
-		middlewares:     append([]agents.ToolCallMiddleware{agents.StopMiddleware{Watcher: agents.StopWatcherFrom(broker)}}, middlewares...),
+func NewRestateSkillClient(restateCtx restate.WorkflowContext, client agents.SkillClient, broker agents.StreamBroker, middlewares ...agents.ToolCallMiddleware) *RestateSkillClient {
+	return &RestateSkillClient{
+		restateCtx:  restateCtx,
+		client:      client,
+		middlewares: append([]agents.ToolCallMiddleware{agents.StopMiddleware{Watcher: agents.StopWatcherFrom(broker)}}, middlewares...),
 	}
 }
 
-func (s *RestateSkillSet) GetName() string { return s.wrappedSkillSet.GetName() }
-
-func (s *RestateSkillSet) ListSkills(_ context.Context, namespace string, rc map[string]any) ([]agents.Skill, error) {
+func (s *RestateSkillClient) ListSkills(_ context.Context, namespace string, rc map[string]any) ([]agents.Skill, error) {
 	return restate.Run(s.restateCtx, func(ctx restate.RunContext) ([]agents.Skill, error) {
-		return s.wrappedSkillSet.ListSkills(ctx, namespace, rc)
-	}, restate.WithName("ListSkills:"+s.GetName()))
+		return s.client.ListSkills(ctx, namespace, rc)
+	}, restate.WithName("ListSkills"))
 }
 
-func (s *RestateSkillSet) ResolveSkill(_ context.Context, namespace string, rc map[string]any, name, file string) (string, error) {
+func (s *RestateSkillClient) ReadSkill(_ context.Context, namespace string, rc map[string]any, name, file string) (string, error) {
 	return restate.Run(s.restateCtx, func(ctx restate.RunContext) (string, error) {
-		return s.wrappedSkillSet.ResolveSkill(ctx, namespace, rc, name, file)
-	}, restate.WithName("ResolveSkill:"+s.GetName()))
+		return s.client.ReadSkill(ctx, namespace, rc, name, file)
+	}, restate.WithName("ReadSkill"))
 }
 
-func (s *RestateSkillSet) ResolveSkillCall(_ context.Context, namespace string, rc map[string]any, name, file string, call *agents.ToolCall) (string, error) {
+// ReadSkillCall runs tracing and middleware inside the step, so they fire once and never on replay.
+func (s *RestateSkillClient) ReadSkillCall(_ context.Context, namespace string, rc map[string]any, name, file string, call *agents.ToolCall) (string, error) {
 	return restate.Run(s.restateCtx, func(ctx restate.RunContext) (string, error) {
-		content, err := agents.ResolveSkillWithMiddleware(ctx, s.wrappedSkillSet, namespace, rc, name, file, call, s.middlewares)
+		content, err := agents.ReadSkillWithMiddleware(ctx, s.client, namespace, rc, name, file, call, s.middlewares)
 		return content, cancellationError(err)
-	}, restate.WithName("ReadSkill:"+s.GetName()))
+	}, restate.WithName("ReadSkillCall"))
 }

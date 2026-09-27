@@ -1056,45 +1056,43 @@ Each `SKILL.md` needs YAML frontmatter with a description and an optional name
 (defaulting to the folder name), followed by the instructions.
 
 ```go
-skills, err := hastekit.NewFilesystemSkillSet("local", "./skills")
+builtins, err := hastekit.NewDirSkillSource("./skills")
 if err != nil { log.Fatal(err) }
 agent := hastekit.MustNewAgent(&hastekit.AgentConfig{
     Name: "Release_Agent",
     LLM: model,
-    Skills: []hastekit.SkillSet{skills},
+    SkillClient: hastekit.NewSkillClient(nil).WithGlobalSkills(builtins),
     Instruction: hastekit.NewPrompt("Help prepare releases.",
         prompts.WithResolver(prompts.DefaultResolvers()...)),
 })
 ```
 
-Every filesystem skill is enabled by default. Each run discovers added and removed
-skills without reconstructing the agent. Its catalog becomes a snapshot for that
-run; content is read on demand. `NewFSSkillSet("builtin", skillsFS)` supports
-`embed.FS` and other `fs.FS` implementations using the same defaults.
+Skills work like MCP servers. `skills.NewClient(store)` reads users' own skills
+from a `Store` by namespace; `WithGlobalSkills(sources...)` returns a copy with
+developer-owned skills. Share one store across agents and give each agent its
+own globals. A source is a folder (`skills.NewDirSource`), an `embed.FS` or other
+`fs.FS` (`skills.NewFSSource`), inline bundles (`skills.NewBundleSource`), a
+store namespace the application manages (`skills.NewStoreSource`), or your own
+`skills.Source` (`List`, `Read`).
+
+Global skills are always on: users cannot turn them off, and a global shadows a
+user skill with the same name. Users' own skills are on unless the run disables
+them with `Input.Skills.Disable`. Each run discovers added and removed skills
+without reconstructing the agent; its catalog becomes a snapshot for that run,
+and content is read on demand. An empty namespace sees globals only.
 
 The prompt lists skill names such as `changelog`. One `read_skill` tool
-reads instructions and allowed resources from all sources. Include `ResolveSkills`
-in the prompt resolvers to advertise the catalog.
+reads instructions and allowed resources for every enabled skill. Include
+`ResolveSkills` in the prompt resolvers to advertise the catalog. Resend the
+selection on new turns and approval resumes. The embedded UI's Skills menu lists
+the user's own skills from `/skills`, which is not scoped to an agent, and
+remembers choices once per browser. Temporal and Restate execute
+listing and reads within durable steps.
 
-For custom storage, implement `SkillSet` (`GetName`, `ListSkills`, `ResolveSkill`). Set `Required: true` for skills users cannot
-disable, and `DefaultEnabled: true` for optional skills enabled by default.
-The zero value is optional and disabled by default. Global skills (`Global: true`)
-always win name conflicts with user skills. Availability flags are host-controlled.
-
-Select skills per run with `Input.Skills.Enable` and `Input.Skills.Disable`, using
-skill names. Resend selections on new turns and approval resumes. The embedded
-UI provides a picker and remembers choices per agent in browser storage. Temporal
-and Restate execute listing and reads within durable steps.
-
-`AgentConfig.Skills` now takes `[]SkillSet`; the former `SkillProvider` API has been
-removed. Use `skills.NewFilesystemSkillSet` or `skills.NewFSSkillSet` for folder
-and embedded sources. The root `hastekit` constructors remain available as
-convenience aliases. The old registry and standalone reader APIs have been removed.
-
-Use `pkg/skills` for uploaded, persistent skills. `NewFileStore` and `NewS3Store`
-implement the pluggable `Store` interface. Wrap either with `skills.NewSkillSet`
-and pass it in `AgentConfig.Skills`; enable library APIs and uploads with
-`web.Serve(":8080", registry, agui.WithSkillStore(store))`. See [persistent skills](pkg/skills/README.md).
+`NewFileStore` and `NewS3Store` implement the pluggable `Store` interface for
+uploaded skills. Enable library APIs and uploads with
+`web.Serve(":8080", registry, agui.WithSkillStore(store))`; uploads cannot reuse a
+registered agent's global skill name. See [persistent skills](pkg/agents/skills/README.md).
 
 See [the dynamic skills example](examples/agents/15_dynamic_skills) for Go and UI usage.
 

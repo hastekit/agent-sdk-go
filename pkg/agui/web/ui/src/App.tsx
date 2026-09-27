@@ -14,7 +14,8 @@ import {
   useInterrupt,
 } from "@copilotkit/react-core/v2";
 import { ThreadsDrawer } from "./threads-drawer";
-import { ComposerSkillsContext } from "./composer-menu";
+import { ComposerMCPContext, ComposerSkillsContext } from "./composer-menu";
+import { MCPLibrary } from "./mcp-library";
 import { RoutineLibrary, RunRoutineButton } from "./routine-library";
 import { SkillLibrary } from "./skill-library";
 import { AttachmentMessageView } from "./attachment-message";
@@ -28,8 +29,11 @@ import {
   fetchRoutine,
   fetchRoutineThreads,
   type Routine,
-  fetchSkills,
+  fetchSkillCatalog,
   type SkillInfo,
+  fetchMCPServers,
+  isGlobalMCPServer,
+  type MCPServerInfo,
   fetchThreads,
   fetchMessages,
   runUrl,
@@ -176,6 +180,12 @@ export default function App() {
   const [skillCatalog, setSkillCatalog] = useState<SkillInfo[]>([]);
   const [skillError, setSkillError] = useState("");
   const [skillChoices, setSkillChoices] = useState<Record<string, boolean>>({});
+  const [mcpStoreEnabled, setMCPStoreEnabled] = useState(false);
+  const [mcpLibraryOpen, setMCPLibraryOpen] = useState(false);
+  const [mcpRevision, setMCPRevision] = useState(0);
+  const [mcpServers, setMCPServers] = useState<MCPServerInfo[]>([]);
+  const [mcpError, setMCPError] = useState("");
+  const [mcpChoices, setMCPChoices] = useState<Record<string, boolean>>({});
   const [agents, setAgents] = useState<string[]>([]);
   const [agentName, setAgentName] = useState<string>("");
   const listingAgent = useRef(agentName);
@@ -224,8 +234,9 @@ export default function App() {
   // Load the agent list once.
   useEffect(() => {
     fetchAgents()
-      .then(({ agents: names, fullHistory, attachmentsEnabled, skillStoreEnabled, routinesEnabled }) => {
+      .then(({ agents: names, fullHistory, attachmentsEnabled, skillStoreEnabled, mcpStoreEnabled, routinesEnabled }) => {
         setSkillStoreEnabled(skillStoreEnabled);
+        setMCPStoreEnabled(mcpStoreEnabled);
         setRoutinesEnabled(routinesEnabled);
  setAttachmentsEnabled(attachmentsEnabled);
         setAgents(names);
@@ -284,32 +295,68 @@ export default function App() {
     });
   }, [agentName, active.threadId, active.initialMessages, fullHistory]);
 
-  // Selections are remembered per agent in this browser and resent on resumes.
+  // The user's own skills are shared by every agent, so the catalog is loaded once
+  // and choices are remembered once per browser, then resent on every run and resume.
   useEffect(() => {
     let cancelled = false;
-    setSkillCatalog([]);
     setSkillError("");
     let saved: Record<string, boolean> = {};
-    try { saved = JSON.parse(localStorage.getItem(`hastekit-skills:${agentName}`) || "{}"); } catch { /* storage unavailable */ }
+    try { saved = JSON.parse(localStorage.getItem("hastekit-skills") || "{}"); } catch { /* storage unavailable */ }
     setSkillChoices(saved);
-    if (agentName) fetchSkills(agentName).then(skills => {
+    if (!skillStoreEnabled) {
+      setSkillCatalog([]);
+      return;
+    }
+    fetchSkillCatalog().then(skills => {
       if (!cancelled) setSkillCatalog(skills);
     }).catch(err => { if (!cancelled) setSkillError(String(err)); });
     return () => { cancelled = true; };
-  }, [agentName, skillRevision]);
+  }, [skillStoreEnabled, skillRevision]);
 
   useEffect(() => {
     if (!agent) return;
+    const available = new Set(skillCatalog.map(skill => skill.name));
     agent.skillSelection = {
-      enable: Object.entries(skillChoices).filter(([, enabled]) => enabled).map(([name]) => name),
-      disable: Object.entries(skillChoices).filter(([, enabled]) => !enabled).map(([name]) => name),
+      disable: Object.entries(skillChoices).filter(([name, enabled]) => !enabled && available.has(name)).map(([name]) => name),
     };
   }, [agent, skillCatalog, skillChoices]);
 
   const toggleSkill = (name: string, checked: boolean) => {
     const choices = { ...skillChoices, [name]: checked };
     setSkillChoices(choices);
-    try { localStorage.setItem(`hastekit-skills:${agentName}`, JSON.stringify(choices)); } catch { /* storage unavailable */ }
+    try { localStorage.setItem("hastekit-skills", JSON.stringify(choices)); } catch { /* storage unavailable */ }
+  };
+
+  // MCP servers work like skills: one list for every agent, and choices for the
+  // user's own servers remembered once per browser. Built-in servers are always on.
+  useEffect(() => {
+    let cancelled = false;
+    setMCPError("");
+    let saved: Record<string, boolean> = {};
+    try { saved = JSON.parse(localStorage.getItem("hastekit-mcp") || "{}"); } catch { /* storage unavailable */ }
+    setMCPChoices(saved);
+    if (!mcpStoreEnabled) {
+      setMCPServers([]);
+      return;
+    }
+    fetchMCPServers().then(servers => {
+      if (!cancelled) setMCPServers(servers);
+    }).catch(err => { if (!cancelled) setMCPError(String(err)); });
+    return () => { cancelled = true; };
+  }, [mcpStoreEnabled, mcpRevision]);
+
+  useEffect(() => {
+    if (!agent) return;
+    const optional = new Set(mcpServers.filter(server => !isGlobalMCPServer(server)).map(server => server.name));
+    agent.mcpSelection = {
+      disable: Object.entries(mcpChoices).filter(([name, enabled]) => !enabled && optional.has(name)).map(([name]) => name),
+    };
+  }, [agent, mcpServers, mcpChoices]);
+
+  const toggleMCPServer = (name: string, checked: boolean) => {
+    const choices = { ...mcpChoices, [name]: checked };
+    setMCPChoices(choices);
+    try { localStorage.setItem("hastekit-mcp", JSON.stringify(choices)); } catch { /* storage unavailable */ }
   };
 
   useEffect(() => {
@@ -733,7 +780,8 @@ export default function App() {
       data-copilotkit
     >
       {routinesOpen && <RoutineLibrary initialAgent={agentName} onChanged={routinesChanged} onClose={() => setRoutinesOpen(false)} />}
-      {libraryOpen && <SkillLibrary agentNames={agents} onClose={() => setLibraryOpen(false)} onSaved={() => setSkillRevision(v => v + 1)} />}
+      {libraryOpen && <SkillLibrary onClose={() => setLibraryOpen(false)} onSaved={() => setSkillRevision(v => v + 1)} />}
+      {mcpLibraryOpen && <MCPLibrary onClose={() => setMCPLibraryOpen(false)} onChanged={() => setMCPRevision(v => v + 1)} />}
       <Sidebar
         threads={threads}
         activeThreadId={active.threadId}
@@ -748,6 +796,7 @@ export default function App() {
         routineError={routineListError}
         onManageRoutines={routinesEnabled ? () => setRoutinesOpen(true) : undefined}
         onManageSkills={skillStoreEnabled ? () => setLibraryOpen(true) : undefined}
+        onManageMCP={mcpStoreEnabled ? () => setMCPLibraryOpen(true) : undefined}
         onRetry={refreshThreads}
         listingSupported={listingSupported}
         error={error}
@@ -788,6 +837,7 @@ export default function App() {
               </div>
             )}
             <ComposerSkillsContext.Provider value={{ skills: skillCatalog, choices: skillChoices, error: skillError, toggle: toggleSkill, canManage: skillStoreEnabled, onManage: () => setLibraryOpen(true) }}>
+            <ComposerMCPContext.Provider value={{ servers: mcpServers, choices: mcpChoices, error: mcpError, toggle: toggleMCPServer, canManage: mcpStoreEnabled, onManage: () => setMCPLibraryOpen(true) }}>
             <TrayContext.Provider value={tray}>
               <HistoryPager key={`${agentName}:${active.threadId}`} agent={agent!} agentName={agentName} threadId={active.threadId} initialCursor={active.nextCursor ?? ""}>
                 <CopilotChat
@@ -803,6 +853,7 @@ export default function App() {
                 />
               </HistoryPager>
             </TrayContext.Provider>
+            </ComposerMCPContext.Provider>
             </ComposerSkillsContext.Provider>
           </div>
         </CopilotKitProvider>
@@ -939,6 +990,7 @@ function Sidebar({
   onSelect,
   onNew,
   onManageSkills,
+  onManageMCP,
   onManageRoutines,
   routines,
   routinesLoading,
@@ -956,6 +1008,7 @@ function Sidebar({
   onSelect: (t: ThreadInfo) => void;
   onNew: () => void;
   onManageSkills?: () => void;
+  onManageMCP?: () => void;
   onManageRoutines?: () => void;
   routines: Routine[];
   selectedRoutineId?: string;
@@ -972,6 +1025,7 @@ function Sidebar({
       <div slot="header" className="drawer-header">
         <span className="brand"><img className="logo" src={LOGO} alt="" />HasteKit</span>
         {onManageSkills && <button className="nav-item" onClick={onManageSkills}>Skill library</button>}
+        {onManageMCP && <button className="nav-item" onClick={onManageMCP}>MCP servers</button>}
       </div>
       <span slot="empty">{listingSupported ? "No conversations yet — start a new chat." : "Conversation history is not available for this agent."}</span>
         {onManageRoutines && <section slot="footer" aria-label="Routines" className="sidebar-routines">

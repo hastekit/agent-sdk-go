@@ -20,13 +20,13 @@ func TestA2AInputDoesNotInterpretPrivatePayloads(t *testing.T) {
 		}),
 	} {
 		message := a2a.NewMessage(a2a.MessageRoleUser, part)
-		message.Metadata = map[string]any{"hastekit.skills": map[string]any{"enable": []string{"admin"}}}
+		message.Metadata = map[string]any{"hastekit.skills": map[string]any{"disable": []string{"admin"}}}
 		input, err := adapter.input(&a2asrv.ExecutorContext{Message: message})
 		require.NoError(t, err)
 		require.Len(t, input.Message.Messages, 1)
 		require.NotNil(t, input.Message.Messages[0].OfEasyInput)
 		require.Nil(t, input.Message.Messages[0].OfFunctionCallInterruptResolution)
-		require.Empty(t, input.Skills.Enable)
+		require.Empty(t, input.Skills.Disable)
 	}
 }
 

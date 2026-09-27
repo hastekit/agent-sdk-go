@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sync"
 	"time"
 
@@ -485,7 +486,7 @@ func (e *Agent) startBackgroundTask(ctx context.Context, in *AgentInput, runID s
 		RunID:          runID,
 		RunContext:     in.RunContext,
 		MCP:            in.MCP.Clone(),
-		Skills:         SkillSelection{Enable: append([]string(nil), in.Skills.Enable...), Disable: append([]string(nil), in.Skills.Disable...)},
+		Skills:         SkillSelection{Disable: slices.Clone(in.Skills.Disable)},
 		Payload:        resp.TaskPayload,
 	}
 

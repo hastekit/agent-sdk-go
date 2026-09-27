@@ -102,8 +102,8 @@ func Handler(registry agui.Registry, opts ...agui.Option) http.Handler {
 }
 
 // Serve runs the embedded AG-UI chat client on addr, blocking like
-// http.ListenAndServe. Use agui.WithSkillStore with the same store used by
-// skills.NewSkillSet to enable skill management in the UI.
+// http.ListenAndServe. Use agui.WithSkillStore with the same store passed to
+// skills.NewClient to enable skill management in the UI.
 // Use agui.WithRoutines(service, scheduler) to enable routines APIs and UI.
 // The application remains responsible for running and stopping the scheduler.
 func Serve(addr string, registry agui.Registry, opts ...agui.Option) error {

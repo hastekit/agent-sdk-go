@@ -2,7 +2,8 @@ import type { Routine } from "./routines.js";
 import { HTTPError, resumableStream } from "./stream.js";
 import type {
   ChatTransport,
-  AgentSkill,
+  UserSkill,
+  MCPServer,
   MessagePage,
   Thread,
   Attachment,
@@ -42,6 +43,15 @@ export function createAGUITransport(
   // Encode user-provided identifiers before inserting them into endpoint paths.
   const agentPath = (agent: string) =>
     `${base}/agents/${encodeURIComponent(agent)}`;
+  const mcpPath = (name: string) => `${base}/mcp/${encodeURIComponent(name)}`;
+  // OAuth providers need an absolute redirect URL; resolve a relative base against the page.
+  const absolute = (path: string) => {
+    try {
+      return new URL(path, globalThis.location?.href).toString();
+    } catch {
+      return path;
+    }
+  };
   const threadPath = (agent: string, thread: string) =>
     `${agentPath(agent)}/threads/${encodeURIComponent(thread)}`;
 
@@ -133,13 +143,73 @@ export function createAGUITransport(
         ).threads ?? [],
     },
 
-    // Load the authorized agent catalog with the same credentials as chat requests.
-    async listSkills(agent, signal) {
-      const response = await request(`${agentPath(agent)}/skills`, { signal });
-      if (response.status === 501)
-        throw new HTTPError(501, "Skill listing is not supported");
-      const body = (await response.json()) as { skills?: AgentSkill[] };
-      return body.skills ?? [];
+    // Manage the user's MCP servers. A server without an MCP store has none.
+    mcp: {
+      async list(signal) {
+        let response: Response;
+        try {
+          response = await request(`${base}/mcp/`, { signal });
+        } catch (error) {
+          if (error instanceof HTTPError && error.status === 404) return [];
+          throw error;
+        }
+        if (response.status === 501)
+          throw new HTTPError(501, "MCP server listing is not supported");
+        return ((await response.json()) as Omit<MCPServer, "enabled">[]) ?? [];
+      },
+      async save(name, config, signal) {
+        const response = await request(mcpPath(name), {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(config),
+          signal,
+        });
+        if (response.status === 501)
+          throw new HTTPError(501, "MCP server management is not supported");
+      },
+      async remove(name, signal) {
+        const response = await request(mcpPath(name), {
+          method: "DELETE",
+          signal,
+        });
+        if (response.status === 501)
+          throw new HTTPError(501, "MCP server management is not supported");
+      },
+      connectUrl: (name) => `${mcpPath(name)}/connect`,
+      callbackUrl: (name) => absolute(`${mcpPath(name)}/callback`),
+    },
+
+    // Load the user's own skills, shared by every agent, with the same credentials
+    // as chat requests. A server without a skill store has none.
+    async listSkills(signal) {
+      const skills: UserSkill[] = [];
+      const seen = new Set<string>();
+      let cursor = "";
+      for (;;) {
+        let response: Response;
+        try {
+          response = await request(
+            `${base}/skills?limit=200&cursor=${encodeURIComponent(cursor)}`,
+            { signal },
+          );
+        } catch (error) {
+          if (error instanceof HTTPError && error.status === 404) return [];
+          throw error;
+        }
+        if (response.status === 501)
+          throw new HTTPError(501, "Skill listing is not supported");
+        const page = (await response.json()) as {
+          skills?: Omit<UserSkill, "enabled">[];
+          nextCursor?: string;
+        };
+        for (const skill of page.skills ?? [])
+          skills.push({ ...skill, enabled: true });
+        if (!page.nextCursor) return skills;
+        if (seen.has(page.nextCursor))
+          throw new Error("Skill listing repeated a pagination cursor");
+        seen.add(page.nextCursor);
+        cursor = page.nextCursor;
+      }
     },
 
     // Fetch persisted sidebar rows for the selected conversation group.

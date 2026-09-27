@@ -58,12 +58,14 @@ test("skill selection accompanies new turns and approvals without replacing resu
   t.after(() => { delete globalThis.window; });
   for (const fullHistory of [false, true]) {
     const agent = new StoppableHttpAgent({ agentName: "agent", url: "/run", threadId: "thread", fullHistory });
-    agent.skillSelection = { enable: ["team/review"], disable: ["team/writing"] };
+    agent.skillSelection = { disable: ["writing"] };
+    agent.mcpSelection = { disable: ["notes"] };
     const decisions = [{ toolCallId: "call", approved: true }];
     // requestInit is protected in TypeScript but available to this transport test.
     const request = agent.requestInit({ threadId: "thread", runId: "run", messages: [], tools: [], context: [], state: {}, forwardedProps: { command: { resume: { decisions } } } });
     const body = JSON.parse(request.body);
     assert.deepEqual(body.forwardedProps.skills, agent.skillSelection);
+    assert.deepEqual(body.forwardedProps.mcp, agent.mcpSelection);
     assert.deepEqual(body.forwardedProps.command.resume.decisions, decisions);
   }
 });

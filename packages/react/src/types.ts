@@ -1,21 +1,76 @@
 import type { RoutineTransport } from "./routines.js";
 
-// Describe agent-visible skills and their host-controlled enablement policy.
-export interface AgentSkill {
+// Describe one of the user's own skills. These are shared by every agent, so the
+// catalog is not scoped to one; each is on unless disabled. An agent's global
+// skills are configured on the server, always on, and never listed here.
+export interface UserSkill {
   name: string;
   description: string;
-  file_location: string;
   resources?: string[];
-  required?: boolean;
-  defaultEnabled?: boolean;
-  global?: boolean;
   enabled: boolean;
 }
 
-// Override agent defaults by plain skill name for an outgoing run.
+// Turn off the user's own skills by plain name for an outgoing run.
 export interface SkillSelection {
-  enable: string[];
   disable: string[];
+}
+
+// One MCP server the user can see. Global servers are the developer's: always on
+// and read-only. The user's own servers are on unless disabled.
+export interface MCPServer {
+  name: string;
+  // Empty for a global server; the owner's namespace for the user's own.
+  namespace?: string;
+  transport?: string;
+  readOnly: boolean;
+  // OAuth servers need the user to connect an account before their tools load.
+  oauth: boolean;
+  // Present when the server offers OAuth connect: whether this user has connected.
+  connected?: boolean;
+  // Why one of the user's definitions is unusable; delete or replace it to recover.
+  error?: string;
+  enabled: boolean;
+}
+
+// Turn off the user's own MCP servers by name for an outgoing run.
+export interface MCPSelection {
+  disable: string[];
+}
+
+// OAuth application settings for a user-owned MCP server.
+export interface MCPOAuthConfig {
+  clientId: string;
+  clientSecret?: string;
+  authUrl: string;
+  tokenUrl: string;
+  // Must be this server's callback route; see MCPTransport.callbackUrl.
+  redirectUrl: string;
+  scopes?: string[];
+}
+
+// A user-owned remote MCP server. Headers carry literal values such as API keys;
+// the server rejects templates and private network addresses.
+export interface MCPServerConfig {
+  endpoint: string;
+  transport?: "streamable-http" | "sse";
+  toolPrefix?: string;
+  headers?: Record<string, string>;
+  authorization?: MCPOAuthConfig;
+}
+
+// Manage the user's MCP servers. Optional so custom backends can omit it.
+export interface MCPTransport {
+  list(signal?: AbortSignal): Promise<Omit<MCPServer, "enabled">[]>;
+  save(
+    name: string,
+    config: MCPServerConfig,
+    signal?: AbortSignal,
+  ): Promise<void>;
+  remove(name: string, signal?: AbortSignal): Promise<void>;
+  // Browser URL that starts OAuth for a server; open it in a new tab or window.
+  connectUrl(name: string): string;
+  // Absolute callback URL to use as a server's OAuth redirect URL.
+  callbackUrl(name: string): string;
 }
 
 // Preserve multipart AG-UI content without coupling consumers to a renderer.
@@ -124,7 +179,8 @@ export interface StreamOptions {
 /** Implement this interface to use a different backend without changing your UI. */
 export interface ChatTransport {
   routines?: RoutineTransport;
-  listSkills?(agent: string, signal: AbortSignal): Promise<AgentSkill[]>;
+  mcp?: MCPTransport;
+  listSkills?(signal: AbortSignal): Promise<UserSkill[]>;
   listThreads(
     agent: string,
     group: string,
@@ -162,10 +218,14 @@ export interface ChatTransport {
 
 // Expose rendering state without leaking controllers or network handles.
 export interface ChatSnapshot {
-  skills: AgentSkill[];
+  skills: UserSkill[];
   skillSelection: SkillSelection;
   loadingSkills: boolean;
   skillsError: Error | null;
+  mcpServers: MCPServer[];
+  mcpSelection: MCPSelection;
+  loadingMCPServers: boolean;
+  mcpServersError: Error | null;
   threads: Thread[];
   threadsSupported: boolean;
   loadingThreads: boolean;

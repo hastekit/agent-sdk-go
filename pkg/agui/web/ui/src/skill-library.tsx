@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from "react";
-import { deleteSkill, fetchSkills, fetchStoredSkills, skillFileUrl, uploadSkill, type StoredSkill } from "./api";
+import { deleteSkill, fetchStoredSkills, skillFileUrl, uploadSkill, type StoredSkill } from "./api";
 
 import { validateSkillUpload } from "./skill-upload";
 
-export function SkillLibrary({agentNames, onClose, onSaved}: {agentNames: string[]; onClose: () => void; onSaved: () => void}) {
+export function SkillLibrary({onClose, onSaved}: {onClose: () => void; onSaved: () => void}) {
   const dialog = useRef<HTMLDialogElement>(null);
   const [skills, setSkills] = useState<StoredSkill[]>([]);
   const [cursor, setCursor] = useState("");
@@ -29,12 +29,11 @@ export function SkillLibrary({agentNames, onClose, onSaved}: {agentNames: string
   async function save() {
     setBusy(true); setError(""); setNotice("");
     try {
-      const catalogs = await Promise.all(agentNames.map(fetchSkills));
-      const catalog = catalogs.flat();
-      await validateSkillUpload(files, catalog.filter(skill => skill.global).map(skill => skill.name));
+      // The server rejects names reserved by agents' global skills (409).
+      await validateSkillUpload(files);
       const saved = await uploadSkill(files);
       setFiles([]); setSelected(null); previewRequest.current++;
-      setNotice(`Saved ${saved.name}. It is available to agents using this library. Enable it in their Skills menu if it is opt-in.`);
+      setNotice(`Saved ${saved.name}. It is on for every agent; turn it off in the Skills menu.`);
       onSaved(); await load();
     } catch (err) { setError(String(err)); }
     finally { setBusy(false); }

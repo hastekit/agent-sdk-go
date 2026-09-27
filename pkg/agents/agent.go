@@ -45,7 +45,7 @@ type Agent struct {
 	stickyHandoff        bool
 	singleTurn           bool
 	modelCallMiddlewares []ModelCallMiddleware
-	skillSets            []SkillSet
+	skillClient          SkillClient
 
 	// background waits on the tasks this agent's tools start, and is nil where
 	// nothing can wait — see BackgroundRunner and ErrBackgroundUnsupported.
@@ -71,8 +71,9 @@ type AgentOptions struct {
 	Tools    []Tool
 	Handoffs []*Handoff
 
-	// Skills are listed once per run; enabled skills share the read_skill tool.
-	Skills        []SkillSet
+	// SkillClient lists global and namespace skills once per run; enabled
+	// skills share the read_skill tool.
+	SkillClient   SkillClient
 	MCPClient     MCPClient
 	Runtime       Runtime
 	MaxLoops      *int
@@ -180,7 +181,7 @@ func NewAgent(opts *AgentOptions) *Agent {
 		history:              conversationHistory,
 		instruction:          instruction,
 		tools:                slices.Clone(opts.Tools),
-		skillSets:            slices.Clone(opts.Skills),
+		skillClient:          opts.SkillClient,
 		mcpClient:            opts.MCPClient,
 		llm:                  &WrappedLLM{opts.LLM},
 		parameters:           opts.Parameters,
@@ -331,7 +332,7 @@ func (e *Agent) ToolExecutor() ToolExecutor {
 type AgentInput struct {
 	// GroupID groups new conversations within a namespace (for example a routine or project). Empty selects "default".
 	GroupID string `json:"group_id,omitempty"`
-	// Skills selects opt-in skills by name for this execution, including resumes.
+	// Skills disables user-owned skills by name for this execution, including resumes.
 	Skills SkillSelection `json:"skills,omitempty"`
 	MCP    MCPSelection   `json:"mcp,omitempty"`
 	// RunID optionally identifies this execution. History generates one when omitted.

@@ -13,6 +13,7 @@ import (
 
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/attachments"
+	"github.com/hastekit/agent-sdk-go/pkg/agents/mcpclient"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/skills"
 	"github.com/hastekit/agent-sdk-go/pkg/agui"
 	"github.com/stretchr/testify/assert"
@@ -151,6 +152,42 @@ func TestHandlerSkillStore(t *testing.T) {
 			} else {
 				require.Equal(t, http.StatusNotFound, w.Code)
 			}
+		})
+	}
+}
+
+func TestHandlerMCPStore(t *testing.T) {
+	for _, enabled := range []bool{true, false} {
+		t.Run(fmt.Sprint(enabled), func(t *testing.T) {
+			var options []agui.Option
+			if enabled {
+				options = append(options, agui.WithMCPStore(mcpclient.NewMemoryStore()))
+			}
+			h := Handler(registry{}, options...)
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, httptest.NewRequest("GET", APIPrefix+"/agents", nil))
+			require.Equal(t, http.StatusOK, w.Code)
+			var capability struct {
+				MCPStore bool `json:"mcp_store"`
+			}
+			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &capability))
+			require.Equal(t, enabled, capability.MCPStore)
+
+			// The UI adds, lists and removes servers under the API prefix.
+			w = httptest.NewRecorder()
+			h.ServeHTTP(w, httptest.NewRequest("PUT", APIPrefix+"/mcp/docs", strings.NewReader(`{"endpoint":"https://docs.example/mcp","transport":"streamable-http"}`)))
+			if !enabled {
+				require.Equal(t, http.StatusNotFound, w.Code)
+				return
+			}
+			require.Equal(t, http.StatusNoContent, w.Code, w.Body.String())
+			w = httptest.NewRecorder()
+			h.ServeHTTP(w, httptest.NewRequest("GET", APIPrefix+"/mcp/", nil))
+			require.Equal(t, http.StatusOK, w.Code)
+			require.JSONEq(t, `[{"name":"docs","namespace":"default","transport":"streamable-http","readOnly":false,"oauth":false}]`, w.Body.String())
+			w = httptest.NewRecorder()
+			h.ServeHTTP(w, httptest.NewRequest("DELETE", APIPrefix+"/mcp/docs", nil))
+			require.Equal(t, http.StatusNoContent, w.Code)
 		})
 	}
 }
