@@ -3,13 +3,13 @@ package temporal_runtime_test
 import (
 	"context"
 	"encoding/json"
+	"github.com/hastekit/agent-sdk-go/pkg/agents/mcpclient"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
-	"github.com/hastekit/agent-sdk-go/pkg/agents/mcpclient"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/runtime/temporal_runtime"
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
 	"github.com/stretchr/testify/require"
@@ -24,14 +24,17 @@ func TestMCPMetaTemplatesInsideActivity(t *testing.T) {
 	})
 	hs := httptest.NewServer(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, nil))
 	t.Cleanup(func() { hs.CloseClientConnections(); hs.Close() })
-	client, err := mcpclient.NewClient(t.Context(), t.Name(), hs.URL, mcpclient.WithTransport(mcpclient.TransportStreamableHTTP), mcpclient.WithMeta(map[string]any{"thread_id": "{{thread_id}}", "run_id": "{{run_id}}"}))
-	require.NoError(t, err)
-	wrapper := temporal_runtime.NewTemporalMCPServer(client, nil)
+	client := mcpclient.NewClient(mcpclient.NewMemoryStore().WithMCPServerConfig([]mcpclient.ServerConfig{{Name: t.Name(),
+		Endpoint:  hs.URL,
+		Transport: mcpclient.TransportStreamableHTTP,
+		Meta:      map[string]any{"thread_id": "{{thread_id}}", "run_id": "{{run_id}}"}}}))
+	wrapper := temporal_runtime.NewTemporalMCPClient(client, nil)
 	var suite testsuite.WorkflowTestSuite
 	env := suite.NewTestActivityEnvironment()
 	env.RegisterActivity(wrapper.ExecuteTool)
 	encoded, err := env.ExecuteActivity(wrapper.ExecuteTool, &agents.BaseTool{
-		Name: "echo",
+		Name:          "echo",
+		MCPServerName: t.Name(),
 		ToolUnion: responses.ToolUnion{OfFunction: &responses.FunctionTool{
 			Name: "echo", Parameters: map[string]any{"type": "object"},
 		}},

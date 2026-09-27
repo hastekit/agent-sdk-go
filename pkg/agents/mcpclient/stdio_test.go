@@ -36,18 +36,18 @@ func TestStdioServerHelper(t *testing.T) {
 }
 
 // stdioClient builds a client that runs this test binary as its MCP server.
-func stdioClient(t *testing.T, opts ...McpServerOption) *MCPClient {
+func stdioClient(t *testing.T, opts ...serverOption) *server {
 	t.Helper()
 
-	base := []McpServerOption{
-		WithCommand(os.Args[0], "-test.run=TestStdioServerHelper"),
-		WithEnv(map[string]string{"MCP_STDIO_HELPER": "1", "WHOAMI": "child"}),
+	base := []serverOption{
+		withCommand(os.Args[0], "-test.run=TestStdioServerHelper"),
+		withEnv(map[string]string{"MCP_STDIO_HELPER": "1", "WHOAMI": "child"}),
 	}
-	client, err := NewClient(context.Background(), "stdio", "", append(base, opts...)...)
+	client, err := newServer(context.Background(), "stdio", "", append(base, opts...)...)
 	require.NoError(t, err)
 
 	t.Cleanup(func() {
-		conn, err := client.connFor(context.Background(), nil)
+		conn, err := client.connFor(context.Background(), "default", nil)
 		require.NoError(t, err)
 		globalPool.Remove(conn)
 	})
@@ -61,7 +61,7 @@ func TestStdioTransport_ListsAndCallsTools(t *testing.T) {
 	ctx := context.Background()
 	client := stdioClient(t)
 
-	tools, err := client.ListTools(ctx, nil)
+	tools, err := client.ListTools(ctx, "default", nil)
 	require.NoError(t, err)
 	require.Len(t, tools, 1)
 	assert.Equal(t, "whoami", tools[0].GetToolDescriptor().ToolUnion.OfFunction.Name)
@@ -77,9 +77,9 @@ func TestStdioTransport_ListsAndCallsTools(t *testing.T) {
 // sees, and the filter written against the server's own names.
 func TestStdioTransport_HonoursPrefixAndFilter(t *testing.T) {
 	ctx := context.Background()
-	client := stdioClient(t, WithToolPrefix("local__"), WithToolFilter(ToolFilter{Include: []string{"whoami"}}))
+	client := stdioClient(t, withToolPrefix("local__"), withToolFilter(ToolFilter{Include: []string{"whoami"}}))
 
-	tools, err := client.ListTools(ctx, nil)
+	tools, err := client.ListTools(ctx, "default", nil)
 	require.NoError(t, err)
 	require.Len(t, tools, 1)
 	assert.Equal(t, "local__whoami", tools[0].GetToolDescriptor().ToolUnion.OfFunction.Name)
@@ -88,8 +88,8 @@ func TestStdioTransport_HonoursPrefixAndFilter(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "child", *res.FunctionCallOutputMessage.Output.OfString)
 
-	filtered := stdioClient(t, WithToolFilter(ToolFilter{Include: []string{"nothing-by-this-name"}}))
-	tools, err = filtered.ListTools(ctx, nil)
+	filtered := stdioClient(t, withToolFilter(ToolFilter{Include: []string{"nothing-by-this-name"}}))
+	tools, err = filtered.ListTools(ctx, "default", nil)
 	require.NoError(t, err)
 	assert.Empty(t, tools)
 }
@@ -99,20 +99,20 @@ func TestStdioTransport_HonoursPrefixAndFilter(t *testing.T) {
 func TestStdioTransport_EnvIsResolvedFromRunContext(t *testing.T) {
 	ctx := context.Background()
 
-	client, err := NewClient(ctx, "stdio", "",
-		WithCommand(os.Args[0], "-test.run=TestStdioServerHelper"),
-		WithEnv(map[string]string{"MCP_STDIO_HELPER": "1", "WHOAMI": "{{caller}}"}),
+	client, err := newServer(ctx, "stdio", "",
+		withCommand(os.Args[0], "-test.run=TestStdioServerHelper"),
+		withEnv(map[string]string{"MCP_STDIO_HELPER": "1", "WHOAMI": "{{caller}}"}),
 	)
 	require.NoError(t, err)
 
 	runContext := map[string]any{"caller": "tenant-42"}
 	t.Cleanup(func() {
-		conn, err := client.connFor(context.Background(), runContext)
+		conn, err := client.connFor(context.Background(), "default", runContext)
 		require.NoError(t, err)
 		globalPool.Remove(conn)
 	})
 
-	tools, err := client.ListTools(ctx, runContext)
+	tools, err := client.ListTools(ctx, "default", runContext)
 	require.NoError(t, err)
 	require.Len(t, tools, 1)
 

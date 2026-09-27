@@ -53,6 +53,7 @@ func (w *AgentWorkflow) Run(restateCtx restate.WorkflowContext, input *WorkflowI
 		Message:       input.Message,
 		RunContext:    input.RunContext,
 		Skills:        input.Skills,
+		MCP:           input.MCP,
 		StreamID:      streamID,
 	})
 }
@@ -102,9 +103,9 @@ func (w *AgentWorkflow) proxyAgent(
 		restateTools = append(restateTools, newRestateTool(restateCtx, agentOptions.Name, tool, w.broker, agents.ToolCallMiddlewaresOf(agentOptions.Middlewares)...))
 	}
 
-	var mcpClients []agents.MCPToolset
-	for _, mcpClient := range agentOptions.McpServers {
-		mcpClients = append(mcpClients, NewRestateMCPServer(restateCtx, mcpClient, w.broker, agents.ToolCallMiddlewaresOf(agentOptions.Middlewares)...))
+	var mcpClient agents.MCPClient
+	if agentOptions.MCPClient != nil {
+		mcpClient = NewRestateMCPClient(restateCtx, agentOptions.MCPClient, w.broker, agents.ToolCallMiddlewaresOf(agentOptions.Middlewares)...)
 	}
 
 	var skillSets []agents.SkillSet
@@ -128,7 +129,7 @@ func (w *AgentWorkflow) proxyAgent(
 		History:      conversationHistory,
 		Tools:        restateTools,
 		Skills:       skillSets,
-		McpServers:   mcpClients,
+		MCPClient:    mcpClient,
 		ToolExecutor: NewRestateToolExecutor(restateCtx),
 		StreamBroker: NewRestateStreamBroker(restateCtx, w.broker),
 		DurableStep:  NewRestateDurableStep(restateCtx),

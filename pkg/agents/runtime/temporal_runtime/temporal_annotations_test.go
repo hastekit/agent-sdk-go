@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/hastekit/agent-sdk-go/internal/testutil"
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/runtime/temporal_runtime"
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
@@ -19,7 +20,7 @@ type annotatedToolset struct{ tools []agents.Tool }
 
 func (s *annotatedToolset) GetName() string { return "annotated" }
 
-func (s *annotatedToolset) ListTools(ctx context.Context, runContext map[string]any) ([]agents.Tool, error) {
+func (s *annotatedToolset) ListTools(ctx context.Context, namespace string, runContext map[string]any) ([]agents.Tool, error) {
 	return s.tools, nil
 }
 
@@ -52,17 +53,18 @@ func TestListMCPToolsActivity_CarriesAnnotations(t *testing.T) {
 		annotatedTool("wipe_disk", &agents.ToolAnnotations{DestructiveHint: utils.Ptr(true)}, false),
 		annotatedTool("plain", nil, true),
 	}}
-	server := temporal_runtime.NewTemporalMCPServer(toolset, nil)
+	server := temporal_runtime.NewTemporalMCPClient(testutil.NewMCPClient(toolset), nil)
 
 	var suite testsuite.WorkflowTestSuite
 	env := suite.NewTestActivityEnvironment()
 	env.RegisterActivity(server.ListTools)
 
-	val, err := env.ExecuteActivity(server.ListTools, map[string]any{})
+	val, err := env.ExecuteActivity(server.ListTools, &agents.AgentInput{Namespace: "default", RunContext: map[string]any{}})
 	require.NoError(t, err)
 
-	var got []agents.BaseTool
-	require.NoError(t, val.Get(&got))
+	var listing agents.MCPListing
+	require.NoError(t, val.Get(&listing))
+	got := listing.Tools
 	require.Len(t, got, 3)
 
 	// Read-only survives, so the loop lets it run unattended.

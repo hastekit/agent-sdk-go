@@ -70,7 +70,10 @@ func (in *RunAgentInput) Validate() error {
 			return fmt.Errorf("agui: messages[%d].role is required", i)
 		}
 	}
-	_, err := in.SkillSelection()
+	if _, err := in.SkillSelection(); err != nil {
+		return err
+	}
+	_, err := in.MCPSelection()
 	return err
 }
 
@@ -419,6 +422,23 @@ func (in *RunAgentInput) SkillSelection() (agents.SkillSelection, error) {
 	}
 	if err != nil {
 		return selection, fmt.Errorf("agui: invalid forwardedProps.skills: %w", err)
+	}
+	return selection, nil
+}
+
+// MCPSelection reads per-run server and tool selection from forwardedProps.mcp.
+func (in *RunAgentInput) MCPSelection() (agents.MCPSelection, error) {
+	var selection agents.MCPSelection
+	props, ok := in.ForwardedProps.(map[string]any)
+	if !ok || props["mcp"] == nil {
+		return selection, nil
+	}
+	data, err := json.Marshal(props["mcp"])
+	if err == nil {
+		err = json.Unmarshal(data, &selection)
+	}
+	if err != nil {
+		return selection, fmt.Errorf("agui: invalid forwardedProps.mcp: %w", err)
 	}
 	return selection, nil
 }

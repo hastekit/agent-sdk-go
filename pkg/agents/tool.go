@@ -93,6 +93,9 @@ type Tool interface {
 }
 
 type BaseTool struct {
+	// MCPServerName routes MCP calls across durable execution; ToolCall supplies the namespace.
+	MCPServerName string `json:"mcp_server_name,omitempty"`
+
 	// Name is the tool's own name, without any prefix the model-facing name
 	// carries. Only sources that have a name of their own set it — an MCP
 	// server's tools do, a locally defined function tool does not, since for it

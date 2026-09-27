@@ -51,14 +51,12 @@ func run(listen string) error {
 		func(*http.Request) *mcp.Server { return mcpServer }, &mcp.StreamableHTTPOptions{Stateless: true},
 	))
 	defer mcpHTTP.Close()
-	connector, err := mcpclient.NewClient(ctx, "approvals", mcpHTTP.URL,
-		mcpclient.WithTransport(mcpclient.TransportStreamableHTTP))
-	if err != nil {
-		return err
-	}
+	connector := mcpclient.NewClient(mcpclient.NewMemoryStore().WithMCPServerConfig([]mcpclient.ServerConfig{{Name: "approvals",
+		Endpoint:  mcpHTTP.URL,
+		Transport: mcpclient.TransportStreamableHTTP}}))
 
 	compiled, err := workflow.LoadYAML(descriptor, workflow.Dependencies{
-		MCPServers: map[string]agents.MCPToolset{"approvals": connector},
+		MCPServers: map[string]agents.MCPClient{"approvals": connector},
 	})
 	if err != nil {
 		return err

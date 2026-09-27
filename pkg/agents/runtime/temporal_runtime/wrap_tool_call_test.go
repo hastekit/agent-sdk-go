@@ -8,6 +8,7 @@ import (
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/attachments"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/history"
+	"github.com/hastekit/agent-sdk-go/internal/testutil"
 	agentmiddleware "github.com/hastekit/agent-sdk-go/pkg/agents/middleware"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/runtime/temporal_runtime"
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
@@ -51,7 +52,7 @@ func (h *activityTransform) WrapToolCall(next agents.ToolCallFunc) agents.ToolCa
 type transformToolset struct{ tool agents.Tool }
 
 func (*transformToolset) GetName() string { return "media_server" }
-func (s *transformToolset) ListTools(context.Context, map[string]any) ([]agents.Tool, error) {
+func (s *transformToolset) ListTools(context.Context, string, map[string]any) ([]agents.Tool, error) {
 	return []agents.Tool{s.tool}, nil
 }
 
@@ -76,12 +77,12 @@ func TestTemporalResultsAreTransformedBeforeActivitySerialization(t *testing.T) 
 	// The attachment middleware first, so it is outermost and sees what the
 	// producer inside it answers with.
 	middlewares := []agents.Middleware{middleware, &attachmentProducer{}}
-	a := temporal_runtime.NewTemporalAgent(nil, &agents.AgentOptions{Name: "A", History: history.NewConversationManager(history.NewInMemoryConversationPersistence()), Tools: []agents.Tool{tool}, McpServers: []agents.MCPToolset{&transformToolset{tool: tool}}, Middlewares: middlewares}, nil)
+	a := temporal_runtime.NewTemporalAgent(nil, &agents.AgentOptions{Name: "A", History: history.NewConversationManager(history.NewInMemoryConversationPersistence()), Tools: []agents.Tool{tool}, MCPClient: testutil.NewMCPClient([]agents.MCPToolset{&transformToolset{tool: tool}}...), Middlewares: middlewares}, nil)
 	activities := a.GetActivities()
 	for name := range activities {
 		require.NotContains(t, name, "WrapToolCall", "wraps must not become separate activities")
 	}
-	for _, name := range []string{"A_media_ExecuteToolActivity", "A_media_server_ExecuteMCPToolActivity", "A_media_AwaitTaskActivity"} {
+	for _, name := range []string{"A_media_ExecuteToolActivity", "A_MCP_ExecuteMCPToolActivity", "A_media_AwaitTaskActivity"} {
 		t.Run(name, func(t *testing.T) {
 			var suite testsuite.WorkflowTestSuite
 			env := suite.NewTestActivityEnvironment()
@@ -94,7 +95,7 @@ func TestTemporalResultsAreTransformedBeforeActivitySerialization(t *testing.T) 
 			switch name {
 			case "A_media_ExecuteToolActivity":
 				args = []interface{}{call}
-			case "A_media_server_ExecuteMCPToolActivity":
+			case "A_MCP_ExecuteMCPToolActivity":
 				args = []interface{}{tool.BaseTool, call, map[string]any{}}
 			case "A_media_AwaitTaskActivity":
 				args = []interface{}{agents.BackgroundTaskRef{ThreadID: "thread", SessionID: "thread", CallID: "call", ToolName: "media", Namespace: "test"}}
@@ -120,10 +121,10 @@ func TestSharedMCPServerBindsEachAgentsMiddleware(t *testing.T) {
 	env := suite.NewTestActivityEnvironment()
 	for _, name := range []string{"owner", "specialist"} {
 		a := temporal_runtime.NewTemporalAgent(nil, &agents.AgentOptions{
-			Name: name, History: newTestHistory(), McpServers: []agents.MCPToolset{server},
+			Name: name, History: newTestHistory(), MCPClient: testutil.NewMCPClient([]agents.MCPToolset{server}...),
 			Middlewares: []agents.Middleware{&authzMiddleware{name: name}},
 		}, nil)
-		activityName := name + "_media_server_ExecuteMCPToolActivity"
+		activityName := name + "_MCP_ExecuteMCPToolActivity"
 		fn := a.GetActivities()[activityName]
 		require.NotNil(t, fn)
 		env.RegisterActivityWithOptions(fn, activity.RegisterOptions{Name: activityName})
@@ -132,7 +133,7 @@ func TestSharedMCPServerBindsEachAgentsMiddleware(t *testing.T) {
 		call := middlewareCall()
 		// Policy belongs to the registered activity, not a caller-controlled name.
 		call.AgentName = "unrelated"
-		value, err := env.ExecuteActivity(name+"_media_server_ExecuteMCPToolActivity", tool.BaseTool, call, map[string]any{})
+		value, err := env.ExecuteActivity(name+"_MCP_ExecuteMCPToolActivity", tool.BaseTool, call, map[string]any{})
 		require.NoError(t, err)
 		var result agents.ToolCallResponse
 		require.NoError(t, value.Get(&result))

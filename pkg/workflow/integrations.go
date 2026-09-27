@@ -103,7 +103,7 @@ func NewMCPNode(id string, cfg MCPNodeConfig) (Node, error) {
 		if call.FunctionCallMessage == nil {
 			return nil, "", fmt.Errorf("missing MCP continuation call")
 		}
-		listed, err := server.ListTools(ctx, call.RunContext)
+		_, listed, err := server.ListTools(ctx, call.Namespace, call.RunContext)
 		if err != nil {
 			return nil, "", err
 		}
@@ -116,7 +116,7 @@ func NewMCPNode(id string, cfg MCPNodeConfig) (Node, error) {
 			}
 		}
 		if tool == nil {
-			return nil, "", fmt.Errorf("MCP tool %q not found on %q", cfg.Tool, server.GetName())
+			return nil, "", fmt.Errorf("MCP tool %q not found", cfg.Tool)
 		}
 		// Respect connector-configured approval before making the actual call.
 		if tool.GetToolDescriptor().RequiresApproval && !call.ShouldResume {

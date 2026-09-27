@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/hastekit/agent-sdk-go/internal/testutil"
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/agentstate"
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
@@ -31,56 +32,58 @@ func (p capturingPrompt) GetPrompt(_ context.Context, deps *agents.Dependencies)
 	return "You are a helpful assistant.", nil
 }
 
-func (s *stubToolset) ListTools(context.Context, map[string]any) ([]agents.Tool, error) {
+func (s *stubToolset) ListTools(context.Context, string, map[string]any) ([]agents.Tool, error) {
 	if s.err != nil {
 		return nil, s.err
 	}
 	return s.tools, nil
 }
 
-func TestPrepareMCPToolsKeepsGoingWhenAServerFails(t *testing.T) {
+func TestMCPClientKeepsGoingWhenAServerFails(t *testing.T) {
 	healthy := &stubToolset{name: "calendar", tools: []agents.Tool{newFakeTool("list_events", false, "ok")}}
 	broken := &stubToolset{name: "jira", err: errors.New("dial tcp: connection refused")}
 
 	agent := agents.NewAgent(&agents.AgentOptions{
-		Name:       "atlas",
-		McpServers: []agents.MCPToolset{broken, healthy},
+		Name:      "atlas",
+		MCPClient: testutil.NewMCPClient([]agents.MCPToolset{broken, healthy}...),
 	})
 
-	tools, connectors := agent.PrepareMCPTools(context.Background(), nil)
+	connectors, tools, err := agent.PrepareMCPTools(context.Background(), &agents.AgentInput{Namespace: "default"})
+	require.NoError(t, err)
 
 	require.Len(t, tools, 1, "the healthy server's tools must survive its neighbour failing")
 	assert.Equal(t, "list_events", tools[0].GetToolDescriptor().ToolUnion.OfFunction.Name)
 
-	// One status per configured connector, in configuration order — the run
+	// One status per configured connector, in stable name order — the run
 	// needs to know what it has as much as what it is missing.
 	require.Len(t, connectors, 2)
 
-	assert.Equal(t, "jira", connectors[0].Name)
-	assert.False(t, connectors[0].Connected)
-	assert.Zero(t, connectors[0].ToolCount)
-	assert.Equal(t, agents.ToolsetErrorUnavailable, connectors[0].Kind)
-	assert.Contains(t, connectors[0].Detail, "connection refused")
+	assert.Equal(t, "jira", connectors[1].Name)
+	assert.False(t, connectors[1].Connected)
+	assert.Zero(t, connectors[1].ToolCount)
+	assert.Equal(t, agents.ToolsetErrorUnavailable, connectors[1].Kind)
+	assert.Contains(t, connectors[1].Detail, "connection refused")
 
-	assert.Equal(t, "calendar", connectors[1].Name)
-	assert.True(t, connectors[1].Connected)
-	assert.Equal(t, 1, connectors[1].ToolCount)
-	assert.Empty(t, connectors[1].Kind)
+	assert.Equal(t, "calendar", connectors[0].Name)
+	assert.True(t, connectors[0].Connected)
+	assert.Equal(t, 1, connectors[0].ToolCount)
+	assert.Empty(t, connectors[0].Kind)
 }
 
-func TestPrepareMCPToolsCountsToolsPerConnector(t *testing.T) {
+func TestMCPClientCountsToolsPerConnector(t *testing.T) {
 	agent := agents.NewAgent(&agents.AgentOptions{
 		Name: "atlas",
-		McpServers: []agents.MCPToolset{
+		MCPClient: testutil.NewMCPClient([]agents.MCPToolset{
 			&stubToolset{name: "calendar", tools: []agents.Tool{
 				newFakeTool("list_events", false, "ok"),
 				newFakeTool("create_event", false, "ok"),
 			}},
 			&stubToolset{name: "empty"},
-		},
+		}...),
 	})
 
-	_, connectors := agent.PrepareMCPTools(context.Background(), nil)
+	connectors, _, err := agent.PrepareMCPTools(context.Background(), &agents.AgentInput{Namespace: "default"})
+	require.NoError(t, err)
 
 	require.Len(t, connectors, 2)
 	assert.Equal(t, 2, connectors[0].ToolCount)
@@ -88,7 +91,7 @@ func TestPrepareMCPToolsCountsToolsPerConnector(t *testing.T) {
 	assert.Zero(t, connectors[1].ToolCount)
 }
 
-func TestPrepareMCPToolsClassifiesAuthFailures(t *testing.T) {
+func TestMCPClientClassifiesAuthFailures(t *testing.T) {
 	tests := []struct {
 		name string
 		err  error
@@ -118,11 +121,12 @@ func TestPrepareMCPToolsClassifiesAuthFailures(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			agent := agents.NewAgent(&agents.AgentOptions{
-				Name:       "atlas",
-				McpServers: []agents.MCPToolset{&stubToolset{name: "calendar", err: tc.err}},
+				Name:      "atlas",
+				MCPClient: testutil.NewMCPClient([]agents.MCPToolset{&stubToolset{name: "calendar", err: tc.err}}...),
 			})
 
-			_, connectors := agent.PrepareMCPTools(context.Background(), nil)
+			connectors, _, err := agent.PrepareMCPTools(context.Background(), &agents.AgentInput{Namespace: "default"})
+			require.NoError(t, err)
 
 			require.Len(t, connectors, 1)
 			assert.False(t, connectors[0].Connected)
@@ -142,10 +146,10 @@ func TestConnectorStatusesReachThePromptProvider(t *testing.T) {
 		Instruction: capturingPrompt(func(deps *agents.Dependencies) {
 			seen = deps.Connectors
 		}),
-		McpServers: []agents.MCPToolset{
+		MCPClient: testutil.NewMCPClient([]agents.MCPToolset{
 			&stubToolset{name: "calendar", err: agents.NewToolsetError(agents.ToolsetErrorAuth, errors.New("Unauthorized"))},
 			&stubToolset{name: "notes", tools: []agents.Tool{newFakeTool("search_notes", false, "ok")}},
-		},
+		}...),
 	}).WithLLM(llm)
 
 	out := runAgent(t, agent, &agents.AgentInput{

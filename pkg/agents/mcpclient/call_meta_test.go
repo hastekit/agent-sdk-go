@@ -36,17 +36,17 @@ func TestMetaTemplatesCachedAndDirectCalls(t *testing.T) {
 	httpServer := httptest.NewServer(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, nil))
 	t.Cleanup(func() { httpServer.CloseClientConnections(); httpServer.Close() })
 	cache := newMemCache()
-	client, err := NewClient(t.Context(), t.Name(), httpServer.URL,
-		WithTransport(TransportStreamableHTTP), WithSchemaCache(cache), WithCacheTTL(time.Minute),
-		WithMeta(map[string]any{"static": "kept", "thread_id": "{{thread_id}}", "run_id": "{{run_id}}", "progressToken": "configured-token"}))
+	client, err := newServer(t.Context(), t.Name(), httpServer.URL,
+		withTransport(TransportStreamableHTTP), withSchemaCache(cache), withCacheTTL(time.Minute),
+		withMeta(map[string]any{"static": "kept", "thread_id": "{{thread_id}}", "run_id": "{{run_id}}", "progressToken": "configured-token"}))
 	require.NoError(t, err)
-	conn, err := client.connFor(t.Context(), nil)
+	conn, err := client.connFor(t.Context(), "default", nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { globalPool.Remove(conn) })
 	var pooled *mcp.ClientSession
 	for i := range 3 {
 		rc := map[string]any{"run_id": fmt.Sprintf("run-%d", i), "thread_id": fmt.Sprintf("thread-%d", i)}
-		tools, err := client.ListTools(t.Context(), rc)
+		tools, err := client.ListTools(t.Context(), "default", rc)
 		require.NoError(t, err)
 		require.Len(t, tools, 1)
 		descriptorJSON, err := json.Marshal(tools[0].GetToolDescriptor())
@@ -136,8 +136,8 @@ func TestCachedSchemasUseCurrentMetaTemplates(t *testing.T) {
 	url, lists := cacheableServer(t, time.Minute, CacheScopePublic)
 	cache := newMemCache()
 	for _, template := range []string{"first-{{run_id}}", "second-{{run_id}}"} {
-		client := cachingClient(t, url, cache, WithMeta(map[string]any{"id": template}))
-		tools, err := client.ListTools(t.Context(), nil)
+		client := cachingClient(t, url, cache, withMeta(map[string]any{"id": template}))
+		tools, err := client.ListTools(t.Context(), "default", nil)
 		require.NoError(t, err)
 		require.Equal(t, template, tools[0].(*LazyMcpTool).meta["id"])
 	}

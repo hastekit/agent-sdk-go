@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/hastekit/agent-sdk-go/internal/testutil"
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/runtime/temporal_runtime"
 	"github.com/stretchr/testify/require"
@@ -31,15 +32,17 @@ func TestTemporalActivitiesShowMiddlewareTheSameToolAsLocally(t *testing.T) {
 	require.Empty(t, tool.GetToolDescriptor().Name, "the tool itself carries no name of its own")
 	recorder := &toolRecorder{}
 	a := temporal_runtime.NewTemporalAgent(nil, &agents.AgentOptions{
-		Name: "A", History: newTestHistory(), Tools: []agents.Tool{tool}, McpServers: []agents.MCPToolset{&transformToolset{tool: tool}},
+		Name: "A", History: newTestHistory(), Tools: []agents.Tool{tool}, MCPClient: testutil.NewMCPClient([]agents.MCPToolset{&transformToolset{tool: tool}}...),
 		Middlewares: []agents.Middleware{recorder},
 	}, nil)
 	activities := a.GetActivities()
+	mcpDescriptor := *tool.BaseTool
+	mcpDescriptor.MCPServerName = "media_server"
 	locally := agents.SerializeTool(tool.GetToolDescriptor(), middlewareCall())
 
 	for name, args := range map[string][]interface{}{
-		"A_search_ExecuteToolActivity":          {middlewareCall()},
-		"A_media_server_ExecuteMCPToolActivity": {tool.BaseTool, middlewareCall(), map[string]any{}},
+		"A_search_ExecuteToolActivity": {middlewareCall()},
+		"A_MCP_ExecuteMCPToolActivity": {&mcpDescriptor, middlewareCall(), map[string]any{}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			var suite testsuite.WorkflowTestSuite

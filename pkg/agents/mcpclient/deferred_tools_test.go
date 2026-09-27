@@ -33,11 +33,11 @@ func TestDeferredToolsSelection(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			for _, prefix := range []string{"", "xyz__"} {
-				options := []McpServerOption{WithToolPrefix(prefix), WithApprovalRequiredTools("search")}
+				options := []serverOption{withToolPrefix(prefix), withApprovalRequiredTools("search")}
 				if tt.filter != nil {
-					options = append(options, WithDeferredTools(*tt.filter))
+					options = append(options, withDeferredTools(*tt.filter))
 				}
-				client, err := NewClient(t.Context(), "deferred", "", options...)
+				client, err := newServer(t.Context(), "deferred", "", options...)
 				require.NoError(t, err)
 				tools := client.buildLazyTools([]*mcp.Tool{{Name: "search"}, {Name: "book"}, {Name: "cancel"}}, nil, serverConn{})
 
@@ -59,9 +59,9 @@ func TestDeferredToolsSelection(t *testing.T) {
 
 // Excluding a tool from deferral must not restore a tool hidden by the visibility filter.
 func TestDeferredToolsRespectsToolFilter(t *testing.T) {
-	client, err := NewClient(t.Context(), "filtered", "",
-		WithToolFilter(ToolFilter{Exclude: []string{"cancel"}}),
-		WithDeferredTools(ToolFilter{Exclude: []string{"search", "cancel"}}),
+	client, err := newServer(t.Context(), "filtered", "",
+		withToolFilter(ToolFilter{Exclude: []string{"cancel"}}),
+		withDeferredTools(ToolFilter{Exclude: []string{"search", "cancel"}}),
 	)
 	require.NoError(t, err)
 	tools := client.buildLazyTools([]*mcp.Tool{{Name: "search"}, {Name: "book"}, {Name: "cancel"}}, nil, serverConn{})
@@ -87,11 +87,11 @@ func TestDeferredToolsWithAndWithoutCache(t *testing.T) {
 			}
 
 			// Read through two clients whose only difference is direct tool availability.
-			deferred := cachingClient(t, url, cache, WithDeferredTools(ToolFilter{}))
-			direct := cachingClient(t, url, cache, WithDeferredTools(ToolFilter{Exclude: []string{"echo"}}))
+			deferred := cachingClient(t, url, cache, withDeferredTools(ToolFilter{}))
+			direct := cachingClient(t, url, cache, withDeferredTools(ToolFilter{Exclude: []string{"echo"}}))
 			for range 2 {
-				for _, client := range []*MCPClient{deferred, direct} {
-					tools, err := client.ListTools(t.Context(), nil)
+				for _, client := range []*server{deferred, direct} {
+					tools, err := client.ListTools(t.Context(), "default", nil)
 					require.NoError(t, err)
 					require.Len(t, tools, 1)
 					assert.Equal(t, "echo", tools[0].GetToolDescriptor().Name)

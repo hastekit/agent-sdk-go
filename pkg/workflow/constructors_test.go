@@ -31,8 +31,11 @@ func (t *nodeTool) Execute(ctx context.Context, call *agents.ToolCall) (*agents.
 type nodeServer struct{ tool agents.Tool }
 
 func (nodeServer) GetName() string { return "demo" }
-func (s nodeServer) ListTools(context.Context, map[string]any) ([]agents.Tool, error) {
-	return []agents.Tool{s.tool}, nil
+func (s nodeServer) ListTools(context.Context, string, map[string]any, ...agents.MCPSelection) ([]agents.ConnectorStatus, []agents.Tool, error) {
+	return nil, []agents.Tool{s.tool}, nil
+}
+func (s nodeServer) CallTool(ctx context.Context, _ *agents.BaseTool, call *agents.ToolCall) (*agents.ToolCallResponse, error) {
+	return s.tool.Execute(ctx, call)
 }
 func mustNode(t *testing.T, node workflow.Node, err error) workflow.Node {
 	t.Helper()
@@ -92,7 +95,7 @@ edges:
  - {from: human, port: rejected, to: END}
  - {from: agent, to: mcp}
  - {from: mcp, to: END}
-`, server.URL)), workflow.Dependencies{Agents: map[string]workflow.AgentRunner{"helper": agent}, MCPServers: map[string]agents.MCPToolset{"demo": connector}})
+`, server.URL)), workflow.Dependencies{Agents: map[string]workflow.AgentRunner{"helper": agent}, MCPServers: map[string]agents.MCPClient{"demo": connector}})
 	require.NoError(t, err)
 	states := []*workflow.Input{}
 	for _, compiled := range []*workflow.Compiled{typed, yaml} {

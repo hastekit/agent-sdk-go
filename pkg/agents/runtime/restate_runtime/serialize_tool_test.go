@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/hastekit/agent-sdk-go/internal/testutil"
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
 	"github.com/stretchr/testify/require"
@@ -33,8 +34,11 @@ func TestRestateStepsShowMiddlewareTheSameToolAsLocally(t *testing.T) {
 	locally := agents.SerializeTool(tool.GetToolDescriptor(), call)
 
 	local := NewRestateTool(nil, tool, nil, recorder)
-	mcp := NewRestateMCPTool(nil, &transformMediaToolset{tool: tool}, nil, *tool.BaseTool, nil, recorder)
-	for _, execute := range []func(context.Context, *agents.ToolCall) (*agents.ToolCallResponse, error){local.execute, mcp.execute} {
+	mcp := NewRestateMCPClient(nil, testutil.NewMCPClient(&transformMediaToolset{tool: tool}), nil, recorder)
+	executeMCP := func(ctx context.Context, call *agents.ToolCall) (*agents.ToolCallResponse, error) {
+		return mcp.executeTool(ctx, tool.BaseTool, call)
+	}
+	for _, execute := range []func(context.Context, *agents.ToolCall) (*agents.ToolCallResponse, error){local.execute, executeMCP} {
 		recorder.seen = nil
 
 		_, err := execute(t.Context(), call)

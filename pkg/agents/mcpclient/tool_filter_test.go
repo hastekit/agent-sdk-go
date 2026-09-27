@@ -28,8 +28,8 @@ func TestToolFilter(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			for _, prefix := range []string{"", "xyz__"} {
-				client, err := NewClient(context.Background(), "filtered", "",
-					WithToolFilter(tt.filter), WithToolPrefix(prefix))
+				client, err := newServer(context.Background(), "filtered", "",
+					withToolFilter(tt.filter), withToolPrefix(prefix))
 				require.NoError(t, err)
 				tools := client.buildLazyTools([]*mcp.Tool{
 					{Name: "search"}, {Name: "book"}, {Name: "cancel"},
@@ -57,15 +57,15 @@ func TestListToolsExcludesToolsWithAndWithoutCache(t *testing.T) {
 				cache = newMemCache()
 			}
 			client := cachingClient(t, url, cache,
-				WithToolFilter(ToolFilter{Exclude: []string{"echo"}}), WithToolPrefix("xyz__"))
+				withToolFilter(ToolFilter{Exclude: []string{"echo"}}), withToolPrefix("xyz__"))
 			for range 2 {
-				tools, err := client.ListTools(context.Background(), nil)
+				tools, err := client.ListTools(context.Background(), "default", nil)
 				require.NoError(t, err)
 				assert.Empty(t, tools)
 			}
 
 			unfiltered := cachingClient(t, url, cache)
-			tools, err := unfiltered.ListTools(context.Background(), nil)
+			tools, err := unfiltered.ListTools(context.Background(), "default", nil)
 			require.NoError(t, err)
 			assert.Equal(t, []string{"echo"}, exposedNames(tools), "exclusions must not remove cached schemas")
 			if cached {

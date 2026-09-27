@@ -6,5 +6,6 @@ import (
 
 type MCPToolset interface {
 	GetName() string
-	ListTools(ctx context.Context, runContext map[string]any) ([]Tool, error)
+	// ListTools receives the execution namespace separately from application run context.
+	ListTools(ctx context.Context, namespace string, runContext map[string]any) ([]Tool, error)
 }

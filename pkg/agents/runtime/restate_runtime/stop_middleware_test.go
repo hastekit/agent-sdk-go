@@ -51,7 +51,7 @@ func TestRestateStepMiddlewareCancellationIsTerminal(t *testing.T) {
 			case "tool":
 				_, err = NewRestateTool(nil, tool, broker, middleware).execute(ctx, call)
 			case "mcp":
-				_, err = NewRestateMCPTool(nil, nil, nil, *tool.BaseTool, broker, middleware).execute(ctx, call)
+				_, err = NewRestateMCPClient(nil, nil, broker, middleware).executeTool(ctx, tool.BaseTool, call)
 			case "model":
 				step := NewRestateLLM(nil, nil, "", broker, "stream", middleware).(*RestateLLM)
 				_, err = step.invoke(ctx, &agents.ModelCall{StreamID: "not-the-runtime-stream"}, &responses.Request{}, nil)

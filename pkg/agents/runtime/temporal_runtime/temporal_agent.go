@@ -75,9 +75,9 @@ func (a *TemporalAgentV2) GetActivities() map[string]interface{} {
 	activities[a.options.Name+closeTaskStreamActivityName] = temporalDelivery.CloseTaskStream
 	activities[a.options.Name+deliverTaskActivityName] = temporalDelivery.DeliverTask
 
-	for _, mcpClient := range a.options.McpServers {
-		temporalMCP := NewTemporalMCPServer(mcpClient, a.broker, agents.ToolCallMiddlewaresOf(a.options.Middlewares)...)
-		prefix := a.options.Name + "_" + mcpClient.GetName()
+	if a.options.MCPClient != nil {
+		temporalMCP := NewTemporalMCPClient(a.options.MCPClient, a.broker, agents.ToolCallMiddlewaresOf(a.options.Middlewares)...)
+		prefix := a.options.Name + "_MCP"
 		activities[prefix+"_ListMCPToolsActivity"] = temporalMCP.ListTools
 		activities[prefix+"_ExecuteMCPToolActivity"] = temporalMCP.ExecuteTool
 	}
@@ -168,10 +168,9 @@ func (a *TemporalAgentV2) proxyAgent(ctx workflow.Context, built map[string]*age
 		toolProxies = append(toolProxies, toolProxy)
 	}
 
-	var mcpProxies []agents.MCPToolset
-	for _, mcpClient := range a.options.McpServers {
-		mcpProxy := NewTemporalMCPProxy(ctx, mcpClient.GetName(), a.options.Name+"_"+mcpClient.GetName())
-		mcpProxies = append(mcpProxies, mcpProxy)
+	var mcpClient agents.MCPClient
+	if a.options.MCPClient != nil {
+		mcpClient = &temporalMCPClientProxy{ctx: ctx, prefix: a.options.Name + "_MCP"}
 	}
 
 	var skillSets []agents.SkillSet
@@ -194,7 +193,7 @@ func (a *TemporalAgentV2) proxyAgent(ctx workflow.Context, built map[string]*age
 		Instruction:  promptProxy,
 		Tools:        toolProxies,
 		Skills:       skillSets,
-		McpServers:   mcpProxies,
+		MCPClient:    mcpClient,
 		ToolExecutor: NewTemporalToolExecutor(ctx),
 		StreamBroker: NewTemporalStreamBrokerProxy(ctx, a.options.Name, a.broker),
 		DurableStep:  NewTemporalDurableStep(ctx),

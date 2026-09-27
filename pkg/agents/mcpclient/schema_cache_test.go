@@ -56,10 +56,10 @@ func cacheableServer(t *testing.T, ttl time.Duration, scope string, versions ...
 	return hs.URL, func() int { return calls }
 }
 
-func cachingClient(t *testing.T, url string, cache SchemaCache, opts ...McpServerOption) *MCPClient {
+func cachingClient(t *testing.T, url string, cache SchemaCache, opts ...serverOption) *server {
 	t.Helper()
-	base := []McpServerOption{WithTransport(TransportStreamableHTTP), WithSchemaCache(cache)}
-	client, err := NewClient(context.Background(), "cached", url, append(base, opts...)...)
+	base := []serverOption{withTransport(TransportStreamableHTTP), withSchemaCache(cache)}
+	client, err := newServer(context.Background(), "cached", url, append(base, opts...)...)
 	require.NoError(t, err)
 	return client
 }
@@ -70,13 +70,12 @@ func TestPublicListingIsSharedAcrossPrincipals(t *testing.T) {
 	url, lists := cacheableServer(t, time.Minute, cacheScopePublic)
 	cache := newMemCache()
 
-	client := cachingClient(t, url, cache, WithCredentialProvider(
-		keyed(&stubProvider{tokens: map[string]string{"cached/ada": "a", "cached/grace": "g"}})))
+	client := cachingClient(t, url, cache, withCredentials(keyed(&stubProvider{tokens: map[string]string{"cached/ada": "a", "cached/grace": "g"}})))
 
 	ctx := context.Background()
-	_, err := client.ListTools(ctx, map[string]any{"user": "ada"})
+	_, err := client.ListTools(ctx, "default", map[string]any{"user": "ada"})
 	require.NoError(t, err)
-	_, err = client.ListTools(ctx, map[string]any{"user": "grace"})
+	_, err = client.ListTools(ctx, "default", map[string]any{"user": "grace"})
 	require.NoError(t, err)
 
 	assert.Equal(t, 1, lists(), "the second user reads the first user's entry")
@@ -91,12 +90,11 @@ func TestPrivateListingIsKeyedPerPrincipal(t *testing.T) {
 	url, lists := cacheableServer(t, time.Minute, cacheScopePrivate)
 	cache := newMemCache()
 
-	client := cachingClient(t, url, cache, WithCredentialProvider(
-		keyed(&stubProvider{tokens: map[string]string{"cached/ada": "a", "cached/grace": "g"}})))
+	client := cachingClient(t, url, cache, withCredentials(keyed(&stubProvider{tokens: map[string]string{"cached/ada": "a", "cached/grace": "g"}})))
 
 	ctx := context.Background()
 	for _, user := range []string{"ada", "grace", "ada"} {
-		_, err := client.ListTools(ctx, map[string]any{"user": user})
+		_, err := client.ListTools(ctx, "default", map[string]any{"user": user})
 		require.NoError(t, err)
 	}
 
@@ -113,14 +111,14 @@ func TestAServerThatSaysNothingIsTreatedAsPrivate(t *testing.T) {
 	cache := newMemCache()
 
 	client := cachingClient(t, url, cache,
-		WithCacheTTL(time.Minute),
-		WithCredentialProvider(keyed(&stubProvider{
+		withCacheTTL(time.Minute),
+		withCredentials(keyed(&stubProvider{
 			tokens: map[string]string{"cached/ada": "a", "cached/grace": "g"}})))
 
 	ctx := context.Background()
-	_, err := client.ListTools(ctx, map[string]any{"user": "ada"})
+	_, err := client.ListTools(ctx, "default", map[string]any{"user": "ada"})
 	require.NoError(t, err)
-	_, err = client.ListTools(ctx, map[string]any{"user": "grace"})
+	_, err = client.ListTools(ctx, "default", map[string]any{"user": "grace"})
 	require.NoError(t, err)
 
 	assert.Equal(t, 2, lists(), "one user's listing is not served to another")
@@ -133,13 +131,13 @@ func TestServerTTLIsStoredAndHonoured(t *testing.T) {
 	client := cachingClient(t, url, cache)
 
 	ctx := context.Background()
-	_, err := client.ListTools(ctx, nil)
+	_, err := client.ListTools(ctx, "default", nil)
 	require.NoError(t, err)
 
 	key := cache.keys()[0]
 	assert.Equal(t, 40*time.Millisecond, cache.ttl(key), "the server's ttlMs reaches the store")
 
-	_, err = client.ListTools(ctx, nil)
+	_, err = client.ListTools(ctx, "default", nil)
 	require.NoError(t, err)
 	assert.Equal(t, 1, lists(), "still fresh")
 
@@ -154,19 +152,19 @@ func TestServerTTLIsStoredAndHonoured(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, cache.Set(context.Background(), cache.keys()[0], data, time.Minute))
 
-	_, err = client.ListTools(ctx, nil)
+	_, err = client.ListTools(ctx, "default", nil)
 	require.NoError(t, err)
 	assert.Equal(t, 2, lists(), "a stale entry is refetched, not served")
 }
 
-// WithCacheTTL bounds what the server asked for, the way a proxy's own max-age
+// withCacheTTL bounds what the server asked for, the way a proxy's own max-age
 // bounds an upstream's.
 func TestConfiguredTTLCapsTheServers(t *testing.T) {
 	url, _ := cacheableServer(t, time.Hour, cacheScopePublic)
 	cache := newMemCache()
-	client := cachingClient(t, url, cache, WithCacheTTL(time.Minute))
+	client := cachingClient(t, url, cache, withCacheTTL(time.Minute))
 
-	_, err := client.ListTools(context.Background(), nil)
+	_, err := client.ListTools(context.Background(), "default", nil)
 	require.NoError(t, err)
 
 	assert.Equal(t, time.Minute, cache.ttl(cache.keys()[0]))
@@ -176,19 +174,18 @@ func TestConfiguredTTLCapsTheServers(t *testing.T) {
 func TestInvalidateDropsBothKeys(t *testing.T) {
 	url, lists := cacheableServer(t, time.Minute, cacheScopePublic)
 	cache := newMemCache()
-	client := cachingClient(t, url, cache, WithCredentialProvider(
-		keyed(&stubProvider{tokens: map[string]string{"cached/ada": "a"}})))
+	client := cachingClient(t, url, cache, withCredentials(keyed(&stubProvider{tokens: map[string]string{"cached/ada": "a"}})))
 
 	ctx := context.Background()
 	run := map[string]any{"user": "ada"}
-	_, err := client.ListTools(ctx, run)
+	_, err := client.ListTools(ctx, "default", run)
 	require.NoError(t, err)
 	require.Equal(t, 1, lists())
 
-	client.InvalidateToolCache(ctx, run)
+	client.InvalidateToolCache(ctx, "default", run)
 	assert.Empty(t, cache.keys())
 
-	_, err = client.ListTools(ctx, run)
+	_, err = client.ListTools(ctx, "default", run)
 	require.NoError(t, err)
 	assert.Equal(t, 2, lists())
 }
@@ -199,13 +196,13 @@ func TestPrivateListingFallsBackToHeadersWithoutAPrincipal(t *testing.T) {
 	url, _ := cacheableServer(t, time.Minute, cacheScopePrivate)
 	cache := newMemCache()
 
-	ada := cachingClient(t, url, cache, WithHeaders(map[string]string{"X-User": "ada"}))
-	grace := cachingClient(t, url, cache, WithHeaders(map[string]string{"X-User": "grace"}))
+	ada := cachingClient(t, url, cache, withHeaders(map[string]string{"X-User": "ada"}))
+	grace := cachingClient(t, url, cache, withHeaders(map[string]string{"X-User": "grace"}))
 
 	ctx := context.Background()
-	_, err := ada.ListTools(ctx, nil)
+	_, err := ada.ListTools(ctx, "default", nil)
 	require.NoError(t, err)
-	_, err = grace.ListTools(ctx, nil)
+	_, err = grace.ListTools(ctx, "default", nil)
 	require.NoError(t, err)
 
 	assert.Len(t, cache.keys(), 2)
@@ -220,25 +217,25 @@ func TestFilterAndPrefixShareOneCacheEntry(t *testing.T) {
 
 	ctx := context.Background()
 	unfiltered := cachingClient(t, url, cache)
-	filtered := cachingClient(t, url, cache, WithToolFilter(ToolFilter{Include: []string{"nothing-matches"}}))
-	prefixed := cachingClient(t, url, cache, WithToolPrefix("xyz__"))
+	filtered := cachingClient(t, url, cache, withToolFilter(ToolFilter{Include: []string{"nothing-matches"}}))
+	prefixed := cachingClient(t, url, cache, withToolPrefix("xyz__"))
 
-	all, err := unfiltered.ListTools(ctx, nil)
+	all, err := unfiltered.ListTools(ctx, "default", nil)
 	require.NoError(t, err)
 	require.Len(t, all, 1)
 	assert.Equal(t, "echo", all[0].GetToolDescriptor().ToolUnion.OfFunction.Name)
 
-	none, err := filtered.ListTools(ctx, nil)
+	none, err := filtered.ListTools(ctx, "default", nil)
 	require.NoError(t, err)
 	assert.Empty(t, none, "the filter still applies — it just applies after the cache")
 
-	renamed, err := prefixed.ListTools(ctx, nil)
+	renamed, err := prefixed.ListTools(ctx, "default", nil)
 	require.NoError(t, err)
 	require.Len(t, renamed, 1)
 	assert.Equal(t, "xyz__echo", renamed[0].GetToolDescriptor().ToolUnion.OfFunction.Name)
 
 	assert.Equal(t, 1, lists(), "one listing served all three")
-	assert.Equal(t, []string{"mcp:schema:cached"}, cache.keys())
+	assert.Equal(t, []string{`mcp:schema:"":"cached"`}, cache.keys())
 }
 
 // The key is the connector's name, so a server that moves keeps its entry
@@ -248,10 +245,10 @@ func TestCacheKeyFollowsTheConnectorName(t *testing.T) {
 	cache := newMemCache()
 
 	client := cachingClient(t, url, cache)
-	_, err := client.ListTools(context.Background(), nil)
+	_, err := client.ListTools(context.Background(), "default", nil)
 	require.NoError(t, err)
 
-	assert.Equal(t, []string{"mcp:schema:cached"}, cache.keys())
+	assert.Equal(t, []string{`mcp:schema:"":"cached"`}, cache.keys())
 }
 
 func TestZeroServerTTLUsesLocalOverrideOrBypassesCache(t *testing.T) {
@@ -260,9 +257,9 @@ func TestZeroServerTTLUsesLocalOverrideOrBypassesCache(t *testing.T) {
 			t.Run(scope+"/"+ttl.String(), func(t *testing.T) {
 				url, lists := cacheableServer(t, 0, scope)
 				cache := newMemCache()
-				client := cachingClient(t, url, cache, WithCacheTTL(ttl))
+				client := cachingClient(t, url, cache, withCacheTTL(ttl))
 				for range 2 {
-					tools, err := client.ListTools(context.Background(), nil)
+					tools, err := client.ListTools(context.Background(), "default", nil)
 					require.NoError(t, err)
 					require.Len(t, tools, 1)
 				}
@@ -280,7 +277,7 @@ func TestZeroServerTTLUsesLocalOverrideOrBypassesCache(t *testing.T) {
 					data, err = json.Marshal(entry)
 					require.NoError(t, err)
 					require.NoError(t, cache.Set(context.Background(), cache.keys()[0], data, time.Minute))
-					_, err = client.ListTools(context.Background(), nil)
+					_, err = client.ListTools(context.Background(), "default", nil)
 					require.NoError(t, err)
 					assert.Equal(t, 2, lists(), "local TTL override must still expire")
 				} else {
@@ -297,9 +294,9 @@ func TestLegacyServerRetainsCacheTTLFallback(t *testing.T) {
 		t.Run(ttl.String(), func(t *testing.T) {
 			url, lists := cacheableServer(t, 0, "", "2025-11-25")
 			cache := newMemCache()
-			client := cachingClient(t, url, cache, WithCacheTTL(ttl))
+			client := cachingClient(t, url, cache, withCacheTTL(ttl))
 			for range 2 {
-				_, err := client.ListTools(context.Background(), nil)
+				_, err := client.ListTools(context.Background(), "default", nil)
 				require.NoError(t, err)
 			}
 			if ttl > 0 {
@@ -326,18 +323,18 @@ func TestSchemaCacheSharesKVWithSkills(t *testing.T) {
 	url, lists := cacheableServer(t, time.Minute, cacheScopePublic)
 	client := cachingClient(t, url, shared)
 	for range 2 {
-		_, err = client.ListTools(ctx, nil)
+		_, err = client.ListTools(ctx, "default", nil)
 		require.NoError(t, err)
 	}
 	require.Equal(t, 1, lists())
-	require.NoError(t, client.InvalidateToolCache(ctx, nil))
+	require.NoError(t, client.InvalidateToolCache(ctx, "default", nil))
 	require.Equal(t, skillKeys, shared.keys())
 	// Malformed data is treated as a miss and replaced with a serialized entry.
-	require.NoError(t, shared.Set(ctx, "mcp:schema:cached", []byte("broken JSON"), time.Minute))
-	_, err = client.ListTools(ctx, nil)
+	require.NoError(t, shared.Set(ctx, `mcp:schema:"":"cached"`, []byte("broken JSON"), time.Minute))
+	_, err = client.ListTools(ctx, "default", nil)
 	require.NoError(t, err)
 	require.Equal(t, 2, lists())
-	data, found, err := shared.Get(ctx, "mcp:schema:cached")
+	data, found, err := shared.Get(ctx, `mcp:schema:"":"cached"`)
 	require.NoError(t, err)
 	require.True(t, found)
 	var entry CachedToolEntry
@@ -365,10 +362,10 @@ func TestDefaultCacheScope(t *testing.T) {
 			url, lists := cacheableServer(t, time.Minute, tc.serverScope, versions...)
 			cache := newMemCache()
 			client := cachingClient(t, url, cache,
-				WithDefaultCacheScope(tc.fallback), WithCacheTTL(time.Minute),
-				WithCredentialProvider(keyed(&stubProvider{tokens: map[string]string{"cached/ada": "a", "cached/grace": "g"}})))
+				withDefaultCacheScope(tc.fallback), withCacheTTL(time.Minute),
+				withCredentials(keyed(&stubProvider{tokens: map[string]string{"cached/ada": "a", "cached/grace": "g"}})))
 			for _, user := range []string{"ada", "grace", "ada"} {
-				_, err := client.ListTools(t.Context(), map[string]any{"user": user})
+				_, err := client.ListTools(t.Context(), "default", map[string]any{"user": user})
 				require.NoError(t, err)
 			}
 			require.Equal(t, tc.wantFetches, lists())
@@ -380,16 +377,16 @@ func TestDefaultCacheScope(t *testing.T) {
 func TestDefaultCacheScopeDoesNotTrustAnotherClientsFallback(t *testing.T) {
 	url, lists := cacheableServer(t, 0, "", "2025-11-25")
 	cache := newMemCache()
-	makeClient := func(scope string) *MCPClient {
-		return cachingClient(t, url, cache, WithDefaultCacheScope(scope), WithCacheTTL(time.Minute),
-			WithCredentialProvider(keyed(&stubProvider{tokens: map[string]string{"cached/ada": "a", "cached/grace": "g"}})))
+	makeClient := func(scope string) *server {
+		return cachingClient(t, url, cache, withDefaultCacheScope(scope), withCacheTTL(time.Minute),
+			withCredentials(keyed(&stubProvider{tokens: map[string]string{"cached/ada": "a", "cached/grace": "g"}})))
 	}
 	public := makeClient(CacheScopePublic)
-	_, err := public.ListTools(t.Context(), map[string]any{"user": "ada"})
+	_, err := public.ListTools(t.Context(), "default", map[string]any{"user": "ada"})
 	require.NoError(t, err)
 	private := makeClient(CacheScopePrivate)
 	for range 2 {
-		_, err = private.ListTools(t.Context(), map[string]any{"user": "grace"})
+		_, err = private.ListTools(t.Context(), "default", map[string]any{"user": "grace"})
 		require.NoError(t, err)
 	}
 	require.Equal(t, 2, lists(), "private client must fetch its own list, then reuse its private entry")
@@ -397,9 +394,9 @@ func TestDefaultCacheScopeDoesNotTrustAnotherClientsFallback(t *testing.T) {
 }
 
 func TestDefaultCacheScopeValidation(t *testing.T) {
-	_, err := NewClient(t.Context(), "test", "http://localhost", WithDefaultCacheScope("publci"))
+	_, err := newServer(t.Context(), "test", "http://localhost", withDefaultCacheScope("publci"))
 	require.ErrorContains(t, err, "invalid default MCP cache scope")
-	client, err := NewClient(t.Context(), "test", "http://localhost", WithDefaultCacheScope(CacheScopePublic))
+	client, err := newServer(t.Context(), "test", "http://localhost", withDefaultCacheScope(CacheScopePublic))
 	require.NoError(t, err)
 	require.False(t, client.shareable("unknown"), "an unknown explicit scope must not use the fallback")
 }
@@ -407,9 +404,9 @@ func TestDefaultCacheScopeValidation(t *testing.T) {
 func TestPublicDefaultCacheScopeStillNeedsTTL(t *testing.T) {
 	url, lists := cacheableServer(t, 0, "", "2025-11-25")
 	cache := newMemCache()
-	client := cachingClient(t, url, cache, WithDefaultCacheScope(CacheScopePublic))
+	client := cachingClient(t, url, cache, withDefaultCacheScope(CacheScopePublic))
 	for range 2 {
-		_, err := client.ListTools(t.Context(), nil)
+		_, err := client.ListTools(t.Context(), "default", nil)
 		require.NoError(t, err)
 	}
 	require.Equal(t, 2, lists())

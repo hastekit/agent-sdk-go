@@ -3,13 +3,13 @@ package restate_runtime
 import (
 	"context"
 	"encoding/json"
+	"github.com/hastekit/agent-sdk-go/pkg/agents/mcpclient"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
-	"github.com/hastekit/agent-sdk-go/pkg/agents/mcpclient"
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
 	"github.com/stretchr/testify/require"
 )
@@ -23,11 +23,14 @@ func TestMCPMetaTemplatesInsideStepBody(t *testing.T) {
 	})
 	hs := httptest.NewServer(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, nil))
 	t.Cleanup(func() { hs.CloseClientConnections(); hs.Close() })
-	client, err := mcpclient.NewClient(t.Context(), t.Name(), hs.URL, mcpclient.WithTransport(mcpclient.TransportStreamableHTTP), mcpclient.WithMeta(map[string]any{"thread_id": "{{thread_id}}", "run_id": "{{run_id}}"}))
-	require.NoError(t, err)
-	tool := NewRestateMCPTool(nil, client, map[string]any{"run_id": "run", "thread_id": "thread"}, agents.BaseTool{Name: "echo"}, nil)
-	result, err := tool.execute(t.Context(), &agents.ToolCall{
-		ThreadID: "thread", FunctionCallMessage: &responses.FunctionCallMessage{Name: "echo", Arguments: "{}"},
+	client := mcpclient.NewClient(mcpclient.NewMemoryStore().WithMCPServerConfig([]mcpclient.ServerConfig{{Name: t.Name(),
+		Endpoint:  hs.URL,
+		Transport: mcpclient.TransportStreamableHTTP,
+		Meta:      map[string]any{"thread_id": "{{thread_id}}", "run_id": "{{run_id}}"}}}))
+	wrapper := NewRestateMCPClient(nil, client, nil)
+	result, err := wrapper.executeTool(t.Context(), &agents.BaseTool{Name: "echo", MCPServerName: t.Name()}, &agents.ToolCall{
+		ThreadID: "thread", RunContext: map[string]any{"run_id": "run", "thread_id": "thread"},
+		FunctionCallMessage: &responses.FunctionCallMessage{Name: "echo", Arguments: "{}"},
 	})
 	require.NoError(t, err)
 	require.Contains(t, *result.Output.OfString, `"thread_id":"thread"`)

@@ -34,7 +34,7 @@ func TestToolPrefixIsUsedVerbatim(t *testing.T) {
 // The model sees the prefixed name; the tool keeps the server's own name, which
 // is what the call is finally made under.
 func TestToolPrefixKeepsBothNames(t *testing.T) {
-	srv := &MCPClient{ToolPrefix: "xyz__"}
+	srv := &server{ToolPrefix: "xyz__"}
 
 	tools := srv.buildLazyTools([]*mcp.Tool{{Name: "search"}, {Name: "book"}}, nil, serverConn{})
 
@@ -47,7 +47,7 @@ func TestToolPrefixKeepsBothNames(t *testing.T) {
 // The filter, approval and deferred lists are written against the server's own
 // tool names. Adding a prefix must not silently empty them out.
 func TestToolPrefixKeepsUnprefixedOptionsWorking(t *testing.T) {
-	srv := &MCPClient{
+	srv := &server{
 		ToolPrefix:            "xyz__",
 		ToolFilter:            ToolFilter{Include: []string{"search", "book"}},
 		ApprovalRequiredTools: []string{"book"},
@@ -71,7 +71,7 @@ func TestToolPrefixKeepsUnprefixedOptionsWorking(t *testing.T) {
 // The same lists against a client with no prefix — the path every existing
 // caller is on.
 func TestOptionsWithoutToolPrefix(t *testing.T) {
-	srv := &MCPClient{
+	srv := &server{
 		ToolFilter:            ToolFilter{Include: []string{"search", "book"}},
 		ApprovalRequiredTools: []string{"book"},
 		DeferredTools:         &ToolFilter{Include: []string{"search"}},
@@ -90,7 +90,7 @@ func TestOptionsWithoutToolPrefix(t *testing.T) {
 // The "defer everything" wildcard is not a tool name, so a prefix leaves it
 // alone.
 func TestToolPrefixKeepsDeferredWildcard(t *testing.T) {
-	srv := &MCPClient{ToolPrefix: "xyz__", DeferredTools: &ToolFilter{Include: []string{"*"}}}
+	srv := &server{ToolPrefix: "xyz__", DeferredTools: &ToolFilter{Include: []string{"*"}}}
 
 	tools := srv.buildLazyTools([]*mcp.Tool{{Name: "search"}, {Name: "book"}}, nil, serverConn{})
 
@@ -212,15 +212,15 @@ func TestToolPrefixCallsServerUnderItsOwnName(t *testing.T) {
 	url, namesSeen := echoServer(t)
 
 	ctx := context.Background()
-	client, err := NewClient(ctx, "prefix", url,
-		WithTransport("streamable-http"),
-		WithToolPrefix("xyz__"),
+	client, err := newServer(ctx, "prefix", url,
+		withTransport("streamable-http"),
+		withToolPrefix("xyz__"),
 	)
 	require.NoError(t, err)
 
 	// The model-facing path: whatever ListTools advertised is what comes back as
 	// the call's name.
-	tools, err := client.ListTools(ctx, nil)
+	tools, err := client.ListTools(ctx, "default", nil)
 	require.NoError(t, err)
 	require.Len(t, tools, 1)
 	require.Equal(t, "xyz__echo", tools[0].GetToolDescriptor().ToolUnion.OfFunction.Name)
@@ -248,12 +248,12 @@ func TestSchemaCacheIsSharedAcrossPrefixes(t *testing.T) {
 	cache := newMemCache()
 
 	ctx := context.Background()
-	newPrefixed := func(prefix string) *MCPClient {
-		opts := []McpServerOption{WithTransport("streamable-http"), WithSchemaCache(cache)}
+	newPrefixed := func(prefix string) *server {
+		opts := []serverOption{withTransport("streamable-http"), withSchemaCache(cache)}
 		if prefix != "" {
-			opts = append(opts, WithToolPrefix(prefix))
+			opts = append(opts, withToolPrefix(prefix))
 		}
-		client, err := NewClient(ctx, "prefix", url, opts...)
+		client, err := newServer(ctx, "prefix", url, opts...)
 		require.NoError(t, err)
 		return client
 	}
@@ -262,7 +262,7 @@ func TestSchemaCacheIsSharedAcrossPrefixes(t *testing.T) {
 		client := newPrefixed(prefix)
 
 		for pass := range 2 { // the second pass reads the cache
-			tools, err := client.ListTools(ctx, nil)
+			tools, err := client.ListTools(ctx, "default", nil)
 			require.NoError(t, err)
 			require.Len(t, tools, 1)
 
@@ -287,7 +287,7 @@ func TestCallToolDirectNeedsTheTool(t *testing.T) {
 	url, namesSeen := echoServer(t)
 
 	ctx := context.Background()
-	client, err := NewClient(ctx, "prefix", url, WithTransport("streamable-http"), WithToolPrefix("xyz__"))
+	client, err := newServer(ctx, "prefix", url, withTransport("streamable-http"), withToolPrefix("xyz__"))
 	require.NoError(t, err)
 
 	_, err = client.CallToolDirect(ctx, nil, nil, echoCall("xyz__echo"))

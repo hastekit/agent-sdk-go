@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/hastekit/agent-sdk-go/internal/testutil"
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/attachments"
 	agentmiddleware "github.com/hastekit/agent-sdk-go/pkg/agents/middleware"
@@ -27,7 +28,7 @@ func (*transformMediaTool) Execute(context.Context, *agents.ToolCall) (*agents.T
 type transformMediaToolset struct{ tool agents.Tool }
 
 func (*transformMediaToolset) GetName() string { return "media" }
-func (t *transformMediaToolset) ListTools(context.Context, map[string]any) ([]agents.Tool, error) {
+func (t *transformMediaToolset) ListTools(context.Context, string, map[string]any) ([]agents.Tool, error) {
 	return []agents.Tool{t.tool}, nil
 }
 
@@ -44,8 +45,11 @@ func TestRestateRunBodiesReturnReferences(t *testing.T) {
 	homeless := *call
 	homeless.Namespace = ""
 	local := NewRestateTool(nil, tool, nil, middleware)
-	mcp := NewRestateMCPTool(nil, &transformMediaToolset{tool: tool}, nil, *tool.BaseTool, nil, middleware)
-	for _, execute := range []func(context.Context, *agents.ToolCall) (*agents.ToolCallResponse, error){local.execute, mcp.execute} {
+	mcp := NewRestateMCPClient(nil, testutil.NewMCPClient(&transformMediaToolset{tool: tool}), nil, middleware)
+	executeMCP := func(ctx context.Context, call *agents.ToolCall) (*agents.ToolCallResponse, error) {
+		return mcp.executeTool(ctx, tool.BaseTool, call)
+	}
+	for _, execute := range []func(context.Context, *agents.ToolCall) (*agents.ToolCallResponse, error){local.execute, executeMCP} {
 		result, err := execute(ctx, call)
 		require.NoError(t, err)
 		bytes, err := json.Marshal(result)

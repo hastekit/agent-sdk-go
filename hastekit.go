@@ -32,7 +32,7 @@ type AgentConfig struct {
 	Output        map[string]any
 	Tools         []Tool
 	Handoffs      []*agents.Handoff
-	McpServers    []agents.MCPToolset
+	MCPClient     agents.MCPClient
 	MaxLoops      *int
 	History       *history.CommonConversationManager
 	Instruction   agents.SystemPromptProvider
@@ -54,7 +54,7 @@ func (ac *AgentConfig) toAgentOptions() *agents.AgentOptions {
 		Output:        ac.Output,
 		Tools:         ac.Tools,
 		Handoffs:      ac.Handoffs,
-		McpServers:    ac.McpServers,
+		MCPClient:     ac.MCPClient,
 		MaxLoops:      ac.MaxLoops,
 		History:       ac.History,
 		Instruction:   ac.Instruction,

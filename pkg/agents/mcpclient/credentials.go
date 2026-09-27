@@ -7,7 +7,7 @@ import (
 	"golang.org/x/oauth2"
 )
 
-// A per-run credential reaches an MCP server one of two ways. WithHeaders
+// A per-run credential reaches an MCP server one of two ways. withHeaders
 // templates a value out of the run context, which is enough when the run
 // already carries the token. A CredentialProvider is for when it does not —
 // when the token has to be fetched from a store, minted, or refreshed, and
@@ -28,8 +28,11 @@ import (
 // a store keyed by resource URI would otherwise have to keep its own map from
 // one to the other, duplicating configuration that already lives here.
 type Connector struct {
-	Name     string
-	Endpoint string
+	// Namespace identifies the configuration scope; empty means global.
+	Namespace     string
+	Name          string
+	Endpoint      string
+	Authorization *OAuthConfig
 }
 
 // Credential is what a provider resolved for one connector on one run: where
@@ -77,37 +80,32 @@ type Credential struct {
 // CredentialProvider resolves the access token for one MCP server.
 //
 // Resolve is called once per tool call — and once per listing — with the
-// connector being reached and that run's context, so one provider serves every
-// server an agent has and can return a different credential for each, per user.
+// execution namespace, connector, and run context. Namespace is a separate,
+// authoritative user/subject identifier; do not derive it from runContext.
+//
+// A connector with a non-empty Namespace is a user-owned definition whose
+// endpoint the user chose. The client only calls a provider for one when it
+// carries its own Authorization (OAuth); never return application-held tokens
+// for such a connector.
 //
 // Returning nil, or a Credential with no TokenSource, means "no auth".
 //
 // Only the http transports present a token. A stdio server is a child process
-// with no request to put a header on; give it credentials through WithEnv.
+// with no request to put a header on; give it credentials through withEnv.
 type CredentialProvider interface {
-	Resolve(ctx context.Context, connector Connector, runContext map[string]any) (*Credential, error)
+	Resolve(ctx context.Context, namespace string, connector Connector, runContext map[string]any) (*Credential, error)
 }
 
 // CredentialProviderFn adapts a function to CredentialProvider.
-type CredentialProviderFn func(ctx context.Context, connector Connector, runContext map[string]any) (*Credential, error)
+type CredentialProviderFn func(ctx context.Context, namespace string, connector Connector, runContext map[string]any) (*Credential, error)
 
-func (f CredentialProviderFn) Resolve(ctx context.Context, connector Connector, runContext map[string]any) (*Credential, error) {
-	return f(ctx, connector, runContext)
+func (f CredentialProviderFn) Resolve(ctx context.Context, namespace string, connector Connector, runContext map[string]any) (*Credential, error) {
+	return f(ctx, namespace, connector, runContext)
 }
 
-// WithCredentialProvider sets where this server's access token comes from.
-//
-//	mcpclient.NewClient(ctx, "calendar", endpoint,
-//		mcpclient.WithTransport(mcpclient.TransportStreamableHTTP),
-//		mcpclient.WithCredentialProvider(myTokenStore),
-//	)
-//
-// A provider that returns a Credential with no Principal gets a fresh
-// connection per call rather than a pooled one — see Credential.Principal.
-func WithCredentialProvider(provider CredentialProvider) McpServerOption {
-	return func(srv *MCPClient) {
-		srv.credentials = provider
-	}
+// withCredentials installs the provider selected by the aggregate client.
+func withCredentials(provider CredentialProvider) serverOption {
+	return func(server *server) { server.credentials = provider }
 }
 
 // credentialsFor resolves this run's credentials for this server, unpacked into
@@ -119,16 +117,16 @@ func WithCredentialProvider(provider CredentialProvider) McpServerOption {
 // activity or step — never in the workflow. That is deliberate. A workflow
 // journals what it sees, so a token resolved there would be written into
 // history and replayed from it; resolving here means the workflow only ever
-// carries the run context that names the user, and the token is fetched fresh
+// carries the namespace and run context, and the token is fetched fresh
 // on each attempt.
-func (srv *MCPClient) credentialsFor(ctx context.Context, runContext map[string]any) (oauth2.TokenSource, string, error) {
+func (srv *server) credentialsFor(ctx context.Context, namespace string, runContext map[string]any) (oauth2.TokenSource, string, error) {
 	if srv.credentials == nil {
 		return nil, "", nil
 	}
 
-	connector := Connector{Name: srv.Name, Endpoint: srv.Endpoint}
+	connector := Connector{Name: srv.Name, Endpoint: srv.Endpoint, Namespace: srv.namespace, Authorization: srv.authorization}
 
-	cred, err := srv.credentials.Resolve(ctx, connector, runContext)
+	cred, err := srv.credentials.Resolve(ctx, namespace, connector, runContext)
 	if err != nil {
 		return nil, "", fmt.Errorf("mcp: resolving credentials for %q: %w", srv.Name, err)
 	}

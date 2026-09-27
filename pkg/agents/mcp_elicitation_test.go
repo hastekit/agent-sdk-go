@@ -6,9 +6,9 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/hastekit/agent-sdk-go/pkg/agents/mcpclient"
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/agentstate"
-	"github.com/hastekit/agent-sdk-go/pkg/agents/mcpclient"
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
@@ -61,17 +61,17 @@ func bookSeatServer(t *testing.T) string {
 func TestAgentLoop_MCPElicitationPausesRun(t *testing.T) {
 	endpoint := bookSeatServer(t)
 
-	toolset, err := mcpclient.NewClient(context.Background(), "elicit", endpoint,
-		mcpclient.WithTransport("streamable-http"))
-	require.NoError(t, err)
+	toolset := mcpclient.NewClient(mcpclient.NewMemoryStore().WithMCPServerConfig([]mcpclient.ServerConfig{{Name: "elicit",
+Endpoint: endpoint,
+Transport: "streamable-http"}}))
 
 	llm := &scriptedLLM{script: []*responses.Response{
 		toolCallResponse("call_book", "book_seat", `{"flight_no":"TP1234"}`),
 		textResponse("all set"),
 	}}
 	agent := agents.NewAgent(&agents.AgentOptions{
-		Name:       "atlas",
-		McpServers: []agents.MCPToolset{toolset},
+		Name:      "atlas",
+		MCPClient: toolset,
 	}).WithLLM(llm)
 
 	out := runAgent(t, agent, &agents.AgentInput{

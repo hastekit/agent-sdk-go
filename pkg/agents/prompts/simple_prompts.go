@@ -244,8 +244,9 @@ func ResolveDeferredTools(prompt string, deps *agents.Dependencies) (string, err
 
 // ResolveConnectors appends what each of the agent's MCP connectors is good
 // for this run: the ones that connected and how many tools they brought, and
-// the ones that did not and why.
+// the ones that did not and why. The MCP client supplies only enabled connectors.
 func ResolveConnectors(prompt string, deps *agents.Dependencies) (string, error) {
+	// Leave the prompt unchanged when discovery contributed no connector statuses.
 	if len(deps.Connectors) == 0 {
 		return prompt, nil
 	}

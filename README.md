@@ -714,139 +714,92 @@ Human-in-the-loop: when a run pauses for tool approval, the stream emits a `CUST
 
 #### MCP Tools Integration
 
-Connect to MCP servers for access to standardized tools:
+Define MCP servers through configuration stores and give one client to the agent:
 
 ```go
-import "github.com/hastekit/agent-sdk-go/pkg/agents/mcpclient"
-
-// Connect to MCP server
-mcpClient, err := mcpclient.NewClient(
-    context.Background(),
-    "sample"
-    "http://localhost:9001/sse",
-    mcpclient.WithTransport("sse"), // or "streamable-http"
-    mcpclient.WithHeaders(map[string]string{
-        "Authorization": "Bearer token",
-    }),
-    mcpclient.WithToolFilter(mcpclient.ToolFilter{Include: []string{"list_users", "get_user"}}), // Optional: filter tools
-)
+store, err := mcpclient.NewFileStore("./data/mcp-config.json")
 if err != nil {
     log.Fatal(err)
 }
 
-// Create agent with MCP tools
+// Inline definitions are developer-owned and do not modify the persisted file.
+store = store.WithMCPServerConfig([]mcpclient.ServerConfig{{
+    Name: "sample", Endpoint: "http://localhost:9001/sse", Transport: "sse",
+    ToolPrefix: "sample__",
+    ToolFilter: mcpclient.ToolFilter{Include: []string{"list_users", "get_user"}},
+    Meta: map[string]any{"thread_id": "{{thread_id}}", "run_id": "{{run_id}}"},
+}})
+
 agent := hastekit.MustNewAgent(&hastekit.AgentConfig{
-    Name:        "MCP Agent",
+    Name: "MCP Agent", LLM: model,
     Instruction: hastekit.NewPrompt("You are a helpful assistant."),
-    LLM:         model,
-    McpServers:  []agents.MCPToolset{mcpClient},
+    MCPClient: mcpclient.NewClient(store),
 })
 ```
 
-For older MCP servers that omit `cacheScope`, configure a fallback alongside
-your schema cache and TTL:
+`NewClient(storeA, storeB)` supports multiple sources. Use `NewMemoryStore()` for
+in-memory definitions or implement `MCPServerConfigStore` for database storage.
+Stores receive the execution namespace and run context. Globals are developer-owned;
+namespace-scoped records belong to users. Per-run server/tool selection is provided
+through `AgentInput.MCP`. Discovery returns tools and connector statuses for the prompt.
 
-```go
-mcpclient.WithSchemaCache(cache),
-mcpclient.WithCacheTTL(5 * time.Minute),
-mcpclient.WithDefaultCacheScope(mcpclient.CacheScopePublic),
-```
+See [MCP configuration stores](pkg/agents/mcpclient/CATALOG.md) for store composition,
+selection, caching, and connector management APIs.
 
-Use `CacheScopePublic` only when all users see the same tool list. The default
-is `CacheScopePrivate` (per requester). Explicit server scopes take precedence;
-this option only applies when `cacheScope` is absent. A positive server TTL or
-`WithCacheTTL` is still required for caching.
+- `ToolFilter` accepts Include/Exclude lists of original server tool names. An empty
+  Include allows all tools; Exclude wins.
+- `DeferredTools: &mcpclient.ToolFilter{Exclude: []string{"search"}}` defers all
+  exposed tools except `search`. A nil DeferredTools leaves every tool available.
+- `ToolPrefix: "fs__"` exposes `read_file` as `fs__read_file`; filters and approval
+  lists still use original tool names.
+- `CacheTTLSeconds` and `DefaultCacheScope` configure discovery caching. Supply a
+  cache with `client.WithSchemaCache(cache)`. Use public scope only when all users
+  see the same tools; private is the default when the server omits its scope.
 
 #### Per-call MCP metadata
 
-Use `WithMeta` for changing request context such as thread and run IDs.
-String values use the same `{{key}}` templates as headers, resolved against
-`ToolCall.RunContext` immediately before each tool execution:
+`ServerConfig.Meta` supports nested `{{key}}` string templates resolved from
+`ToolCall.RunContext` immediately before execution. Use it for changing thread/run
+IDs instead of headers: metadata does not affect connection or schema cache keys.
+The MCP server reads `req.Params.Meta`. Resolution happens inside Temporal
+activities or Restate steps, so retries use the persisted run context.
+
+#### MCP servers over stdio
+
+Developer-owned configs can start an MCP process on demand:
 
 ```go
-mcpclient.WithMeta(map[string]any{
-    "hastekit.ai/context": map[string]any{
-        "thread_id": "{{thread_id}}",
-        "run_id":    "{{run_id}}",
-    },
-    "source": "agent", // static values are also supported
-})
+store := mcpclient.NewMemoryStore().WithMCPServerConfig([]mcpclient.ServerConfig{{
+    Name: "filesystem", Transport: mcpclient.TransportStdio,
+    Command: []string{"npx", "-y", "@modelcontextprotocol/server-filesystem", "/tmp"},
+    Env: map[string]string{"WORKSPACE": "{{workspace}}"},
+    ToolPrefix: "fs__",
+}})
+client := mcpclient.NewClient(store)
 ```
 
-Supply `thread_id` and `run_id` in your run context. Nested maps and arrays are
-resolved recursively; non-string JSON values keep their types. The MCP server
-reads the values from `req.Params.Meta`. They are request metadata, not tool
-arguments, and do not affect connection or schema cache keys. Resolved values
-never enter cached schemas or tool descriptors. SDK-generated progress tokens
-take precedence over a configured `progressToken`.
+The child process inherits the host environment plus configured values. Filters,
+approvals, deferral, prefixes, and caching work across transports.
 
-Metadata is resolved inside the Temporal tool activity or Restate run step,
-using the call's persisted run context. Completed activities/steps replay their
-recorded results; retries resolve the templates again from those inputs. Keep
-authentication and values that determine tool visibility in credentials or headers.
+#### User connectors and OAuth
 
-`WithToolFilter` accepts a `ToolFilter` with `Include` and `Exclude` lists.
-An empty `Include` allows all tools; `Exclude` takes precedence when a name
-appears in both lists. Names match exactly against the server's original names,
-before any tool prefix is applied. To expose all tools except specific ones:
+`mcpclient.NewHandler(store, ...)` lists visible connectors and lets users save or
+delete their namespace-owned HTTP configs. `ServerConfig.Authorization` contains
+OAuth application settings. A shared `OAuthCredentialProvider` resolves and refreshes
+tokens stored by **namespace + `OAuthCredentialKey`** (owner, server name, and OAuth
+client), without a separate server registry.
 
 ```go
-mcpclient.WithToolFilter(mcpclient.ToolFilter{Exclude: []string{"delete_user"}})
-```
-
-`WithDeferredTools` also accepts a `ToolFilter`. It selects exposed tools that
-require discovery through `ToolSearch`. Excluded tools remain directly available
-to the model from the first call. To defer all tools except `search`:
-
-```go
-mcpclient.WithDeferredTools(mcpclient.ToolFilter{
-    Include: []string{"*"},
-    Exclude: []string{"search"},
-})
-```
-
-Without `WithDeferredTools`, no tools are deferred. When the option is supplied,
-an empty `Include` selects all exposed tools; `Exclude` takes precedence. Names
-match before prefixes are applied. `"*"` matches all tools in either deferral list.
-`WithToolFilter` still removes tools entirely, regardless of deferral settings.
-Replace previous calls such as `WithDeferredTools("search")` with
-`WithDeferredTools(mcpclient.ToolFilter{Include: []string{"search"}})`.
-
-#### MCP Servers over stdio
-
-Many MCP servers ship as a command rather than a URL. `WithCommand` runs one as a
-child process and speaks to it over stdin/stdout — there is nothing to deploy, and
-the process is started on demand and reused across tool calls:
-
-```go
-mcpClient, err := mcpclient.NewClient(context.Background(), "filesystem", "", // no endpoint
-    mcpclient.WithCommand("npx", "-y", "@modelcontextprotocol/server-filesystem", "/tmp"),
-    mcpclient.WithEnv(map[string]string{
-        "GITHUB_TOKEN": "{{github_token}}", // templated from the run context
-    }),
+client := mcpclient.NewClient(store).WithCredentials(provider)
+handler := web.Handler(registry,
+    agui.WithNamespaceResolver(authenticatedNamespace),
+    agui.WithMCPStore(store, mcpclient.WithOAuth(provider)),
 )
 ```
 
-`WithCommand` selects the stdio transport on its own. The environment is added to
-the one the host process already has, so the command stays findable on `PATH`.
-
-Everything else is transport-agnostic: `WithToolFilter`, `WithApprovalRequiredTools`,
-`WithDeferredTools`, `WithToolPrefix`, and the schema cache all behave the same
-whichever transport carries the server.
-
-#### Namespacing Tools from Several Servers
-
-Two servers that both publish a `search` would collide in the single list of names
-the model chooses from. `WithToolPrefix` namespaces one server's tools in the name
-the model sees, while calls are still made on the server under its own name:
-
-```go
-mcpclient.WithToolPrefix("fs__") // exposes "read_file" as "fs__read_file"
-```
-
-The prefix is used verbatim, separator included — pass `"fs__"`, not `"fs"`. Tool
-filters, approval, and deferred lists are written against the server's own names,
-so adding a prefix does not change them.
+The web routes live under `/api/agui/mcp`; OAuth connect/callback routes read settings
+from the store even before the first agent run. See [persisted MCP credentials and
+Gmail setup](pkg/agents/mcpclient/OAUTH.md) and `samples/new/main.go`.
 
 #### Tool Annotations
 

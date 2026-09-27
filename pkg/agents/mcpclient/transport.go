@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
@@ -95,9 +97,15 @@ type mcpRoundTripper struct {
 	tokens  oauth2.TokenSource
 	auth    *authStatus
 	base    http.RoundTripper
+	origin  *url.URL
 }
 
 func (h *mcpRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	// User servers cannot redirect credentials or advertise SSE endpoints at another origin.
+	if h.origin != nil && (req.URL.Scheme != h.origin.Scheme || !strings.EqualFold(req.URL.Host, h.origin.Host)) {
+		return nil, fmt.Errorf("user MCP requests must stay on the configured origin")
+	}
+
 	if len(h.headers) > 0 || h.tokens != nil {
 		req = req.Clone(req.Context())
 		for k, v := range h.headers {
@@ -137,10 +145,18 @@ func (h *mcpRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 func newHTTPClient(conn serverConn) (*http.Client, *authStatus) {
 	auth := &authStatus{}
 	rt := &mcpRoundTripper{headers: conn.Headers, tokens: conn.TokenSource, auth: auth}
-	return &http.Client{Transport: rt}, auth
+	client := &http.Client{Transport: rt}
+
+	// The definition's owner determines policy; a global server can still run for any user.
+	if conn.Namespace != "" {
+		rt.base = publicRoundTripper{base: userHTTPTransport}
+		rt.origin, _ = url.Parse(conn.Endpoint)
+		client.CheckRedirect = sameOriginRedirect
+	}
+	return client, auth
 }
 
-// Transport names accepted by WithTransport.
+// Transport names accepted by withTransport.
 const (
 	TransportSSE            = "sse"
 	TransportStreamableHTTP = "streamable-http"
@@ -159,7 +175,7 @@ const (
 // SSE stream on the streamable-http transport. We only do request/response
 // tool calls, so the stream is unused; some servers never answer that GET,
 // leaving the client hung waiting on a stream that never opens. Callers
-// opt those servers out via WithDisableStandaloneSSE.
+// opt those servers out via withDisableStandaloneSSE.
 //
 // ctx bounds a stdio server's process: it is killed when ctx is done. The pool
 // connects on context.Background() for exactly that reason — see Checkout.

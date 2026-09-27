@@ -33,7 +33,7 @@ type Agent struct {
 	history              *history.CommonConversationManager
 	instruction          SystemPromptProvider
 	tools                []Tool
-	mcpServers           []MCPToolset
+	mcpClient            MCPClient
 	llm                  LLM
 	parameters           responses.Parameters
 	runtime              Runtime
@@ -73,7 +73,7 @@ type AgentOptions struct {
 
 	// Skills are listed once per run; enabled skills share the read_skill tool.
 	Skills        []SkillSet
-	McpServers    []MCPToolset
+	MCPClient     MCPClient
 	Runtime       Runtime
 	MaxLoops      *int
 	ToolExecutor  ToolExecutor
@@ -181,7 +181,7 @@ func NewAgent(opts *AgentOptions) *Agent {
 		instruction:          instruction,
 		tools:                slices.Clone(opts.Tools),
 		skillSets:            slices.Clone(opts.Skills),
-		mcpServers:           opts.McpServers,
+		mcpClient:            opts.MCPClient,
 		llm:                  &WrappedLLM{opts.LLM},
 		parameters:           opts.Parameters,
 		runtime:              opts.Runtime,
@@ -228,38 +228,13 @@ func (e *Agent) WithLLM(wrappedLLM LLM) *Agent {
 	return &clone
 }
 
-// PrepareMCPTools lists every configured MCP server's tools, and reports how
-// each one fared.
-//
-// A server that cannot be listed does not fail the run: its tools are left out
-// and its ConnectorStatus says why, for the prompt to pass on. One unreachable
-// server would otherwise take down a run that had every other tool it needed —
-// and, once an MCP server can ask the user to authorize it, a run that has not
-// been authorized yet is the ordinary first case, not an error.
-//
-// The statuses come back in configuration order, and there is one per server
-// whether it connected or not.
-func (e *Agent) PrepareMCPTools(ctx context.Context, runContext map[string]any) ([]Tool, []ConnectorStatus) {
-	coreTools := []Tool{}
-	var connectors []ConnectorStatus
-
-	for _, mcpServer := range e.mcpServers {
-		mcpTools, err := mcpServer.ListTools(ctx, runContext)
-		if err != nil {
-			status := failedStatus(mcpServer.GetName(), err)
-			slog.WarnContext(ctx, "MCP connector did not list its tools; continuing without them",
-				slog.String("connector", status.Name),
-				slog.String("kind", string(status.Kind)),
-				slog.String("error", err.Error()))
-			connectors = append(connectors, status)
-			continue
-		}
-
-		connectors = append(connectors, connectedStatus(mcpServer.GetName(), len(mcpTools)))
-		coreTools = append(coreTools, mcpTools...)
+// PrepareMCPTools delegates discovery and selection to the agent's configured MCP client.
+func (e *Agent) PrepareMCPTools(ctx context.Context, in *AgentInput) ([]ConnectorStatus, []Tool, error) {
+	if e.mcpClient == nil {
+		return nil, nil, nil
 	}
 
-	return coreTools, connectors
+	return e.mcpClient.ListTools(ctx, in.Namespace, in.RunContext, in.MCP)
 }
 
 // AddHandoffs appends handoff edges to the agent after construction.
@@ -358,6 +333,7 @@ type AgentInput struct {
 	GroupID string `json:"group_id,omitempty"`
 	// Skills selects opt-in skills by name for this execution, including resumes.
 	Skills SkillSelection `json:"skills,omitempty"`
+	MCP    MCPSelection   `json:"mcp,omitempty"`
 	// RunID optionally identifies this execution. History generates one when omitted.
 	RunID         string          `json:"run_id,omitempty"`
 	Namespace     string          `json:"namespace"`
@@ -541,9 +517,10 @@ func (e *Agent) ExecuteWithRun(ctx context.Context, in *AgentInput, run *history
 	// Connect to MCP servers, and list the tools. A server that could not be
 	// listed is reported to the model through the prompt's Dependencies below
 	// rather than ending the run.
-	mcpTools, connectors := e.PrepareMCPTools(ctx, in.RunContext)
-
-	// Merge MCP tools with other tools
+	connectors, mcpTools, err := e.PrepareMCPTools(ctx, in)
+	if err != nil {
+		return &AgentOutput{Status: agentstate.RunStatusError, RunID: run.GetRunID()}, err
+	}
 	tools = append(tools, mcpTools...)
 
 	// Create tool schemas for input payload
