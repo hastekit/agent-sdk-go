@@ -46,6 +46,7 @@ type Agent struct {
 	singleTurn           bool
 	modelCallMiddlewares []ModelCallMiddleware
 	skillClient          SkillClient
+	clientTools          ClientToolOptions
 
 	// background waits on the tasks this agent's tools start, and is nil where
 	// nothing can wait — see BackgroundRunner and ErrBackgroundUnsupported.
@@ -73,7 +74,13 @@ type AgentOptions struct {
 
 	// SkillClient lists global and namespace skills once per run; enabled
 	// skills share the read_skill tool.
-	SkillClient   SkillClient
+	SkillClient SkillClient
+	// ClientTools configures how runs wait for tools the client runs itself.
+	ClientTools ClientToolOptions
+	// ContextWindow is the model's context window in tokens, for reporting
+	// how full it is (see ContextWindow). The SDK does not know any model's
+	// window, and nothing is limited by it; zero reports usage without one.
+	ContextWindow int
 	MCPClient     MCPClient
 	Runtime       Runtime
 	MaxLoops      *int
@@ -182,6 +189,7 @@ func NewAgent(opts *AgentOptions) *Agent {
 		instruction:          instruction,
 		tools:                slices.Clone(opts.Tools),
 		skillClient:          opts.SkillClient,
+		clientTools:          opts.ClientTools,
 		mcpClient:            opts.MCPClient,
 		llm:                  &WrappedLLM{opts.LLM},
 		parameters:           opts.Parameters,
@@ -308,6 +316,23 @@ func (e *Agent) Stop(ctx context.Context, streamID string) error {
 // Exported for the same reason StreamBroker and History are: a durable runtime
 // rebuilds the agent on the far side of a boundary, and something has to be
 // able to check that what it rebuilt is what was configured.
+// ContextWindow reports the context window the agent was configured with, or
+// zero when none was.
+func (e *Agent) ContextWindow() int {
+	return e.options.ContextWindow
+}
+
+// contextUsageChunk reports how full the run's context is, measured against
+// this agent's limits: after a handoff that is the specialist's model.
+func (e *Agent) contextUsageChunk(runID string, tokens int) *responses.ResponseChunk {
+	return &responses.ResponseChunk{OfContextUsage: &responses.ChunkContextUsage[constants.ChunkTypeContextUsage]{
+		RunID:     runID,
+		AgentName: e.Name,
+		Tokens:    tokens,
+		Window:    e.ContextWindow(),
+	}}
+}
+
 func (e *Agent) StickyHandoff() bool {
 	return e.stickyHandoff
 }
@@ -335,6 +360,9 @@ type AgentInput struct {
 	// Skills disables user-owned skills by name for this execution, including resumes.
 	Skills SkillSelection `json:"skills,omitempty"`
 	MCP    MCPSelection   `json:"mcp,omitempty"`
+	// ClientTools are tools the client runs itself for this execution,
+	// including resumes. Server-side tools win name collisions.
+	ClientTools []ClientToolDefinition `json:"client_tools,omitempty"`
 	// RunID optionally identifies this execution. History generates one when omitted.
 	RunID         string          `json:"run_id,omitempty"`
 	Namespace     string          `json:"namespace"`
@@ -414,6 +442,13 @@ func (e *Agent) ExecuteLocal(ctx context.Context, in *AgentInput) (output *Agent
 
 	// Add the incoming message to the run
 	run.AddMessages(ctx, in.Message)
+
+	// A turn made only of tool outputs that answer nothing — a client tool's
+	// result arriving after its run moved on — leaves the model nothing to
+	// respond to, so the run ends without calling it.
+	if run.OnlyStaleToolOutputs() {
+		run.RunState.TransitionToComplete()
+	}
 
 	runId := run.GetRunID()
 
@@ -523,6 +558,10 @@ func (e *Agent) ExecuteWithRun(ctx context.Context, in *AgentInput, run *history
 		return &AgentOutput{Status: agentstate.RunStatusError, RunID: run.GetRunID()}, err
 	}
 	tools = append(tools, mcpTools...)
+	tools, err = e.prepareClientTools(ctx, in, tools)
+	if err != nil {
+		return &AgentOutput{Status: agentstate.RunStatusError, RunID: run.GetRunID()}, err
+	}
 
 	// Create tool schemas for input payload
 	var toolDefs []responses.ToolUnion
@@ -788,6 +827,9 @@ func (e *Agent) ExecuteWithRun(ctx context.Context, in *AgentInput, run *history
 
 			// Track the LLM's usage
 			run.TrackUsage(resp.Usage)
+			if resp.Usage != nil {
+				publish(e.contextUsageChunk(runId, run.ContextTokens()))
+			}
 
 			// Convert output to input messages and add to history
 			inputMsgs := []responses.InputMessageUnion{}
@@ -898,6 +940,13 @@ func (e *Agent) ExecuteWithRun(ctx context.Context, in *AgentInput, run *history
 				} else {
 					// Regular tool — queue for parallel execution
 					tool := findTool(tools, toolCall.Name)
+					if tool == nil && run.RunState.Interrupts[toolCall.CallID].Mode == responses.InterruptModeClientTool {
+						// A client tool the run paused on, resumed by a request that
+						// does not define it again (a result sent after a reload, an
+						// approval answered elsewhere): the client's answer still
+						// reaches it.
+						tool = e.clientToolStandIn(toolCall.Name)
+					}
 					if tool == nil {
 						slog.ErrorContext(ctx, "tool not found", slog.String("tool_name", toolCall.Name))
 						toolResults[i] = toolResponse(toolCall, "Tool not found: "+toolCall.Name)

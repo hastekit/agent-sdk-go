@@ -54,6 +54,7 @@ func (w *AgentWorkflow) Run(restateCtx restate.WorkflowContext, input *WorkflowI
 		RunContext:    input.RunContext,
 		Skills:        input.Skills,
 		MCP:           input.MCP,
+		ClientTools:   input.ClientTools,
 		StreamID:      streamID,
 	})
 }
@@ -125,14 +126,16 @@ func (w *AgentWorkflow) proxyAgent(
 		StickyHandoff: agentOptions.StickyHandoff,
 		SingleTurn:    agentOptions.SingleTurn,
 
-		Instruction:  promptProxy,
-		History:      conversationHistory,
-		Tools:        restateTools,
-		SkillClient:  skillClient,
-		MCPClient:    mcpClient,
-		ToolExecutor: NewRestateToolExecutor(restateCtx),
-		StreamBroker: NewRestateStreamBroker(restateCtx, w.broker),
-		DurableStep:  NewRestateDurableStep(restateCtx),
+		Instruction:   promptProxy,
+		History:       conversationHistory,
+		Tools:         restateTools,
+		SkillClient:   skillClient,
+		MCPClient:     mcpClient,
+		ClientTools:   agentOptions.ClientTools,
+		ContextWindow: agentOptions.ContextWindow,
+		ToolExecutor:  NewRestateToolExecutor(restateCtx),
+		StreamBroker:  NewRestateStreamBroker(restateCtx, w.broker),
+		DurableStep:   NewRestateDurableStep(restateCtx),
 		// A task's wait outlives this run, so it goes to an invocation of its
 		// own rather than a goroutine that would die with the step.
 		BackgroundRunner: NewRestateBackgroundRunner(restateCtx, agentOptions.Name, providerConfigKey),

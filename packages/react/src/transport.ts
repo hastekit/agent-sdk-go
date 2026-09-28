@@ -143,6 +143,21 @@ export function createAGUITransport(
         ).threads ?? [],
     },
 
+    // Send a client tool's results as a turn. The stream of a run it starts
+    // is not read here; the run goes on and is joined through the thread.
+    async sendToolResults(agent, _thread, input, signal) {
+      const response = await request(`${agentPath(agent)}/run`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "text/event-stream",
+        },
+        body: JSON.stringify(input),
+        signal,
+      });
+      void response.body?.cancel().catch(() => {});
+    },
+
     // Manage the user's MCP servers. A server without an MCP store has none.
     mcp: {
       async list(signal) {

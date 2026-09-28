@@ -43,6 +43,15 @@ type AgentConfig struct {
 	// serves enabled ones through read_skill. See skills.NewClient.
 	SkillClient agents.SkillClient
 
+	// ClientTools configures tools the client runs itself (AG-UI frontend
+	// tools): how long a call waits for the client's result before the run
+	// pauses on it. The zero value waits agents.DefaultClientToolTimeout.
+	ClientTools agents.ClientToolOptions
+
+	// ContextWindow is the model's context window in tokens. It is only
+	// reported — the embedded UI shows how full it is — and limits nothing.
+	ContextWindow int
+
 	// Middlewares wrap model/tool calls, history loads/saves and prompt
 	// retrieval. Embed agents.NoopMiddleware and override selected methods.
 	Middlewares []agents.Middleware
@@ -62,6 +71,8 @@ func (ac *AgentConfig) toAgentOptions() *agents.AgentOptions {
 		Parameters:    ac.Parameters,
 		StickyHandoff: ac.StickyHandoff,
 		SkillClient:   ac.SkillClient,
+		ClientTools:   ac.ClientTools,
+		ContextWindow: ac.ContextWindow,
 		Middlewares:   ac.Middlewares,
 	}
 }

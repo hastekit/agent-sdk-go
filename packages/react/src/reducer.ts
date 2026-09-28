@@ -1,6 +1,12 @@
 import jsonPatch from "fast-json-patch";
 import type { Operation } from "fast-json-patch";
-import type { ChatEvent, ChatSnapshot, Message, ToolCall } from "./types.js";
+import type {
+  ChatEvent,
+  ChatSnapshot,
+  Interrupt,
+  Message,
+  ToolCall,
+} from "./types.js";
 
 // Merge history by identity while keeping the live version of overlapping messages.
 export function prependMessages(
@@ -55,6 +61,8 @@ function text(event: ChatEvent, key: string): string {
 export class EventReducer {
   private readonly echoedUsers = new Set<string>();
   private readonly completedCalls = new Set<string>();
+  // Tool calls this run started that have no result yet.
+  private readonly unanswered = new Set<string>();
   private chunkMessageId = "";
   private chunkToolId = "";
 
@@ -171,8 +179,10 @@ export class EventReducer {
         )
       ) {
         this.completedCalls.add(callId);
+        this.unanswered.delete(callId);
         return {};
       }
+      this.unanswered.add(callId);
       const parent =
         owner?.id || text(event, "parentMessageId") || `tool-parent-${callId}`;
 
@@ -218,6 +228,7 @@ export class EventReducer {
     // Tool results use their own message identity to remain stable across replay.
     if (event.type === "TOOL_CALL_RESULT") {
       const callId = text(event, "toolCallId");
+      this.unanswered.delete(callId);
       const existing = messages.find(
         (message) => message.role === "tool" && message.toolCallId === callId,
       );
@@ -252,7 +263,8 @@ export class EventReducer {
     }
 
     // Run lifecycle events retain approval data supplied by custom events.
-    if (event.type === "RUN_STARTED")
+    if (event.type === "RUN_STARTED") {
+      this.unanswered.clear();
       return {
         error: null,
         run: {
@@ -261,16 +273,61 @@ export class EventReducer {
           awaitingApproval: false,
         },
       };
-    if (event.type === "RUN_FINISHED")
+    }
+    // AG-UI 1.0: the outcome says whether the run is waiting on a person
+    // (interrupt). A successful run whose tool calls are not all answered left
+    // them for this client; like @ag-ui/client, prefer the outcome's
+    // pendingToolCallIds and otherwise take the calls that got no result.
+    if (event.type === "RUN_FINISHED") {
+      const outcome = event.outcome as
+        | {
+            type?: string;
+            interrupts?: Interrupt[];
+            pendingToolCallIds?: string[];
+          }
+        | undefined;
+      const runId = text(event, "runId") || snapshot.run?.runId;
+      if (outcome?.type === "interrupt" && outcome.interrupts?.length)
+        return {
+          run: {
+            ...snapshot.run,
+            runId,
+            status: "paused",
+            awaitingApproval: outcome.interrupts.some(
+              (it) => it.reason === "tool_call",
+            ),
+            interrupts: outcome.interrupts,
+          },
+          isCompacting: false,
+        };
+      const pending = outcome?.pendingToolCallIds?.length
+        ? outcome.pendingToolCallIds
+        : [...this.unanswered];
+      this.unanswered.clear();
+      if (outcome?.type !== "interrupt" && pending.length)
+        return {
+          run: {
+            ...snapshot.run,
+            runId,
+            status: "paused",
+            awaitingApproval: false,
+            pendingToolCallIds: pending,
+          },
+          isCompacting: false,
+        };
       return {
-        run:
-          snapshot.run?.awaitingApproval ||
-          snapshot.run?.interrupts?.length ||
-          snapshot.run?.backgroundTasks?.length
-            ? snapshot.run
-            : null,
+        run: snapshot.run?.backgroundTasks?.length
+          ? {
+              ...snapshot.run,
+              status: "completed",
+              awaitingApproval: false,
+              interrupts: undefined,
+              pendingToolCallIds: undefined,
+            }
+          : null,
         isCompacting: false,
       };
+    }
     if (event.type === "RUN_ERROR")
       return {
         error: new Error(text(event, "message") || "Agent run failed"),
@@ -282,23 +339,6 @@ export class EventReducer {
     if (event.type === "CUSTOM") {
       if (event.name === "input_message")
         return { messages: upsert(messages, event.value as Message) };
-      if (event.name === "on_interrupt") {
-        const value = event.value as {
-          runId?: string;
-          interrupts?: Record<string, unknown>[];
-          pendingToolCalls?: Record<string, unknown>[];
-        };
-        return {
-          run: {
-            ...snapshot.run,
-            runId: value.runId ?? snapshot.run?.runId,
-            status: "paused",
-            awaitingApproval: Boolean(value.pendingToolCalls?.length),
-            interrupts: value.interrupts ?? [],
-            pendingToolCalls: value.pendingToolCalls ?? [],
-          },
-        };
-      }
       if (event.name === "hastekit.summarization_started")
         return { isCompacting: true };
       if (event.name === "hastekit.summarization_completed")

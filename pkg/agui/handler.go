@@ -398,6 +398,7 @@ func serveThreadMessages(w http.ResponseWriter, r *http.Request, agent *agents.A
 		"sessionId":  sessionIDFromRows(threadID, latest),
 		"messages":   HistoryToMessages(page.Rows),
 		"run":        threadRunState(latest),
+		"context":    threadContextUsage(latest, agent),
 		"nextCursor": nextMessageCursor(namespace, threadID, page.NextBeforeRunID),
 		"hasMore":    page.NextBeforeRunID != "",
 	})
@@ -654,6 +655,21 @@ func serveRun(w http.ResponseWriter, r *http.Request, agent *agents.Agent, o opt
 	// A thread always streams on the same channel, so a client that
 	// reconnects can find the run without having kept the id.
 	streamID := agents.StreamIDForThread(requestNamespace(r), input.ThreadID)
+
+	// A client returning its tools' results: see answeringToolOutputs.
+	if !o.fullHistory && onlyToolOutputs(sdkMessages) {
+		kept, err := answeringToolOutputs(r.Context(), agent, requestNamespace(r), input.ThreadID, streamID, sdkMessages)
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "unable to check the thread's paused tools: "+err.Error())
+			return
+		}
+		if len(kept) == 0 {
+			w.Header().Set("X-Stream-Id", streamID)
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		sdkMessages = kept
+	}
 	turn := messages.New(o.senderID, sdkMessages)
 
 	// A turn arriving while the thread is already running folds into that
@@ -676,14 +692,15 @@ func serveRun(w http.ResponseWriter, r *http.Request, agent *agents.Agent, o opt
 	selection, _ := input.SkillSelection() // validated before claiming the run
 	mcpSelection, _ := input.MCPSelection()
 	in := &agents.AgentInput{
-		Skills:    selection,
-		MCP:       mcpSelection,
-		Namespace: requestNamespace(r),
-		RunID:     runID,
-		ThreadID:  input.ThreadID,
-		SessionID: sessionID,
-		StreamID:  streamID,
-		Message:   turn,
+		Skills:      selection,
+		MCP:         mcpSelection,
+		ClientTools: input.ClientTools(),
+		Namespace:   requestNamespace(r),
+		RunID:       runID,
+		ThreadID:    input.ThreadID,
+		SessionID:   sessionID,
+		StreamID:    streamID,
+		Message:     turn,
 		// Fold AG-UI context into the prompt RunContext. forwardedProps
 		// and state land at top-level keys so prompt templates can
 		// reach them via {{State.x}} / {{ForwardedProps.y}}.

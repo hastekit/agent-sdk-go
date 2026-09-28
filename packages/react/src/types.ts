@@ -110,14 +110,36 @@ export interface Thread {
   updated_at?: string;
 }
 
-// Restore outstanding approvals and background task metadata with history.
+// An AG-UI 1.0 interrupt: something the run is waiting on a person for. The id
+// is the paused tool call's id; metadata carries the server's mode ("approval",
+// "form" or "url") and the call, for rendering.
+export interface Interrupt {
+  id: string;
+  reason: string;
+  message?: string;
+  toolCallId?: string;
+  responseSchema?: Record<string, unknown>;
+  expiresAt?: string;
+  metadata?: Record<string, unknown>;
+}
+
+// Answer one interrupt. Approvals resolve with { approved: boolean }, forms
+// with their fields, visited URLs with no payload; "cancelled" declines.
+export interface ResumeEntry {
+  interruptId: string;
+  status: "resolved" | "cancelled";
+  payload?: unknown;
+}
+
+// Restore outstanding interrupts and background task metadata with history.
 export interface RunState {
   error?: string;
   runId?: string;
   status?: string;
   awaitingApproval: boolean;
-  interrupts?: Record<string, unknown>[];
-  pendingToolCalls?: Record<string, unknown>[];
+  interrupts?: Interrupt[];
+  // Client tool calls the run left for this client to answer.
+  pendingToolCallIds?: string[];
   backgroundTasks?: Record<string, unknown>[];
 }
 
@@ -144,6 +166,7 @@ export interface RunInput {
   tools: unknown[];
   context: { description: string; value: string }[];
   forwardedProps: Record<string, unknown>;
+  resume?: ResumeEntry[];
 }
 
 // Track lifecycle changes originating outside the selected conversation.
@@ -174,12 +197,24 @@ export interface StreamOptions {
   waitForRun?: boolean;
   signal: AbortSignal;
   onStatus?: (status: ConnectionStatus) => void;
+  // Called when a posted turn was taken into a run already going on the
+  // thread (the server answered 204), whose stream is followed instead.
+  onFolded?: () => void;
 }
 
 /** Implement this interface to use a different backend without changing your UI. */
 export interface ChatTransport {
   routines?: RoutineTransport;
   mcp?: MCPTransport;
+  // Send a client tool's results as a turn while its run is still streaming,
+  // without reading the run the turn may start: a live run takes them, and a
+  // run that has ended is resumed by them and joined afterwards.
+  sendToolResults?(
+    agent: string,
+    thread: string,
+    input: RunInput,
+    signal?: AbortSignal,
+  ): Promise<void>;
   listSkills?(signal: AbortSignal): Promise<UserSkill[]>;
   listThreads(
     agent: string,
@@ -247,9 +282,26 @@ export interface ChatSnapshot {
 }
 
 // Configure one controller for an agent and its conversation group.
+// A tool this client runs itself, such as reading the page or asking the
+// browser for its time zone. Its definition is sent with every run this
+// client starts. When the model calls it, the handler runs as soon as the call
+// has streamed in: the result is posted to a run waiting for it, or, if the
+// server pauses on the call instead, sent on a run that resumes it.
+export interface ClientTool {
+  name: string;
+  description?: string;
+  // JSON schema for the arguments; defaults to an empty object.
+  parameters?: Record<string, unknown>;
+  handler(
+    args: any,
+    context: { toolCallId: string; threadId: string; signal: AbortSignal },
+  ): unknown;
+}
+
 export interface ChatOptions {
   agent: string;
   transport: ChatTransport;
+  clientTools?: ClientTool[];
   groupId?: string;
   initialThreadId?: string;
   fullHistory?: boolean;

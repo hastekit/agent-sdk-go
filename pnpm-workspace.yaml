@@ -1,0 +1,5 @@
+# JavaScript packages in this repository. The embedded web UI consumes
+# @hastekit/copilotkit from source through the workspace.
+packages:
+  - packages/copilotkit
+  - pkg/agui/web/ui

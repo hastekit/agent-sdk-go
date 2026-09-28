@@ -1,0 +1,90 @@
+{
+  "name": "@hastekit/copilotkit",
+  "version": "0.0.1",
+  "description": "CopilotKit integration for HasteKit agents: an AG-UI agent with resumable runs, server-side stop, interrupts and client tools",
+  "license": "Apache-2.0",
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.cts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.mts",
+        "default": "./dist/index.mjs"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    },
+    "./react": {
+      "import": {
+        "types": "./dist/react.d.mts",
+        "default": "./dist/react.mjs"
+      },
+      "require": {
+        "types": "./dist/react.d.cts",
+        "default": "./dist/react.cjs"
+      }
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsdown",
+    "dev": "tsdown --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:exports": "publint --strict && attw --pack . --profile node16",
+    "prepack": "pnpm build"
+  },
+  "peerDependencies": {
+    "@ag-ui/client": ">=0.0.59",
+    "@ag-ui/core": ">=0.0.59",
+    "@copilotkit/react-core": ">=1.73.0",
+    "react": "^18.3.0 || ^19.0.0",
+    "rxjs": "^7.8.1"
+  },
+  "peerDependenciesMeta": {
+    "@copilotkit/react-core": {
+      "optional": true
+    },
+    "react": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@ag-ui/client": "^0.0.59",
+    "@ag-ui/core": "^0.0.59",
+    "@arethetypeswrong/cli": "^0.18.5",
+    "@copilotkit/react-core": "^1.73.3",
+    "@types/react": "^18.3.12",
+    "publint": "^0.3.12",
+    "react": "^18.3.1",
+    "rxjs": "7.8.1",
+    "tsdown": "^0.20.1",
+    "typescript": "^5.6.3",
+    "vite": "^7.3.6",
+    "vitest": "^4.0.18"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hastekit/agent-sdk-go.git",
+    "directory": "packages/copilotkit"
+  },
+  "keywords": [
+    "hastekit",
+    "copilotkit",
+    "ag-ui",
+    "agents"
+  ]
+}

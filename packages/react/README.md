@@ -152,19 +152,19 @@ are accessed during rendering; network work starts in effects or user actions.
 
 ## State and actions
 
-| State                                           | Meaning                                                  |
-| ----------------------------------------------- | -------------------------------------------------------- |
-| `threads`, `loadingThreads`, `threadsSupported` | Sidebar rows and availability; HTTP 501 disables listing |
-| `threadId`, `sessionId`                         | Selected conversation and attachment storage session     |
-| `messages`, `loadingMessages`                   | AG-UI messages in chronological order                    |
-| `hasOlderMessages`, `loadingOlder`              | History pagination status                                |
-| `connection`                                    | `idle`, `connecting`, `streaming`, or `reconnecting`     |
-| `isRunning`, `isStopping`                       | Observed execution and pending stop request              |
-| `run`                                           | Outstanding run, interrupts, and approval state          |
-| `isCompacting`                                  | SDK summarization lifecycle                              |
-| `state`                                         | Agent state from snapshots and JSON patches              |
-| `activeThreadIds`                               | Running conversations observed through the run feed      |
-| `error`, `lastEvent`                            | Latest actionable error and raw protocol event           |
+| State                                           | Meaning                                                             |
+| ----------------------------------------------- | ------------------------------------------------------------------- |
+| `threads`, `loadingThreads`, `threadsSupported` | Sidebar rows and availability; HTTP 501 disables listing            |
+| `threadId`, `sessionId`                         | Selected conversation and attachment storage session                |
+| `messages`, `loadingMessages`                   | AG-UI messages in chronological order                               |
+| `hasOlderMessages`, `loadingOlder`              | History pagination status                                           |
+| `connection`                                    | `idle`, `connecting`, `streaming`, or `reconnecting`                |
+| `isRunning`, `isStopping`                       | Observed execution and pending stop request                         |
+| `run`                                           | Outstanding run: AG-UI 1.0 interrupts and pending client tool calls |
+| `isCompacting`                                  | SDK summarization lifecycle                                         |
+| `state`                                         | Agent state from snapshots and JSON patches                         |
+| `activeThreadIds`                               | Running conversations observed through the run feed                 |
+| `error`, `lastEvent`                            | Latest actionable error and raw protocol event                      |
 
 | Action                                  | Behavior                                                          |
 | --------------------------------------- | ----------------------------------------------------------------- |
@@ -173,7 +173,7 @@ are accessed during rendering; network work starts in effects or user actions.
 | `refreshThreads()`                      | Reload sidebar rows                                               |
 | `loadOlderMessages()`                   | Prepend the next page, deduplicated by message ID                 |
 | `sendMessage(content, forwardedProps?)` | Display input immediately and POST one turn                       |
-| `resume(decisions)`                     | Resume approvals through `forwardedProps.command.resume`          |
+| `resume(entries)`                       | Answer every open interrupt with AG-UI 1.0 `resume` entries       |
 | `stop()`                                | POST cancellation to the server and keep reading its final events |
 | `disconnect()`                          | Detach browser observation without stopping server work           |
 | `reconnect()`                           | Reload persisted history and replay the current run               |
@@ -182,11 +182,11 @@ are accessed during rendering; network work starts in effects or user actions.
 
 Sending while a stream is attached is rejected; disable the composer until
 `connection === "idle"`. This first version does not implement steering an
-active run. Sidebar rename/delete and client-side tool execution are also not
-implemented because the default SDK endpoints do not provide these operations.
-Attachment uploads return metadata; applications choose how to construct
-multipart message content. Approval decisions have `{ toolCallId, approved,
-content? }`. Pass skill selection or other extensions in `forwardedProps`.
+active run. Sidebar rename/delete is also not implemented because the default
+SDK endpoints do not provide it. Attachment uploads return metadata;
+applications choose how to construct multipart message content. Interrupts are
+answered with AG-UI 1.0 resume entries (`resume(entries)`). Pass skill selection
+or other extensions in `forwardedProps`.
 
 ## Reconnect behavior
 
@@ -279,6 +279,44 @@ Explicit per-message forwarded properties take precedence, so a caller can use
 for a single run without changing the picker's selection. If no picker overrides
 exist, configured `forwardedProps.skills` is passed through unchanged; the picker
 reflects catalog defaults, not manually supplied forwarded properties.
+
+## Client tools
+
+Client tools run in the browser, such as reading the page or asking for the
+user's time zone. Pass them as `clientTools`; their definitions are sent with
+every run this client starts, and the model can call them like any other tool.
+
+```tsx
+const chat = useChat({
+  agent: "Assistant",
+  transport,
+  clientTools: [
+    {
+      name: "get_selection",
+      description: "Read the text the user has selected on the page.",
+      parameters: { type: "object", properties: {} },
+      handler: () => window.getSelection()?.toString() ?? "",
+    },
+  ],
+});
+```
+
+A handler's return value is the tool's result: a string as text, anything else
+as JSON, and a thrown error as `Error: …`. In a run this client starts, a
+handler runs as soon as its call has streamed in, and its result is sent as a
+tool message at once, whatever the run is doing by then: a run waiting for it
+(30 seconds by default) takes it and carries on, and a run that has paused on
+the call resumes with it. Either way the app does nothing extra.
+
+A run this client did not start — one it rejoined after a reload, or one its
+turn folded into — may replay calls that were already answered, so handlers do
+not run as it streams. Instead, calls to this client's tools that are still
+unanswered when such a run ends are answered then, and so are the calls a
+conversation is paused on when it is opened. Each call's handler runs at most
+once per conversation, and each call resumes the conversation at most once.
+Server-side tools win name collisions. A custom transport needs
+`sendToolResults` for results to reach a run while it waits; without it they
+are sent when the run has paused.
 
 ## MCP servers
 

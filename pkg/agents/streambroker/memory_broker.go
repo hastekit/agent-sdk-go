@@ -3,6 +3,7 @@ package streambroker
 import (
 	"context"
 	"sync"
+	"time"
 
 	"github.com/hastekit/agent-sdk-go/pkg/agents/messages"
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
@@ -22,6 +23,15 @@ type MemoryStreamBroker struct {
 	stopChans   map[string]chan struct{}
 	queues      map[string][]messages.Message
 	live        map[string]bool
+
+	// closing marks a live run that has published its end: its state is saved
+	// and only the release of its claim is left. releases wakes turns waiting
+	// for that release.
+	closing  map[string]bool
+	releases map[string]chan struct{}
+
+	// toolResults holds outputs clients sent for waiting client tools.
+	toolResults toolResultStore
 
 	// transcripts retains what was published per channel so a subscriber
 	// arriving mid-run — or after it finished — sees the whole run rather
@@ -49,6 +59,8 @@ func NewMemoryStreamBroker() *MemoryStreamBroker {
 		stopChans:   make(map[string]chan struct{}),
 		queues:      make(map[string][]messages.Message),
 		live:        make(map[string]bool),
+		closing:     make(map[string]bool),
+		releases:    make(map[string]chan struct{}),
 		transcripts: make(map[string][]*responses.ResponseChunk),
 		runFeed:     newFeedHub(),
 	}
@@ -62,6 +74,12 @@ func (b *MemoryStreamBroker) Publish(ctx context.Context, channel string, chunk 
 	if b.closed[channel] {
 		b.mu.Unlock()
 		return nil
+	}
+
+	// Marked before anyone can see the end, so a turn sent in answer to it
+	// waits for the channel rather than joining a run that is finishing.
+	if isRunEnd(chunk) {
+		b.closing[channel] = true
 	}
 
 	transcript := b.transcripts[channel]
@@ -147,6 +165,11 @@ func (b *MemoryStreamBroker) Close(ctx context.Context, channel string) error {
 	// for this channel starts a fresh run.
 	b.closed[channel] = true
 	delete(b.live, channel)
+	delete(b.closing, channel)
+	if released, ok := b.releases[channel]; ok {
+		close(released)
+		delete(b.releases, channel)
+	}
 
 	// Close all subscriber channels
 	for _, sub := range b.subscribers[channel] {
@@ -162,24 +185,49 @@ func (b *MemoryStreamBroker) Close(ctx context.Context, channel string) error {
 // EnqueueOrStart implements RunClaimBroker: atomically join an in-flight
 // run on channel, or claim + reset the channel for a fresh run.
 func (b *MemoryStreamBroker) EnqueueOrStart(ctx context.Context, channel string, msgs []messages.Message) (bool, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
+	deadline := time.Now().Add(closingWait)
+	for {
+		b.mu.Lock()
+		if !b.live[channel] {
+			b.claim(channel)
+			b.mu.Unlock()
+			return true, nil
+		}
+		if !b.closing[channel] || !time.Now().Before(deadline) {
+			b.enqueue(channel, msgs)
+			b.mu.Unlock()
+			return false, nil
+		}
+		released, ok := b.releases[channel]
+		if !ok {
+			released = make(chan struct{})
+			b.releases[channel] = released
+		}
+		b.mu.Unlock()
 
-	if b.live[channel] {
-		b.queues[channel] = append(b.queues[channel], msgs...)
-		return false, nil
+		timer := time.NewTimer(time.Until(deadline))
+		select {
+		case <-released:
+		case <-timer.C:
+		case <-ctx.Done():
+			timer.Stop()
+			return false, ctx.Err()
+		}
+		timer.Stop()
 	}
+}
 
-	// Win the claim and clear stale state so the fresh run's Subscribe /
-	// Publish aren't short-circuited by a prior run on the same channel.
+// claim wins the channel and clears stale state so the fresh run's Subscribe /
+// Publish aren't short-circuited by a prior run on the same channel. Callers hold mu.
+func (b *MemoryStreamBroker) claim(channel string) {
 	b.live[channel] = true
+	delete(b.closing, channel)
 	delete(b.queues, channel)
 	delete(b.closed, channel)
 	delete(b.stopped, channel)
 	delete(b.transcripts, channel)
 	// Drop the previous run's closed stop signal.
 	delete(b.stopChans, channel)
-	return true, nil
 }
 
 // Stop records a stop request for the given channel and closes its stop
@@ -233,8 +281,18 @@ func (b *MemoryStreamBroker) IsStopped(ctx context.Context, channel string) (boo
 func (b *MemoryStreamBroker) EnqueueMessage(ctx context.Context, channel string, msg messages.Message) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.queues[channel] = append(b.queues[channel], msg)
+	b.enqueue(channel, []messages.Message{msg})
 	return nil
+}
+
+// enqueue keeps a turn's tool outputs for their calls and queues the rest.
+// Callers hold mu.
+func (b *MemoryStreamBroker) enqueue(channel string, msgs []messages.Message) {
+	outputs, rest := splitToolOutputs(msgs)
+	for _, out := range outputs {
+		b.toolResults.deliver(toolResultKey(channel, out.callID), out.content)
+	}
+	b.queues[channel] = append(b.queues[channel], rest...)
 }
 
 // DrainMessages atomically returns and removes all queued messages
@@ -278,6 +336,8 @@ func (b *MemoryStreamBroker) Reset() {
 	b.stopChans = make(map[string]chan struct{})
 	b.queues = make(map[string][]messages.Message)
 	b.live = make(map[string]bool)
+	b.closing = make(map[string]bool)
+	b.releases = make(map[string]chan struct{})
 	b.transcripts = make(map[string][]*responses.ResponseChunk)
 }
 

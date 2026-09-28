@@ -61,6 +61,9 @@ function useManagedController(options: ChatOptions): ChatController {
         get context() {
           return latest.current.context;
         },
+        get clientTools() {
+          return latest.current.clientTools;
+        },
         onEvent: (event) => latest.current.onEvent?.(event),
         createId: () =>
           latest.current.createId?.() ?? globalThis.crypto.randomUUID(),

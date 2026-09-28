@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -77,6 +78,7 @@ func (e *Agent) prepareInput(ctx context.Context, in *AgentInput) (*AgentInput, 
 	input := *in
 	input.Skills.Disable = append([]string(nil), in.Skills.Disable...)
 	input.MCP = in.MCP.Clone()
+	input.ClientTools = slices.Clone(in.ClientTools)
 	if input.StreamID == "" {
 		input.StreamID = uuid.NewString()
 	}

@@ -46,6 +46,7 @@ func (a *TemporalAgentV2) GetActivities() map[string]interface{} {
 	temporalStreamBroker := NewTemporalStreamBroker(a.broker)
 	activities[a.options.Name+"_IsStoppedActivity"] = temporalStreamBroker.IsStopped
 	activities[a.options.Name+"_DrainMessagesActivity"] = temporalStreamBroker.DrainMessages
+	activities[a.options.Name+"_WaitToolResultActivity"] = temporalStreamBroker.WaitToolResult
 
 	if a.options.History.Summarizer != nil {
 		temporalSummarizer := NewTemporalConversationSummarizer(a.options.History.Summarizer)
@@ -188,14 +189,16 @@ func (a *TemporalAgentV2) proxyAgent(ctx workflow.Context, built map[string]*age
 		StickyHandoff: a.options.StickyHandoff,
 		SingleTurn:    a.options.SingleTurn,
 
-		History:      conversationHistory,
-		Instruction:  promptProxy,
-		Tools:        toolProxies,
-		SkillClient:  skillClient,
-		MCPClient:    mcpClient,
-		ToolExecutor: NewTemporalToolExecutor(ctx),
-		StreamBroker: NewTemporalStreamBrokerProxy(ctx, a.options.Name, a.broker),
-		DurableStep:  NewTemporalDurableStep(ctx),
+		History:       conversationHistory,
+		Instruction:   promptProxy,
+		Tools:         toolProxies,
+		SkillClient:   skillClient,
+		MCPClient:     mcpClient,
+		ClientTools:   a.options.ClientTools,
+		ContextWindow: a.options.ContextWindow,
+		ToolExecutor:  NewTemporalToolExecutor(ctx),
+		StreamBroker:  NewTemporalStreamBrokerProxy(ctx, a.options.Name, a.broker),
+		DurableStep:   NewTemporalDurableStep(ctx),
 		// A task's wait outlives this run, so it goes to a workflow of its own
 		// rather than a goroutine that would die with the activity.
 		BackgroundRunner: NewTemporalBackgroundRunner(ctx, a.options.Name),

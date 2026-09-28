@@ -31,16 +31,35 @@ test("interrupts and compaction are exposed as renderable state", () => {
       .isCompacting,
     false,
   );
-  const interrupts = [{ toolCallId: "call", reason: "approval" }];
-  reducer.apply({
-    type: "CUSTOM",
-    name: "on_interrupt",
-    value: { runId: "run", interrupts, pendingToolCalls: [{ id: "call" }] },
+  // AG-UI 1.0: the interrupt outcome on RUN_FINISHED is the pause.
+  const interrupts = [{ id: "call", reason: "tool_call", toolCallId: "call" }];
+  const snapshot = reducer.apply({
+    type: "RUN_FINISHED",
+    runId: "run",
+    outcome: { type: "interrupt", interrupts },
   });
-  const snapshot = reducer.apply({ type: "RUN_FINISHED" });
+  assert.equal(snapshot.run.status, "paused");
   assert.equal(snapshot.run.awaitingApproval, true);
   assert.deepEqual(snapshot.run.interrupts, interrupts);
-  assert.equal(snapshot.run.pendingToolCalls[0].id, "call");
+
+  // A success that leaves tool calls unanswered left them for the client,
+  // whether or not the outcome names them; a plain success clears the run.
+  reducer.apply({ type: "RUN_STARTED", runId: "r2" });
+  reducer.apply({ type: "TOOL_CALL_START", toolCallId: "c1", toolCallName: "x" });
+  reducer.apply({ type: "TOOL_CALL_START", toolCallId: "c2", toolCallName: "y" });
+  reducer.apply({ type: "TOOL_CALL_RESULT", toolCallId: "c2", content: "ok" });
+  const derived = reducer.apply({ type: "RUN_FINISHED", outcome: { type: "success" } });
+  assert.equal(derived.run.status, "paused");
+  assert.deepEqual(derived.run.pendingToolCallIds, ["c1"]);
+  const named = reducer.apply({
+    type: "RUN_FINISHED",
+    outcome: { type: "success", pendingToolCallIds: ["c3"] },
+  });
+  assert.deepEqual(named.run.pendingToolCallIds, ["c3"]);
+  assert.equal(
+    reducer.apply({ type: "RUN_FINISHED", outcome: { type: "success" } }).run,
+    null,
+  );
 });
 
 // JSON patch updates must be immutable and reject prototype mutation paths.
@@ -87,14 +106,15 @@ test("compact text and tool chunks accumulate without duplicate messages", () =>
 // Elicitation pauses need to survive completion even when no approval is requested.
 test("elicitation interrupts survive without marking them as approvals", () => {
   const reducer = fixture();
-  reducer.apply({
-    type: "CUSTOM",
-    name: "on_interrupt",
-    value: { interrupts: [{ kind: "elicitation" }], pendingToolCalls: [] },
+  const snapshot = reducer.apply({
+    type: "RUN_FINISHED",
+    outcome: {
+      type: "interrupt",
+      interrupts: [{ id: "call", reason: "input_required" }],
+    },
   });
-  const snapshot = reducer.apply({ type: "RUN_FINISHED" });
   assert.equal(snapshot.run.awaitingApproval, false);
-  assert.equal(snapshot.run.interrupts[0].kind, "elicitation");
+  assert.equal(snapshot.run.interrupts[0].reason, "input_required");
 });
 
 // Persisted carriers and streamed results use different message IDs for one tool execution.

@@ -63,6 +63,13 @@ type BackgroundTaskRef struct {
 	// run started by its completion carries the same per-tenant data.
 	RunContext map[string]any `json:"run_context,omitempty"`
 
+	// ClientTools are the tools the client offered the run that started the
+	// task. A run started by its completion offers them again: the server
+	// learns a client's tools only from the request that starts a run, and
+	// nobody sends one for this run. The client that offered them may be gone
+	// by then; a call nobody answers pauses the run like any other.
+	ClientTools []ClientToolDefinition `json:"client_tools,omitempty"`
+
 	// Payload is whatever the tool set on the response that started the task.
 	// It is how the call's arguments reach the wait, which happens in another
 	// call and, under a durable runtime, in another process.
@@ -370,14 +377,15 @@ func (s *backgroundSupervisor) deliver(ctx context.Context, agent *Agent, ref Ba
 	}
 
 	handle, err := agent.Execute(ctx, &AgentInput{
-		Namespace:  ref.Namespace,
-		ThreadID:   ref.ThreadID,
-		SessionID:  ref.SessionID,
-		StreamID:   ref.ThreadStreamID,
-		RunContext: ref.RunContext,
-		Skills:     ref.Skills,
-		MCP:        ref.MCP,
-		Message:    msg,
+		Namespace:   ref.Namespace,
+		ThreadID:    ref.ThreadID,
+		SessionID:   ref.SessionID,
+		StreamID:    ref.ThreadStreamID,
+		RunContext:  ref.RunContext,
+		Skills:      ref.Skills,
+		MCP:         ref.MCP,
+		ClientTools: ref.ClientTools,
+		Message:     msg,
 	})
 	if err != nil {
 		slog.ErrorContext(ctx, "failed to start a run for a background task result",
@@ -485,6 +493,7 @@ func (e *Agent) startBackgroundTask(ctx context.Context, in *AgentInput, runID s
 		ThreadStreamID: in.StreamID,
 		RunID:          runID,
 		RunContext:     in.RunContext,
+		ClientTools:    slices.Clone(in.ClientTools),
 		MCP:            in.MCP.Clone(),
 		Skills:         SkillSelection{Disable: slices.Clone(in.Skills.Disable)},
 		Payload:        resp.TaskPayload,

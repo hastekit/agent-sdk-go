@@ -141,6 +141,10 @@ type ConversationRunManager struct {
 	newMessages     []Message
 	lastMessageMeta map[string]any
 
+	// staleToolOutputs counts tool outputs dropped because they answered no
+	// call this run knows of.
+	staleToolOutputs int
+
 	// runContext
 	runContext map[string]any
 
@@ -347,6 +351,7 @@ func (cm *ConversationRunManager) AddMessages(ctx context.Context, message Messa
 	cm.processIncoming(message, false, cfg.estimate)
 }
 
+// AddMessagesToQueue appends bundles sent into the run while it was going.
 func (cm *ConversationRunManager) AddMessagesToQueue(ctx context.Context, msgs []Message) {
 	for _, m := range msgs {
 		cm.processIncoming(m, true, true)
@@ -786,7 +791,30 @@ func (cm *ConversationRunManager) processIncoming(message Message, queue, estima
 					cm.RunState.QueuedRejections = append(cm.RunState.QueuedRejections, res.CallID)
 				}
 			}
+		} else if res, ok := cm.clientToolResolution(msg); ok {
+			// A client answering a paused client tool sends the call's output,
+			// as AG-UI clients do after running a frontend tool. It resolves
+			// the pause; the resumed tool records the output itself.
+			hasNewApproval = true
+			cm.RunState.QueuedApprovals = append(cm.RunState.QueuedApprovals, res.CallID)
+			if cm.RunState.Resolutions == nil {
+				cm.RunState.Resolutions = map[string]responses.InterruptResolution{}
+			}
+			cm.RunState.Resolutions[res.CallID] = res
+		} else if out := msg.OfFunctionCallOutput; out != nil && !cm.acceptToolOutput(out.CallID) {
+			// An output for a call that is not open — a second one, such as a
+			// client tool's result arriving after its run moved on, or one for a
+			// call never made — or for a paused call, which only its interrupt
+			// answers. Stored, it would give the provider an output with no
+			// call, a call two outputs, or a tool result the tool never produced.
+			slog.Warn("dropping a tool output the run cannot accept", slog.String("call_id", out.CallID))
+			cm.staleToolOutputs++
 		} else {
+			if call := msg.OfFunctionCall; call != nil {
+				// Replayed history (a full-history client) opens its calls here,
+				// before the outputs that follow them in the same bundle.
+				cm.RunState.OpenToolCall(call.CallID)
+			}
 			stored = append(stored, msg)
 		}
 	}
@@ -828,6 +856,58 @@ func (cm *ConversationRunManager) processIncoming(message Message, queue, estima
 			cm.RunState.CurrentStep = agentstate.StepExecuteTools
 		}
 	}
+}
+
+// acceptToolOutput closes the call an output answers. A paused call is not
+// closed by an output: an approval or elicitation is answered by a resume
+// decision, and a client tool's output resolves its pause through
+// clientToolResolution, before this is asked. The resumed tool's own output
+// closes the call once the run is no longer paused.
+func (cm *ConversationRunManager) acceptToolOutput(callID string) bool {
+	if cm.RunState.IsToolCallPaused(callID) {
+		return false
+	}
+	return cm.RunState.CloseToolCall(callID)
+}
+
+// OnlyStaleToolOutputs reports whether everything the run was given so far was
+// tool outputs it dropped (see RunState.OpenToolCalls): there is nothing new
+// for the model to answer.
+func (cm *ConversationRunManager) OnlyStaleToolOutputs() bool {
+	return cm.staleToolOutputs > 0 && len(cm.newMessages) == 0 && cm.RunState.CurrentStep == agentstate.StepCallLLM
+}
+
+// clientToolResolution turns a function_call_output into the resolution of a
+// client tool the run is paused on. Outputs for any other call pass through.
+func (cm *ConversationRunManager) clientToolResolution(msg responses.InputMessageUnion) (responses.InterruptResolution, bool) {
+	output := msg.OfFunctionCallOutput
+	if output == nil || cm.RunState.CurrentStep != agentstate.StepAwaitApproval {
+		return responses.InterruptResolution{}, false
+	}
+	intr, ok := cm.RunState.Interrupts[output.CallID]
+	if !ok || intr.Mode != responses.InterruptModeClientTool {
+		return responses.InterruptResolution{}, false
+	}
+	pending := false
+	for _, call := range cm.RunState.PendingToolCalls {
+		pending = pending || call.CallID == output.CallID
+	}
+	if !pending {
+		return responses.InterruptResolution{}, false
+	}
+
+	// Text stays text; structured output keeps its JSON shape.
+	var content []byte
+	var err error
+	if output.Output.OfString != nil {
+		content, err = sonic.Marshal(*output.Output.OfString)
+	} else {
+		content, err = sonic.Marshal(output.Output.OfList)
+	}
+	if err != nil {
+		return responses.InterruptResolution{}, false
+	}
+	return responses.InterruptResolution{CallID: output.CallID, Action: responses.InterruptActionApprove, Content: content}, true
 }
 
 // ProcessInterrupts records the bookkeeping for a paused tool call across

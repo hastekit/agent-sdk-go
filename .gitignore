@@ -1,3 +1,5 @@
 .env
 .idea
 samples
+node_modules/
+.pnpm-store/

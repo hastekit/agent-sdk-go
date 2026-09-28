@@ -21,6 +21,7 @@ A powerful Golang SDK for building AI agents and making LLM calls across multipl
 - **🧩 Sub-Agents & Handoffs** - Call a specialist as a tool, or transfer the conversation to it
 - **🎚️ Steering** - Send a correction into a run already in flight
 - **⚛️ React chat hooks** - Standalone headless chat state, conversation lists, and reconnecting streams ([package](packages/react/README.md))
+- **🪁 CopilotKit integration** - Use CopilotKit as the UI for HasteKit agents, with server-side stop, reconnecting runs, interrupts and client tools ([package](packages/copilotkit/README.md))
 - **🌊 Streaming Support** - Real-time streaming responses for better UX
 - **🛑 Cancellation** - Stop in-flight runs cleanly, including mid-stream and mid-tool-call
 - **📝 Structured Output** - JSON schema validation for reliable structured responses
@@ -621,8 +622,7 @@ return 400. The `run` field always reflects the latest stored turn, including
 when requesting older messages.
 
 The embedded chat loads older pages when scrolling up, with a load/retry button.
-Full-history mode and the minimal `/basic.html` fallback fetch all pages to retain
-their existing behavior. SSE replay cursors remain separate from history cursors.
+Full-history mode fetches all pages to retain its existing behavior. SSE replay cursors remain separate from history cursors.
 
 For efficient database queries, implement `history.TranscriptPageReader`.
 `TranscriptPageOptions.BeforeRunID` is an exclusive boundary in insertion order,
@@ -633,7 +633,7 @@ full-transcript fallback, which bounds the HTTP response but not storage reads.
 
 Conversation listing works when the agent's persistence adapter implements `history.ThreadLister` — the SDK's built-in in-memory and file adapters both do. For adapters that can't enumerate threads, the listing endpoint answers `501` and the UI hides the picker.
 
-The CopilotKit UI is a Vite/React app under [`pkg/agui/web/ui`](pkg/agui/web/ui); its build output is committed to `pkg/agui/web/static`, so `go build` never needs Node. Rebuild only when changing the UI source (`cd pkg/agui/web/ui && pnpm install && pnpm build`). CopilotKit v2 can't be loaded from a public ESM CDN (its dependency graph breaks esm.sh/jsDelivr), so it's bundled. To keep the embedded weight down to ~1MB (from ~17MB), the build aliases out CopilotKit's heaviest optional dependencies — the markdown renderer's Shiki/Mermaid/Cytoscape stack (swapped for a lightweight `react-markdown` shim), KaTeX's math fonts, and the dev-console web-inspector — none of which the chat needs. An offline, framework-free fallback UI is embedded at `/basic.html`.
+The CopilotKit UI is a Vite/React app under [`pkg/agui/web/ui`](pkg/agui/web/ui); its build output is committed to `pkg/agui/web/static`, so `go build` never needs Node. Rebuild only when changing the UI source (`cd pkg/agui/web/ui && pnpm install && pnpm build`). CopilotKit v2 can't be loaded from a public ESM CDN (its dependency graph breaks esm.sh/jsDelivr), so it's bundled. To keep the embedded weight down to ~1MB (from ~17MB), the build aliases out CopilotKit's heaviest optional dependencies — the markdown renderer's Shiki/Mermaid/Cytoscape stack (swapped for a lightweight `react-markdown` shim), KaTeX's math fonts, and the dev-console web-inspector — none of which the chat needs.
 
 Options (shared by `agui.NewHandler`, `agui.AgentHandler`, `web.Handler`, and `web.Serve`):
 
@@ -708,7 +708,78 @@ stream subscription and reconnects using GET, never repeating the POST that
 started the run. A full page reload sends no cursor. Expired replay is surfaced
 as an error so the user can reload history.
 
-Human-in-the-loop: when a run pauses for tool approval, the stream emits a `CUSTOM` event named `on_interrupt` (CopilotKit's `useInterrupt` convention) followed by `RUN_FINISHED` with `result.status: "paused"`. The client resumes by POSTing decisions back on the same thread under `forwardedProps.command.resume.decisions[]` (`{toolCallId, approved}`).
+Every run ends with `RUN_FINISHED` carrying an AG-UI 1.0 `outcome`:
+
+- A run waiting on a person (a tool approval, or a form or URL elicitation) ends with `{"type": "interrupt", "interrupts": [...]}`. Each interrupt's `id` is the paused tool call's id; approvals have `reason: "tool_call"` and expect `{"approved": boolean}`, elicitations have `reason: "input_required"` with the form's schema as `responseSchema`. The client answers every open interrupt on the next POST with `resume: [{"interruptId", "status": "resolved" | "cancelled", "payload"}]`; CopilotKit's `useInterrupt` does this for you.
+- A run that left client tool calls ends with `{"type": "success"}` and those calls unanswered in the stream; the client answers them with tool messages (see Client tools). The outcome does not name them (`pendingToolCallIds`), because clients before AG-UI 1.0, including current CopilotKit releases, reject that field; 1.0 clients treat calls with no result as pending.
+- Otherwise `{"type": "success"}`. Token usage is reported in the top-level `usage` list.
+
+The outcome is the only pause signal: pauses do not replace the client's agent state with a `STATE_SNAPSHOT`, and there is no `on_interrupt` `CUSTOM` event. Answers come only from `resume`; the pre-1.0 `forwardedProps.command.resume.decisions[]` form is not read.
+
+#### Client tools
+
+Tools a browser runs itself (CopilotKit's `useFrontendTool`, or `clientTools` in
+`@hastekit/react`) arrive with each run in `RunAgentInput.tools`. The model can
+call them like any other tool; server-side tools win name collisions. The client
+runs a call to one of its own tools as soon as the call has streamed in and
+sends the result as an ordinary tool message to `POST /agents/{agent}/run`. The
+run waits for it, 30 seconds by default, and carries on without a second
+request. If the result has not arrived by then, the run pauses on the call with
+a client_tool interrupt, and the tool message resumes it — which is what stock
+AG-UI clients such as CopilotKit send, after the run has ended. Client tools
+need no configuration; `AgentConfig.ClientTools` only changes the wait.
+
+The server knows a client's tools only from the request that starts a run, so a
+client sends them with every request, including tool results and resumes, as
+CopilotKit and both HasteKit packages do. A run the server starts itself, when a
+background task's result arrives on an idle thread, offers the tools of the run
+that started the task. A paused client tool call is still resolved by a request
+that omits them, but the rest of that run cannot call them.
+
+
+```go
+hastekit.AgentConfig{
+    // Wait up to two minutes. A negative timeout pauses at once, for clients
+    // that only answer after the run has paused.
+    ClientTools: agents.ClientToolOptions{Timeout: 2 * time.Minute},
+}
+```
+
+A tool message that reaches a live run is not queued like other turns: the
+stream broker keeps it for its call, where the waiting tool reads it
+(`StreamBroker.WaitToolResult`). The built-in memory and Redis brokers do this (Redis for multiple
+replicas). Results are scoped to the thread's stream, which is derived from the
+namespace, and the first result for a call wins. A tool message for nothing the thread is waiting on,
+such as a result that arrives after its run moved on, is acknowledged (204)
+without starting a run. A turn sent just as a run ends waits for the run to
+release the thread and starts the next one, rather than joining the run that is
+finishing. Under Temporal the wait runs as a heartbeating activity; under
+Restate it runs in a journaled step, so set the Restate invocation timeouts
+above the client tool timeout. The embedded UI ships one browser tool, `get_browser_context` (time zone, locale, local time).
+
+#### Context usage
+
+After each model call the run reports how full the context window is, as a
+`hastekit.context_usage` CUSTOM event: `{tokens, window, agentName}`. `tokens`
+is what the next prompt starts from (the call's measured prompt and reply). The
+SDK knows no model's window, so `window` comes from `AgentConfig.ContextWindow`
+and is omitted without it. The thread messages endpoint returns the
+last figure as `context`, for a page that has just loaded. The embedded UI
+shows it as a meter under the composer.
+
+```go
+hastekit.AgentConfig{
+    // Reported only; nothing is limited by it.
+    ContextWindow: 200_000,
+}
+```
+
+#### CopilotKit
+
+[`@hastekit/copilotkit`](packages/copilotkit/README.md) connects a CopilotKit
+app to these endpoints. Register a `HastekitAgent` with `CopilotKitProvider`,
+and the package's hooks handle interrupts and client tools; the embedded UI is
+built on it.
 
 ### Tools
 

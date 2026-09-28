@@ -762,3 +762,49 @@ body {
 .mcp-connect { padding: 8px 12px; border: 1px solid #555; border-radius: 6px; background: #303030; color: #91c9ff; text-decoration: none; }
 .mcp-connect:hover { background: #414141; }
 @media (max-width: 640px) { .mcp-header-row { grid-template-columns: 1fr; } }
+
+/* How full the context window is, directly under the composer box, in the
+   slot CopilotKit keeps for its disclaimer. The input overlay takes no
+   pointer events; the meter takes them back for its tooltip. Mirrors the
+   composer's width, right-aligned under the send button. */
+.context-meter {
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  width: fit-content;
+  margin: 6px max(16px, calc((100% - 48rem) / 2)) 0 auto;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--hk-faint);
+}
+/* The meter sits between box and disclaimer; the disclaimer gives up some of
+   its top padding so the two read as one footer. */
+.app .composer-disclaimer {
+  padding-top: 4px;
+}
+.context-meter-bar {
+  width: 72px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--hk-raised);
+}
+.context-meter-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: var(--hk-muted);
+  transition: width 0.3s ease;
+}
+.context-meter[data-level="warn"] .context-meter-fill {
+  background: var(--hk-warn);
+}
+.context-meter[data-level="warn"] .context-meter-label {
+  color: var(--hk-warn);
+}
+.context-meter[data-level="critical"] .context-meter-fill {
+  background: var(--destructive, #f7768e);
+}
+.context-meter[data-level="critical"] .context-meter-label {
+  color: var(--destructive, #f7768e);
+}

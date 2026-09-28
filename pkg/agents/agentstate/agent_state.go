@@ -2,6 +2,7 @@ package agentstate
 
 import (
 	"encoding/json"
+	"slices"
 	"sort"
 	"time"
 
@@ -78,6 +79,13 @@ type RunState struct {
 	// Interrupts maps a paused call ID to its flexible Interrupt
 	Interrupts map[string]responses.Interrupt `json:"interrupts,omitempty"`
 
+	// OpenToolCalls are the calls the model made that have no output yet,
+	// oldest first. Every tool output has to close one: an output for a call
+	// that is not open — a second one, or one for a call never made — is
+	// dropped, since a provider rejects both. A paused call stays open into
+	// the run that resumes it.
+	OpenToolCalls []string `json:"open_tool_calls,omitempty"`
+
 	// Resolutions holds data-carrying interrupt resolutions (those with
 	// Content, e.g. a submitted form) drained from the incoming resume
 	// message, keyed by resolved call id. It's transient — populated on the
@@ -124,6 +132,40 @@ type BackgroundTask struct {
 
 	// StartedAt is when the call that started it returned.
 	StartedAt time.Time `json:"started_at"`
+}
+
+// OpenToolCall records a call the model made as waiting for its output.
+func (s *RunState) OpenToolCall(callID string) {
+	if callID == "" || slices.Contains(s.OpenToolCalls, callID) {
+		return
+	}
+	s.OpenToolCalls = append(s.OpenToolCalls, callID)
+}
+
+// IsToolCallPaused reports whether the run is paused on callID: an approval,
+// an elicitation or a client tool, or the parent call of a paused sub-agent.
+// A paused call is answered through its interrupt, not by an output.
+func (s *RunState) IsToolCallPaused(callID string) bool {
+	if !s.IsPaused() {
+		return false
+	}
+	if _, ok := s.Interrupts[callID]; ok {
+		return true
+	}
+	if _, ok := s.PausedToolCalls[callID]; ok {
+		return true
+	}
+	return slices.ContainsFunc(s.PendingToolCalls, func(tc responses.FunctionCallMessage) bool { return tc.CallID == callID })
+}
+
+// CloseToolCall records a call's output, reporting whether the call was open.
+func (s *RunState) CloseToolCall(callID string) bool {
+	i := slices.Index(s.OpenToolCalls, callID)
+	if i < 0 {
+		return false
+	}
+	s.OpenToolCalls = slices.Delete(s.OpenToolCalls, i, i+1)
+	return true
 }
 
 // AddBackgroundTask records a task as outstanding.
@@ -386,6 +428,10 @@ func (s *RunState) ToMeta(opts ...MetaOption) map[string]any {
 		runStateMap["paused_tool_calls"] = s.PausedToolCalls
 	}
 
+	// Written even when empty: an empty list says every call was answered,
+	// where a missing one marks a row saved before open calls were tracked.
+	runStateMap["open_tool_calls"] = append([]string{}, s.OpenToolCalls...)
+
 	if s.LastAgentName != "" {
 		runStateMap["last_agent_name"] = s.LastAgentName
 	}
@@ -521,6 +567,22 @@ func LoadRunStateFromMeta(meta map[string]any) *RunState {
 			if err == nil {
 				sonic.Unmarshal(toolCallsBytes, &state.PendingToolCalls)
 			}
+		}
+	}
+
+	if openToolCalls, ok := runStateData["open_tool_calls"]; ok {
+		if b, err := sonic.Marshal(openToolCalls); err == nil {
+			sonic.Unmarshal(b, &state.OpenToolCalls)
+		}
+	} else {
+		// Rows saved before open calls were tracked: a paused run's calls are
+		// the ones still waiting for their outputs — for a nested pause, the
+		// parent call that ran the paused sub-agent.
+		for _, tc := range state.PendingToolCalls {
+			state.OpenToolCall(tc.CallID)
+		}
+		for parent := range state.PausedToolCalls {
+			state.OpenToolCall(parent)
 		}
 	}
 

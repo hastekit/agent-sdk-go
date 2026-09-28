@@ -7,12 +7,14 @@ import (
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/messages"
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
+	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/workflow"
 )
 
 // TemporalStreamBroker hosts the activity implementations for the
 // broker calls that the agent loop makes from inside the workflow:
-// IsStopped (stop signal) and DrainMessages (queued user input). Those
+// IsStopped (stop signal), DrainMessages (queued user input) and
+// WaitToolResult (a client tool's result). Those
 // hit the underlying broker (Redis, etc.) which is non-deterministic
 // from a workflow's perspective, so they must run inside activities.
 //
@@ -37,6 +39,37 @@ func (s *TemporalStreamBroker) IsStopped(ctx context.Context, channel string) (b
 
 func (s *TemporalStreamBroker) DrainMessages(ctx context.Context, channel string) ([]messages.Message, error) {
 	return s.wrappedBroker.DrainMessages(ctx, channel)
+}
+
+// toolResultHeartbeat keeps a long wait for a client tool's result visibly alive to Temporal.
+const toolResultHeartbeat = 10 * time.Second
+
+// toolResultWait carries WaitToolResult's outcome out of the activity, which
+// can return only one value.
+type toolResultWait struct {
+	Result string `json:"result,omitempty"`
+	Found  bool   `json:"found,omitempty"`
+}
+
+// WaitToolResult waits for a client tool's result, heartbeating. The result
+// stays stored, so a retried attempt reads the same answer.
+func (s *TemporalStreamBroker) WaitToolResult(ctx context.Context, channel, callID string, timeout time.Duration) (toolResultWait, error) {
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		ticker := time.NewTicker(toolResultHeartbeat)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				activity.RecordHeartbeat(ctx)
+			}
+		}
+	}()
+	result, found, err := s.wrappedBroker.WaitToolResult(ctx, channel, callID, timeout)
+	return toolResultWait{Result: result, Found: found}, err
 }
 
 // TemporalStreamBrokerProxy is the workflow-side StreamBroker. It
@@ -130,6 +163,17 @@ func (p *TemporalStreamBrokerProxy) ReadRunEvents(
 		return nil, cursor, nil
 	}
 	return feed.ReadRunEvents(ctx, namespaces, cursor, wait)
+}
+
+// WaitToolResult waits in an activity that outlives the wait itself;
+// heartbeats catch a lost worker sooner.
+func (p *TemporalStreamBrokerProxy) WaitToolResult(_ context.Context, channel, callID string, timeout time.Duration) (string, bool, error) {
+	options := workflow.GetActivityOptions(p.workflowCtx)
+	options.StartToCloseTimeout = timeout + 2*time.Minute
+	options.HeartbeatTimeout = 3 * toolResultHeartbeat
+	var wait toolResultWait
+	err := workflow.ExecuteActivity(workflow.WithActivityOptions(p.workflowCtx, options), p.prefix+"_WaitToolResultActivity", channel, callID, timeout).Get(p.workflowCtx, &wait)
+	return wait.Result, wait.Found, err
 }
 
 func (p *TemporalStreamBrokerProxy) DrainMessages(ctx context.Context, channel string) ([]messages.Message, error) {

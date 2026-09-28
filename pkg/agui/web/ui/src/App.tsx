@@ -1,773 +1,136 @@
-import {
-  createContext,
-  useCallback,
-  useContext,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
-import {
-  CopilotKitProvider,
-  CopilotChat,
-  useDefaultRenderTool,
-  useInterrupt,
-} from "@copilotkit/react-core/v2";
-import { ThreadsDrawer } from "./threads-drawer";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { CopilotChat, CopilotKitProvider } from "@copilotkit/react-core/v2";
+import type { InputContent } from "@ag-ui/core";
+import { HastekitAgent } from "@hastekit/copilotkit";
+import { fetchMCPServers, fetchSkillCatalog, isGlobalMCPServer, type MCPServerInfo } from "./api";
+import { AttachmentMessageView } from "./attachment-message";
 import { ComposerMCPContext, ComposerSkillsContext } from "./composer-menu";
 import { MCPLibrary } from "./mcp-library";
-import { RoutineLibrary, RunRoutineButton } from "./routine-library";
+import { RoutineLibrary } from "./routine-library";
 import { SkillLibrary } from "./skill-library";
-import { AttachmentMessageView } from "./attachment-message";
-import { AttachmentInput } from "./attachment-input";
-import type { InputContent } from "@ag-ui/core";
-import { StoppableHttpAgent } from "./stoppable-agent";
-import type { Message as AGUIMessage } from "@ag-ui/core";
-import {
-  fetchAgents,
-  fetchRoutines,
-  fetchRoutine,
-  fetchRoutineThreads,
-  type Routine,
-  fetchSkillCatalog,
-  type SkillInfo,
-  fetchMCPServers,
-  isGlobalMCPServer,
-  type MCPServerInfo,
-  fetchThreads,
-  fetchMessages,
-  runUrl,
-  relativeTime,
-  watchRunFeed,
-  type ThreadInfo,
-  type ThreadRunState,
-  type ThreadBackgroundTask,
-} from "./api";
+import { AGENT_PARAM, paramFromURL } from "./url-params";
+import { AgentMenu } from "./components/AgentMenu";
+import { ClientTools } from "./components/ClientTools";
+import { SteerableInput, TrayContext } from "./components/ComposerTray";
+import { HistoryPager } from "./components/HistoryPager";
+import { InterruptHandler } from "./components/Interrupts";
+import { RoutineHistory } from "./components/RoutineHistory";
+import { Sidebar } from "./components/Sidebar";
+import { InlineToolRenderer } from "./components/ToolCallCard";
+import { useCatalogChoices } from "./hooks/useCatalogChoices";
+import { useNavigation } from "./hooks/useNavigation";
+import { useRoutineList } from "./hooks/useRoutineList";
+import { useRunFeed } from "./hooks/useRunFeed";
+import { useServerConfig } from "./hooks/useServerConfig";
+import { useThreadActivity } from "./hooks/useThreadActivity";
+import { useThreadList } from "./hooks/useThreadList";
 
-// How long the run feed holds a request open, and how long to wait after a
-// failure before asking again. The wait sits comfortably inside the idle
-// timeouts proxies usually impose.
-const FEED_WAIT_SECONDS = 25;
-const FEED_RETRY_MS = 2000;
-
-// App drives the SDK's AG-UI endpoints through CopilotKit v2 + an
-// @ag-ui/client HttpAgent registered via `selfManagedAgents`. A
+// App drives the SDK's AG-UI endpoints through CopilotKit v2 and a
+// HastekitAgent (@hastekit/copilotkit) registered via `selfManagedAgents`. A
 // sidebar lists stored conversations (from the /threads endpoint) and
 // resumes them by hydrating the agent with the thread's history.
 //
-// HITL goes through CopilotKit's first-class useInterrupt hook — the
-// server emits a CUSTOM "on_interrupt" event carrying the pending tool
-// calls, the hook renders an approval card inline, and submitting
-// fires a fresh run with forwardedProps.command.resume that the server
-// parses back into a tool-approval response.
+// HITL goes through useHastekitInterrupt: the server finishes the run with an
+// AG-UI 1.0 interrupt outcome, the hook hands us the open interrupts, and
+// answering them fires a fresh run with the spec's resume entries.
 
-// Active is the chat surface's state: the thread we POST to plus the
-// history to hydrate it with. sessionId selects the shared attachment directory.
-interface Active {
-  threadId: string;
-  sessionId: string;
-  initialMessages: AGUIMessage[];
-  nextCursor?: string;
-  // What the thread's last run left outstanding — a decision it is waiting
-  // on, tasks still working. Null for a settled thread, and for a new one.
-  run: ThreadRunState | null;
-}
-
-function newActive(): Active {
-  const id = crypto.randomUUID();
-  return { threadId: id, sessionId: id, initialMessages: [], run: null };
-}
-
-// What is on screen, in the address bar: the agent and the conversation.
-//
-// Without it a reload lands on the first registered agent in a brand-new empty
-// chat, and what the user was looking at is only in the sidebar — which is no
-// use at all when the agent is sitting on a question, since the prompt to
-// answer it is on the thread they just lost. Both live in the URL rather than
-// storage so a link carries the whole address, and so back/forward work.
-//
-// The thread belongs to the agent: a conversation is stored under the agent
-// that held it, so the pair travels together and is cleared together.
-const AGENT_PARAM = "agent";
-const THREAD_PARAM = "thread";
-
-function paramFromURL(name: string): string {
-  return new URLSearchParams(window.location.search).get(name) ?? "";
-}
-
-// replaceState, not push: switching agent or conversation is not a navigation
-// the back button should have to walk through.
-function rememberParam(name: string, value: string) {
-  const url = new URL(window.location.href);
-  if (value) url.searchParams.set(name, value);
-  else url.searchParams.delete(name);
-  window.history.replaceState(null, "", url.toString());
-}
-
-// What the composer tray is showing: work still running, and a pause waiting
-// on the user.
-//
-// Through context rather than props because the tray renders inside
-// CopilotChat's input slot, and the slot is a component type — passing this
-// down would give it a new identity on every change, remounting the composer
-// and taking whatever the user had half-typed with it.
-interface Tray {
-  tasks: ThreadBackgroundTask[];
-  interrupt: TrayInterrupt | null;
-}
-
-interface TrayInterrupt {
-  // Which pause this is, so the publisher for one can be torn down after the
-  // next has already taken its place without clearing it.
-  key: string;
-  entries: InterruptEntry[];
-  onSubmit: (decisions: ApprovalDecision[]) => void;
-}
-
-const TrayContext = createContext<Tray>({ tasks: [], interrupt: null });
+// The user's own MCP servers can be turned off; the developer's global ones cannot.
+const isUserMCPServer = (server: MCPServerInfo) => !isGlobalMCPServer(server);
 
 export default function App() {
-  const [routinesEnabled, setRoutinesEnabled] = useState(false);
-  const [routinesOpen, setRoutinesOpen] = useState(false);
-  const [selectedRoutine, setSelectedRoutine] = useState<Routine | null>(null);
-  const [routineThreads, setRoutineThreads] = useState<ThreadInfo[]>([]);
-  const [routineHistoryError, setRoutineHistoryError] = useState("");
-  const [routineHistoryLoading, setRoutineHistoryLoading] = useState(false);
-  const [routineThreadReady, setRoutineThreadReady] = useState(false);
-  const routineHistoryRefresh = useRef<{ id: string; refresh: () => Promise<void> } | null>(null);
-  const navigation = useRef(0);
-  const restoreRoutine = useRef(paramFromURL("routine"));
-  const restoreRoutineThread = useRef(paramFromURL(THREAD_PARAM));
-  const [enabledRoutines, setEnabledRoutines] = useState<Routine[]>([]);
-  const [routineRevision, setRoutineRevision] = useState(0);
-  const [routineListError, setRoutineListError] = useState("");
-  const [routinesLoading, setRoutinesLoading] = useState(true);
-  const routinesChanged = useCallback(() => setRoutineRevision(value => value + 1), []);
-
-  useEffect(() => {
-    if (!routinesEnabled) return;
-    let cancelled = false;
-    let pending = false;
-    async function refresh() {
-      if (pending) return;
-      pending = true;
-      try {
-        const routines = await fetchRoutines();
-        if (!cancelled) {
-          setEnabledRoutines(routines.filter(routine => routine.enabled));
-          setRoutineListError("");
-        }
-      } catch (err) {
-        if (!cancelled) setRoutineListError(String(err));
-      } finally {
-        pending = false;
-        if (!cancelled) setRoutinesLoading(false);
-      }
-    }
-    void refresh();
-    // Agent tools and other clients can change definitions too.
-    const interval = window.setInterval(() => { if (!document.hidden) void refresh(); }, 30_000);
-    window.addEventListener("focus", refresh);
-    return () => {
-      cancelled = true;
-      window.clearInterval(interval);
-      window.removeEventListener("focus", refresh);
-    };
-  }, [routinesEnabled, routineRevision]);
-  const [skillStoreEnabled, setSkillStoreEnabled] = useState(false);
-  const [libraryOpen, setLibraryOpen] = useState(false);
-  const [skillRevision, setSkillRevision] = useState(0);
-  const [skillCatalog, setSkillCatalog] = useState<SkillInfo[]>([]);
-  const [skillError, setSkillError] = useState("");
-  const [skillChoices, setSkillChoices] = useState<Record<string, boolean>>({});
-  const [mcpStoreEnabled, setMCPStoreEnabled] = useState(false);
-  const [mcpLibraryOpen, setMCPLibraryOpen] = useState(false);
-  const [mcpRevision, setMCPRevision] = useState(0);
-  const [mcpServers, setMCPServers] = useState<MCPServerInfo[]>([]);
-  const [mcpError, setMCPError] = useState("");
-  const [mcpChoices, setMCPChoices] = useState<Record<string, boolean>>({});
-  const [agents, setAgents] = useState<string[]>([]);
-  const [agentName, setAgentName] = useState<string>("");
-  const listingAgent = useRef(agentName);
-  listingAgent.current = agentName;
-  // Whether the server needs the full message list posted on every run.
-  // Reported by GET /agents; false is both the default and the common case.
-  const [fullHistory, setFullHistory] = useState(false);
-  const [active, setActive] = useState<Active>(() => newActive());
-  const [threads, setThreads] = useState<ThreadInfo[]>([]);
-  const [listingSupported, setListingSupported] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  // runError holds the message from a failed run (server RUN_ERROR or a
-  // transport failure). CopilotKit only logs these to the console, so we
-  // surface them as a banner in the chat pane. Cleared when a new run
-  // starts or the thread/agent changes.
-  const [compacting, setCompacting] = useState(false);
-  const [runError, setRunError] = useState<string | null>(null);
-
-  // What the address bar asked for when the page opened, read once at the
-  // first render and then consumed.
-  //
-  // Not read from the URL where it is needed: the effects that keep the URL in
-  // step with the app run before the agent list has arrived, so by then the
-  // address bar says what we defaulted to rather than what was asked for.
-  // Consumed rather than kept because it is for arriving at a URL, not for
-  // following the user around afterwards — a thread left in here would be
-  // reopened again the next time they switched agent.
-  const opened = useRef({
-    agent: paramFromURL(AGENT_PARAM),
-    thread: paramFromURL(THREAD_PARAM),
+  const [preferredAgent] = useState(() => paramFromURL(AGENT_PARAM));
+  const server = useServerConfig(preferredAgent, setError);
+  const { agentName } = server;
+  const threadList = useThreadList(agentName, setError);
+  const nav = useNavigation({
+    agentName,
+    setAgentName: server.setAgentName,
+    fullHistory: server.fullHistory,
+    routinesEnabled: server.routinesEnabled,
+    setError,
   });
-
-  // The open conversation, readable from the feed loop without restarting it.
-  // The loop outlives any one thread — that is the point of it — so it cannot
-  // close over the thread id.
-  const activeThreadIdRef = useRef(active.threadId);
-  useEffect(() => {
-    activeThreadIdRef.current = active.threadId;
-  }, [active.threadId]);
-
-  // Likewise the agent: useMemo replaces it whenever the thread changes, and
-  // the feed loop must not be torn down and restarted each time.
-  const agentRef = useRef<StoppableHttpAgent | null>(null);
- const [attachmentsEnabled, setAttachmentsEnabled] = useState(false);
-
-  // Load the agent list once.
-  useEffect(() => {
-    fetchAgents()
-      .then(({ agents: names, fullHistory, attachmentsEnabled, skillStoreEnabled, mcpStoreEnabled, routinesEnabled }) => {
-        setSkillStoreEnabled(skillStoreEnabled);
-        setMCPStoreEnabled(mcpStoreEnabled);
-        setRoutinesEnabled(routinesEnabled);
- setAttachmentsEnabled(attachmentsEnabled);
-        setAgents(names);
-        setFullHistory(fullHistory);
-        if (!names.length) {
-          setError("No agents registered on the server.");
-          return;
-        }
-        // A name the server no longer registers falls back to the first
-        // rather than erroring: the link is stale, not wrong, and an empty
-        // chat against a real agent is a better landing than a dead page.
-        const wanted = opened.current.agent;
-        setAgentName(names.includes(wanted) ? wanted : names[0]);
-      })
-      .catch((e) => setError(String(e)));
-  }, []);
-
-  const refreshThreads = useCallback(async () => {
-    if (!agentName) return;
-    try {
-      const res = await fetchThreads(agentName);
-      if (listingAgent.current !== agentName) return;
-      setError(null);
-      setListingSupported(res.supported);
-      setThreads(res.threads);
-    } catch (e) {
-      setError(String(e));
-    }
-  }, [agentName]);
-
-  useEffect(() => {
-    refreshThreads();
-  }, [refreshThreads]);
+  const { active, routine } = nav;
 
   // Fresh agent per (agent, thread). The provider re-keys on threadId
   // below so the whole chat subtree re-initialises cleanly when the user
   // switches conversations — no leaked in-flight stream or pending
   // interrupt from the prior thread.
   //
-  // StoppableHttpAgent so the stop button ends the run server-side rather
-  // than only dropping the stream.
-  //
   // The thread's history goes in at construction. CopilotChat rejoins the
-  // thread itself (it connects whenever it is given an explicit threadId),
-  // and that connect clears the agent's messages first — so hydrating from
-  // here afterwards is a race we lose. The agent re-seeds its own history
-  // on run initialization instead; see StoppableHttpAgent.
+  // thread itself (it connects whenever it is given an explicit threadId, and
+  // the server replays the run so far before following it live), and that
+  // connect clears the agent's messages first — so hydrating from here
+  // afterwards is a race we lose. HastekitAgent re-seeds its initial messages
+  // when the connect starts instead.
   const agent = useMemo(() => {
     if (!agentName) return null;
-    return new StoppableHttpAgent({
+    return new HastekitAgent({
       agentName,
-      url: runUrl(agentName),
       threadId: active.threadId,
-      history: active.initialMessages,
-      fullHistory,
+      initialMessages: active.initialMessages,
+      fullHistory: server.fullHistory,
     });
-  }, [agentName, active.threadId, active.initialMessages, fullHistory]);
+  }, [agentName, active.threadId, active.initialMessages, server.fullHistory]);
 
-  // The user's own skills are shared by every agent, so the catalog is loaded once
-  // and choices are remembered once per browser, then resent on every run and resume.
+  // The user's own skills and MCP servers are shared by every agent: loaded
+  // once, remembered once per browser, and sent with every run and resume.
+  const skills = useCatalogChoices({ enabled: server.skillStoreEnabled, storageKey: "hastekit-skills", load: fetchSkillCatalog });
+  const mcp = useCatalogChoices({ enabled: server.mcpStoreEnabled, storageKey: "hastekit-mcp", load: fetchMCPServers, optional: isUserMCPServer });
   useEffect(() => {
-    let cancelled = false;
-    setSkillError("");
-    let saved: Record<string, boolean> = {};
-    try { saved = JSON.parse(localStorage.getItem("hastekit-skills") || "{}"); } catch { /* storage unavailable */ }
-    setSkillChoices(saved);
-    if (!skillStoreEnabled) {
-      setSkillCatalog([]);
-      return;
+    if (agent) agent.skillSelection = { disable: skills.disabled };
+  }, [agent, skills.disabled]);
+  useEffect(() => {
+    if (agent) agent.mcpSelection = { disable: mcp.disabled };
+  }, [agent, mcp.disabled]);
+
+  const activity = useThreadActivity({
+    agent,
+    agentName,
+    threadId: active.threadId,
+    run: active.run,
+    context: active.context,
+    onRunActivity: threadList.refresh,
+  });
+
+  const routineList = useRoutineList(server.routinesEnabled);
+  const { unseen, unseenRoutines } = useRunFeed(agentName, active.threadId, (events) => {
+    // The opening user message is saved before RUN_STARTED, so new
+    // conversations already have their title while the agent works.
+    void threadList.refresh();
+    for (const event of events) {
+      if (event.event === "RUN_FINISHED" && event.groupId) routine.runFinished(event.groupId);
     }
-    fetchSkillCatalog().then(skills => {
-      if (!cancelled) setSkillCatalog(skills);
-    }).catch(err => { if (!cancelled) setSkillError(String(err)); });
-    return () => { cancelled = true; };
-  }, [skillStoreEnabled, skillRevision]);
-
-  useEffect(() => {
-    if (!agent) return;
-    const available = new Set(skillCatalog.map(skill => skill.name));
-    agent.skillSelection = {
-      disable: Object.entries(skillChoices).filter(([name, enabled]) => !enabled && available.has(name)).map(([name]) => name),
-    };
-  }, [agent, skillCatalog, skillChoices]);
-
-  const toggleSkill = (name: string, checked: boolean) => {
-    const choices = { ...skillChoices, [name]: checked };
-    setSkillChoices(choices);
-    try { localStorage.setItem("hastekit-skills", JSON.stringify(choices)); } catch { /* storage unavailable */ }
-  };
-
-  // MCP servers work like skills: one list for every agent, and choices for the
-  // user's own servers remembered once per browser. Built-in servers are always on.
-  useEffect(() => {
-    let cancelled = false;
-    setMCPError("");
-    let saved: Record<string, boolean> = {};
-    try { saved = JSON.parse(localStorage.getItem("hastekit-mcp") || "{}"); } catch { /* storage unavailable */ }
-    setMCPChoices(saved);
-    if (!mcpStoreEnabled) {
-      setMCPServers([]);
-      return;
+    // A run on the conversation the user is reading is one to join, not
+    // to badge: the answer belongs on screen as it is written.
+    if (events.some((e) => e.event === "RUN_STARTED" && e.threadId === active.threadId)) {
+      void agent?.joinIfIdle();
     }
-    fetchMCPServers().then(servers => {
-      if (!cancelled) setMCPServers(servers);
-    }).catch(err => { if (!cancelled) setMCPError(String(err)); });
-    return () => { cancelled = true; };
-  }, [mcpStoreEnabled, mcpRevision]);
+  });
 
-  useEffect(() => {
-    if (!agent) return;
-    const optional = new Set(mcpServers.filter(server => !isGlobalMCPServer(server)).map(server => server.name));
-    agent.mcpSelection = {
-      disable: Object.entries(mcpChoices).filter(([name, enabled]) => !enabled && optional.has(name)).map(([name]) => name),
-    };
-  }, [agent, mcpServers, mcpChoices]);
-
-  const toggleMCPServer = (name: string, checked: boolean) => {
-    const choices = { ...mcpChoices, [name]: checked };
-    setMCPChoices(choices);
-    try { localStorage.setItem("hastekit-mcp", JSON.stringify(choices)); } catch { /* storage unavailable */ }
-  };
-
-  useEffect(() => {
-    agentRef.current = agent;
-  }, [agent]);
-
-  // Rejoining a run in flight is CopilotChat's own doing: it connects to
-  // the thread whenever it is given an explicit threadId, and the server
-  // replays the run so far before following it live. Nothing to start from
-  // here — the agent only has to survive the clear that connect does first
-  // (see StoppableHttpAgent), which is why history is handed to it above
-  // rather than pushed in with setMessages after mount.
-
-  // Refresh the sidebar after each run finishes — that's when the
-  // thread row is created/updated server-side. Also surface run errors:
-  // the server emits RUN_ERROR (onRunErrorEvent) for agent/LLM failures,
-  // and the client raises onRunFailed for transport errors — CopilotKit
-  // only console.errors both, so we lift them into a banner.
-  useEffect(() => {
-    setCompacting(false);
-    if (!agent) return;
-    agent.subscribe({
-      // A live run says what is happening, so the snapshot the page loaded
-      // with is behind it and goes.
-      //
-      // On the RUN_STARTED event, not on initialization: CopilotChat connects
-      // to the thread whenever it is given one, and connectAgent runs the same
-      // path a real run does — so initialization fires even when there was
-      // nothing to join. Clearing there wiped a restored approval card the
-      // instant it was drawn. This fires only when a run is actually
-      // streaming, which is the thing that supersedes it.
-      onRunStartedEvent: () => {
-        setRunError(null);
-        setRestored(null);
-        void refreshThreads();
-      },
-      onCustomEvent: ({ event }: any) => {
-        const value = event?.value ?? {};
-        if (event?.name === "hastekit.summarization_started") { setCompacting(true); return; }
-        if (event?.name === "hastekit.summarization_completed") { setCompacting(false); return; }
-        if (event?.name === "hastekit.background_task_started" && value.taskId) {
-          setLiveTasks((current) => {
-            const next = new Map(current);
-            next.set(value.taskId, {
-              taskId: value.taskId,
-              callId: value.toolCallId,
-              toolName: value.toolName,
-              streamId: value.streamId,
-            });
-            return next;
-          });
-          return;
-        }
-        if (event?.name === "hastekit.background_task_completed" && value.taskId) {
-          setLiveTasks((current) => {
-            if (!current.has(value.taskId)) return current;
-            const next = new Map(current);
-            next.delete(value.taskId);
-            return next;
-          });
-          // The snapshot the page opened with may also be carrying it.
-          setRestored((current) => {
-            if (!current?.backgroundTasks?.length) return current;
-            const remaining = current.backgroundTasks.filter(
-              (t) => t.taskId !== value.taskId
-            );
-            return { ...current, backgroundTasks: remaining };
-          });
-        }
-      },
-      onRunFinalized: () => { setCompacting(false); void refreshThreads(); },
-      onRunErrorEvent: ({ event }: any) => {
-        setCompacting(false);
-        setRunError(event?.message || "The agent run failed.");
-      },
-      onRunFailed: ({ error }: any) => {
-        setCompacting(false);
-        setRunError(error?.message || String(error) || "The agent run failed.");
-      },
-    });
-    // HttpAgent 0.0.53 has no unsubscribe handle; the agent is replaced
-    // by useMemo when threadId changes, dropping the subscription.
-  }, [agent, refreshThreads]);
-
-  // Conversations that have done something since the user last looked at
-  // them. Cleared when the thread is opened, so the badge means "there is
-  // something here you have not seen", not "this ran recently".
-  const [unseen, setUnseen] = useState<Set<string>>(() => new Set());
-
-  const [threadGroups, setThreadGroups] = useState<Map<string, string>>(() => new Map());
-  const unseenRoutines = useMemo(() => {
-    const groups = new Set<string>();
-    for (const threadId of unseen) {
-      const group = threadGroups.get(threadId);
-      if (group && group !== "default") groups.add(group);
-    }
-    return groups;
-  }, [unseen, threadGroups]);
-
-  // Watch every conversation in the namespace, not just the open one.
-  //
-  // The per-thread watch below covers the conversation on screen. This covers
-  // the rest: a background task finishing in conversation A while the user
-  // reads conversation B, or a conversation that did not exist when the page
-  // loaded. Neither could be reached by anything keyed to a thread.
-  //
-  // The cursor is what makes a run that started and ended while the tab was
-  // in the background still count — the feed replays it on the next poll
-  // rather than dropping it.
-  useEffect(() => {
-    if (!agentName) return;
-
-    let stopped = false;
-    const controller = new AbortController();
-
-    const loop = async () => {
-      let cursor = "";
-      while (!stopped) {
-        try {
-          const seen = await watchRunFeed(
-            agentName,
-            cursor,
-            FEED_WAIT_SECONDS,
-            controller.signal
-          );
-          if (stopped) return;
-          cursor = seen.cursor;
-
-          if (seen.events.length === 0) continue;
-
-          // The opening user message is saved before RUN_STARTED, so new
-          // conversations already have their title while the agent works.
-          if (seen.events.some((e) => e.event === "RUN_STARTED" || e.event === "RUN_FINISHED")) {
-            refreshThreads();
-            const history = routineHistoryRefresh.current;
-            if (history && seen.events.some(e => e.event === "RUN_FINISHED" && e.groupId === history.id)) {
-              void history.refresh();
-            }
-          }
-
-          // A run on the conversation the user is reading is one to join, not
-          // to badge: the answer belongs on screen as it is written.
-          if (seen.events.some((e) => e.event === "RUN_STARTED" && e.threadId === activeThreadIdRef.current)) {
-            void agentRef.current?.joinIfIdle();
-          }
-
-          setThreadGroups(current => {
-            const next = new Map(current);
-            for (const event of seen.events) {
-              if (event.groupId) next.set(event.threadId, event.groupId);
-            }
-            return next;
-          });
-          setUnseen((current) => {
-            const next = new Set(current);
-            let changed = false;
-            for (const event of seen.events) {
-              // The conversation on screen is being read as it happens;
-              // badging it would only ask the user to look at what they are
-              // already looking at.
-              if (event.threadId === activeThreadIdRef.current) continue;
-              if (next.has(event.threadId)) continue;
-              next.add(event.threadId);
-              changed = true;
-            }
-            return changed ? next : current;
-          });
-        } catch (error) {
-          if (stopped || controller.signal.aborted) return;
-          console.error("run feed failed; retrying", error);
-          await new Promise((done) => setTimeout(done, FEED_RETRY_MS));
-        }
-      }
-    };
-
-    void loop();
-    return () => {
-      stopped = true;
-      controller.abort();
-    };
-  }, [agentName, refreshThreads]);
-
-  // Clear a stale run error when the user switches thread or agent.
-  // Restore terminal failures when opening history after the replay log has expired.
-  useEffect(() => setRunError(active.run?.status === "error" ? active.run.error || "The agent run failed." : null), [active.threadId, agentName, active.run]);
-
-  // What the thread was left waiting on, as the page found it. Held apart
-  // from `active` because it is transient: the moment a run starts, the run
-  // is the source of truth and this is stale.
-  const [restored, setRestored] = useState<ThreadRunState | null>(null);
-  useEffect(() => setRestored(active.run), [active.threadId, active.run]);
-
-  // Tasks seen starting in this session, keyed by task id.
-  //
-  // The reopened snapshot only covers a conversation the page has just
-  // loaded. A task that starts while the user is sitting here is not in it —
-  // the run that started the task ends normally, and without this the chat
-  // simply goes quiet with nothing to say why. The run's own stream announces
-  // both ends, so that is what this follows.
-  const [liveTasks, setLiveTasks] = useState<Map<string, ThreadBackgroundTask>>(
-    () => new Map()
-  );
-  useEffect(() => setLiveTasks(new Map()), [active.threadId]);
-
-  // The pause the running chat is showing, lifted out of the message list so
-  // it can be drawn in the same place as a pause the page was reloaded into.
-  // Cleared with the thread, like everything else keyed to one conversation.
-  const [liveInterrupt, setLiveInterrupt] = useState<TrayInterrupt | null>(null);
-  useEffect(() => setLiveInterrupt(null), [active.threadId]);
-
-  // What the conversation is waiting on, however we came to know: the
-  // snapshot it was opened with, plus anything seen starting since.
-  const runningTasks = useMemo(() => {
-    const byID = new Map<string, ThreadBackgroundTask>();
-    for (const task of restored?.backgroundTasks ?? []) byID.set(task.taskId, task);
-    for (const [id, task] of liveTasks) byID.set(id, task);
-    return [...byID.values()];
-  }, [restored, liveTasks]);
-
-  // One tray, whichever way the pause reached us. A live one wins: it is the
-  // run talking, and the snapshot the page loaded with is behind it.
-  const tray = useMemo<Tray>(() => {
-    if (liveInterrupt) return { tasks: runningTasks, interrupt: liveInterrupt };
-
-    const waiting = (restored?.interrupts ?? []) as unknown as InterruptEntry[];
-    if (waiting.length) {
-      return {
-        tasks: runningTasks,
-        interrupt: {
-          key: "restored",
-          entries: waiting,
-          onSubmit: (decisions) => {
-            // Cleared first: the resume starts a run, and the run is what
-            // shows what happened next.
-            setRestored(null);
-            agent?.resume(decisions).catch((e) => setRunError(String(e)));
-          },
-        },
-      };
-    }
-
-    return { tasks: runningTasks, interrupt: null };
-  }, [liveInterrupt, restored, runningTasks, agent]);
-
-  // Opening a conversation is what marks it seen.
-  useEffect(() => {
-    setUnseen((current) => {
-      if (!current.has(active.threadId)) return current;
-      const next = new Set(current);
-      next.delete(active.threadId);
-      return next;
-    });
-  }, [active.threadId]);
+  const changeAgent = useCallback((name: string) => {
+    nav.changeAgent(name);
+    threadList.reset();
+  }, [nav.changeAgent, threadList.reset]);
 
   // Steering: a turn typed while the agent is working folds into the run
-  // in flight (see StoppableHttpAgent.steer). Memoised so the composer
+  // in flight (see HastekitAgent.steer). Memoised so the composer
   // isn't remounted on every render.
-  const steer = useCallback((text: string, parts: InputContent[] = []) => agent?.steer(text, parts), [agent]);
+  const steer = useCallback((text: string, parts: InputContent[] = []) => {
+    const trimmed = text.trim();
+    return agent?.steer(parts.length ? [...(trimmed ? [{ type: "text" as const, text: trimmed }] : []), ...parts] : trimmed);
+  }, [agent]);
   // Cast: the slot type expects CopilotChatInput's own static sub-slots on
   // whatever it is handed. This wrapper only changes behaviour and renders
   // the real composer, so it has none of them and needs none.
   const inputSlot = useMemo(
-    () => ((p: any) => <SteerableInput {...p} onSteer={steer} attachmentsEnabled={attachmentsEnabled} sessionId={active.sessionId} />) as any,
-    [steer, attachmentsEnabled, active.sessionId]
+    () => ((p: any) => <SteerableInput {...p} onSteer={steer} attachmentsEnabled={server.attachmentsEnabled} sessionId={active.sessionId} />) as any,
+    [steer, server.attachmentsEnabled, active.sessionId]
   );
 
-  const openThread = useCallback(
-    async (threadId: string, targetAgent = agentName) => {
-      const request = ++navigation.current;
-      try {
-        let { messages, run, nextCursor, sessionId } = await fetchMessages(targetAgent, threadId);
-        // Full-history mode sends the transcript back to a stateless backend.
-        // Preserve that contract even though the history API is paginated.
-        if (fullHistory) {
-          while (nextCursor) {
-            const page = await fetchMessages(targetAgent, threadId, nextCursor);
-            messages = [...page.messages, ...messages];
-            nextCursor = page.nextCursor;
-          }
-        }
-        if (request !== navigation.current) return;
-        setAgentName(targetAgent);
-        setActive({ threadId, sessionId, initialMessages: messages, run, nextCursor });
-        setRoutineThreadReady(true);
-      } catch (e) {
-        if (request !== navigation.current) return;
-        setError(String(e));
-        setRoutineHistoryError(String(e));
-      }
-    },
-    [agentName, fullHistory]
-  );
-
-  const selectThread = useCallback(
-    async (t: ThreadInfo) => {
-      restoreRoutine.current = "";
-      opened.current.thread = "";
-      setSelectedRoutine(null);
-      navigation.current++;
-      if (t.thread_id === active.threadId) return;
-      await openThread(t.thread_id);
-    },
-    [openThread, active.threadId]
-  );
-
-  // Reopen whatever the address bar names, once there is an agent to open it
-  // against. Runs on load and on an agent change; a thread already open is
-  // left alone so this cannot fight the sidebar.
-  useEffect(() => {
-    if (!agentName || restoreRoutine.current) return;
-    const wanted = opened.current.thread;
-    opened.current.thread = "";
-    if (!wanted || wanted === active.threadId) return;
-    void openThread(wanted);
-    // active.threadId is deliberately not a dependency: this is for arriving
-    // at a URL, not for following the user around after that.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [agentName, openThread]);
-
-  // And keep both pointing at whatever is open.
-  useEffect(() => rememberParam(AGENT_PARAM, agentName), [agentName]);
-  useEffect(() => rememberParam(THREAD_PARAM, active.threadId), [active.threadId]);
-
-  const startNewChat = useCallback(() => {
-    navigation.current++;
-    restoreRoutine.current = "";
-    opened.current.thread = "";
-    setSelectedRoutine(null);
-    setActive(newActive());
-  }, []);
-
-  const onAgentChange = useCallback((name: string) => {
-    navigation.current++;
-    restoreRoutine.current = "";
-    opened.current.thread = "";
-    setSelectedRoutine(null);
-    setAgentName(name);
-    setListingSupported(true);
-    setActive(newActive());
-  }, []);
-
-  const openThreadRef = useRef(openThread);
-  openThreadRef.current = openThread;
-  const selectRoutine = (routine: Routine) => {
-    navigation.current++;
-    restoreRoutine.current = "";
-    opened.current.thread = "";
-    setRoutineThreadReady(false);
-    setRoutineThreads([]);
-    setRoutineHistoryError("");
-    setRoutineHistoryLoading(true);
-    // A fresh object also reopens the latest run when this routine is clicked again.
-    setSelectedRoutine({ ...routine });
-  };
-
-  useEffect(() => {
-    if (!selectedRoutine) return;
-    let cancelled = false;
-    let pending = false;
-    let initial = true;
-    let refreshAgain = false;
-    const request = navigation.current;
-    async function refresh() {
-      if (cancelled) return;
-      // A completion arriving during a fetch must trigger another read;
-      // the in-flight response may predate the newly saved conversation.
-      if (pending) { refreshAgain = true; return; }
-      pending = true;
-      try {
-        const threads = await fetchRoutineThreads(selectedRoutine!.id);
-        if (cancelled) return;
-        setRoutineThreads(threads);
-        setRoutineHistoryError("");
-        if (initial && threads.length && request === navigation.current) {
-          initial = false;
-          const restored = restoreRoutine.current ? threads.find(t => t.thread_id === restoreRoutineThread.current) : undefined;
-          restoreRoutine.current = "";
-          opened.current.thread = "";
-          const latest = restored || threads[0];
-          await openThreadRef.current(latest.thread_id, latest.agent_name || selectedRoutine!.agent);
-        }
-      } catch (err) { if (!cancelled) setRoutineHistoryError(String(err)); }
-      finally {
-        pending = false;
-        if (!cancelled) {
-          setRoutineHistoryLoading(false);
-          if (refreshAgain) { refreshAgain = false; void refresh(); }
-        }
-      }
-    }
-    routineHistoryRefresh.current = { id: selectedRoutine.id, refresh };
-    void refresh();
-    return () => { cancelled = true; routineHistoryRefresh.current = null; };
-  }, [selectedRoutine]);
-
-  useEffect(() => {
-    const id = restoreRoutine.current;
-    if (!routinesEnabled || !id) return;
-    let cancelled = false;
-    const request = navigation.current;
-    fetchRoutine(id).then(routine => {
-      if (!cancelled && request === navigation.current) {
-        setRoutineHistoryLoading(true);
-        setSelectedRoutine(routine);
-      }
-    }).catch(() => { restoreRoutine.current = ""; });
-    return () => { cancelled = true; };
-  }, [routinesEnabled]);
-  useEffect(() => {
-    if (!restoreRoutine.current) rememberParam("routine", selectedRoutine?.id || "");
-  }, [selectedRoutine, routineThreadReady]);
+  const [routinesOpen, setRoutinesOpen] = useState(false);
+  const [libraryOpen, setLibraryOpen] = useState(false);
+  const [mcpLibraryOpen, setMCPLibraryOpen] = useState(false);
 
   return (
     // data-copilotkit + .dark put this whole tree in CopilotKit v2's
@@ -779,31 +142,31 @@ export default function App() {
       className="dark app"
       data-copilotkit
     >
-      {routinesOpen && <RoutineLibrary initialAgent={agentName} onChanged={routinesChanged} onClose={() => setRoutinesOpen(false)} />}
-      {libraryOpen && <SkillLibrary onClose={() => setLibraryOpen(false)} onSaved={() => setSkillRevision(v => v + 1)} />}
-      {mcpLibraryOpen && <MCPLibrary onClose={() => setMCPLibraryOpen(false)} onChanged={() => setMCPRevision(v => v + 1)} />}
+      {routinesOpen && <RoutineLibrary initialAgent={agentName} onChanged={routineList.reload} onClose={() => setRoutinesOpen(false)} />}
+      {libraryOpen && <SkillLibrary onClose={() => setLibraryOpen(false)} onSaved={skills.reload} />}
+      {mcpLibraryOpen && <MCPLibrary onClose={() => setMCPLibraryOpen(false)} onChanged={mcp.reload} />}
       <Sidebar
-        threads={threads}
+        threads={threadList.threads}
         activeThreadId={active.threadId}
         unseen={unseen}
         unseenRoutines={unseenRoutines}
-        onSelect={selectThread}
-        onNew={startNewChat}
-        selectedRoutineId={selectedRoutine?.id}
-        onSelectRoutine={selectRoutine}
-        routines={enabledRoutines}
-        routinesLoading={routinesLoading}
-        routineError={routineListError}
-        onManageRoutines={routinesEnabled ? () => setRoutinesOpen(true) : undefined}
-        onManageSkills={skillStoreEnabled ? () => setLibraryOpen(true) : undefined}
-        onManageMCP={mcpStoreEnabled ? () => setMCPLibraryOpen(true) : undefined}
-        onRetry={refreshThreads}
-        listingSupported={listingSupported}
+        onSelect={nav.selectThread}
+        onNew={nav.startNewChat}
+        selectedRoutineId={routine.selected?.id}
+        onSelectRoutine={routine.select}
+        routines={routineList.routines}
+        routinesLoading={routineList.loading}
+        routineError={routineList.error}
+        onManageRoutines={server.routinesEnabled ? () => setRoutinesOpen(true) : undefined}
+        onManageSkills={server.skillStoreEnabled ? () => setLibraryOpen(true) : undefined}
+        onManageMCP={server.mcpStoreEnabled ? () => setMCPLibraryOpen(true) : undefined}
+        onRetry={threadList.refresh}
+        listingSupported={threadList.supported}
         error={error}
       />
-      {selectedRoutine && !routineThreadReady ? <main className="chat-pane routine-empty">
-        <h2>{selectedRoutine.name}</h2>
-        <p>{routineHistoryLoading ? "Loading latest conversation…" : routineHistoryError || "This routine has no conversations yet. Its first run will appear here."}</p>
+      {routine.selected && !routine.threadOpen ? <main className="chat-pane routine-empty">
+        <h2>{routine.selected.name}</h2>
+        <p>{routine.loading ? "Loading latest conversation…" : routine.error || "This routine has no conversations yet. Its first run will appear here."}</p>
       </main> : agent && (
         <CopilotKitProvider
           key={active.threadId}
@@ -812,34 +175,34 @@ export default function App() {
         >
           <div className="chat-pane">
             <header className="topbar">
-              {selectedRoutine && <span className="routine-chat-title">{selectedRoutine.name}</span>}
+              {routine.selected && <span className="routine-chat-title">{routine.selected.name}</span>}
               <AgentMenu
-                agents={agents}
+                agents={server.agents}
                 agentName={agentName}
-                onAgentChange={onAgentChange}
+                onAgentChange={changeAgent}
               />
-
             </header>
-            <InterruptHandler agentName={agentName} publish={setLiveInterrupt} />
+            <InterruptHandler agentName={agentName} publish={activity.publishInterrupt} />
             <InlineToolRenderer agentName={agentName} />
-            {compacting && <div role="status" aria-live="polite" className="hint">Compacting context...</div>}
-            {runError && (
+            <ClientTools agent={agent} pendingToolCallIds={active.run?.pendingToolCallIds} />
+            {activity.compacting && <div role="status" aria-live="polite" className="hint">Compacting context...</div>}
+            {activity.runError && (
               <div className="run-error" role="alert">
                 <span className="ico">⚠</span>
-                <div className="msg">{runError}</div>
+                <div className="msg">{activity.runError}</div>
                 <button
                   className="dismiss"
-                  onClick={() => setRunError(null)}
+                  onClick={activity.dismissRunError}
                   aria-label="Dismiss error"
                 >
                   ×
                 </button>
               </div>
             )}
-            <ComposerSkillsContext.Provider value={{ skills: skillCatalog, choices: skillChoices, error: skillError, toggle: toggleSkill, canManage: skillStoreEnabled, onManage: () => setLibraryOpen(true) }}>
-            <ComposerMCPContext.Provider value={{ servers: mcpServers, choices: mcpChoices, error: mcpError, toggle: toggleMCPServer, canManage: mcpStoreEnabled, onManage: () => setMCPLibraryOpen(true) }}>
-            <TrayContext.Provider value={tray}>
-              <HistoryPager key={`${agentName}:${active.threadId}`} agent={agent!} agentName={agentName} threadId={active.threadId} initialCursor={active.nextCursor ?? ""}>
+            <ComposerSkillsContext.Provider value={{ skills: skills.items, choices: skills.choices, error: skills.error, toggle: skills.toggle, canManage: server.skillStoreEnabled, onManage: () => setLibraryOpen(true) }}>
+            <ComposerMCPContext.Provider value={{ servers: mcp.items, choices: mcp.choices, error: mcp.error, toggle: mcp.toggle, canManage: server.mcpStoreEnabled, onManage: () => setMCPLibraryOpen(true) }}>
+            <TrayContext.Provider value={activity.tray}>
+              <HistoryPager key={`${agentName}:${active.threadId}`} agent={agent} initialCursor={active.nextCursor ?? ""}>
                 <CopilotChat
                   agentId={agentName}
                   threadId={active.threadId}
@@ -858,713 +221,16 @@ export default function App() {
           </div>
         </CopilotKitProvider>
       )}
-      {selectedRoutine && <aside className="routine-history" aria-label="Routine conversation history">
-        <RunRoutineButton key={selectedRoutine.id} routine={selectedRoutine} />
-        <div className="routine-history-heading"><h2>Run history</h2><button className="icon-btn" aria-label="Manage routines" onClick={() => setRoutinesOpen(true)}>⚙</button></div>
-        <p className="hint">{selectedRoutine.name}</p>
-        {routineHistoryError && <p className="hint error" role="alert">{routineHistoryError}</p>}
-        {routineHistoryLoading && <p className="hint">Loading conversations…</p>}
-        {!routineHistoryLoading && !routineHistoryError && !routineThreads.length && <p className="hint">No runs yet.</p>}
-        {routineThreads.map((thread, index) => <button key={`${thread.agent_name}:${thread.thread_id}`}
-          className={"thread-item routine-history-item" + (routineThreadReady && thread.thread_id === active.threadId ? " selected" : "") + (unseen.has(thread.thread_id) ? " unseen" : "")}
-          aria-current={routineThreadReady && thread.thread_id === active.threadId ? "true" : undefined}
-          onClick={() => { setRoutineThreadReady(false); void openThread(thread.thread_id, thread.agent_name || selectedRoutine.agent); }}>
-          <span className="routine-history-title">
-            <span>{new Date(thread.created_at).toLocaleString()}{index === 0 ? " · Latest" : ""}</span>
-            {unseen.has(thread.thread_id) && <span className="thread-dot" aria-label="New activity" />}
-          </span>
-          <small>{thread.agent_name || selectedRoutine.agent} · {thread.title || "Routine run"}</small>
-        </button>)}
-      </aside>}
-    </div>
-  );
-}
-
-// Older pages are prepended without rebuilding the agent or disconnecting its run.
-function HistoryPager({ agent, agentName, threadId, initialCursor, children }: {
-  agent: StoppableHttpAgent; agentName: string; threadId: string;
-  initialCursor: string; children: React.ReactNode;
-}) {
-  const [cursor, setCursor] = useState(initialCursor);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
-  const busy = useRef(false);
-  const alive = useRef(true);
-  const scrollArea = useRef<HTMLElement | null>(null);
-  useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
-  const load = async () => {
-    if (!cursor || busy.current) return;
-    busy.current = true; setLoading(true); setError("");
-    try {
-      const page = await fetchMessages(agentName, threadId, cursor);
-      if (!alive.current) return;
-      const el = scrollArea.current;
-      const height = el?.scrollHeight ?? 0;
-      const top = el?.scrollTop ?? 0;
-      agent.prependHistory(page.messages);
-      setCursor(page.nextCursor);
-      requestAnimationFrame(() => requestAnimationFrame(() => {
-        if (alive.current && el) el.scrollTop = top + el.scrollHeight - height;
-      }));
-    } catch (e) {
-      if (alive.current) setError(String(e));
-    } finally {
-      busy.current = false;
-      if (alive.current) setLoading(false);
-    }
-  };
-  return <div className="chat-inner history-pager">
-    {cursor && <div className="history-controls">
-      <button disabled={loading} onClick={() => void load()}>{loading ? "Loading older messages…" : error ? "Retry loading older messages" : "Load older messages"}</button>
-      {error && <span role="alert">{error}</span>}
-    </div>}
-    <div className="history-chat" onScrollCapture={e => {
-      const el = e.target as HTMLElement;
-      if (el.tagName === "TEXTAREA" || el.scrollHeight <= el.clientHeight) return;
-      scrollArea.current = el;
-      if (el.scrollTop < 80 && !error) void load();
-    }}>{children}</div>
-  </div>;
-}
-
-// ── Composer ───────────────────────────────────────────────
-
-// Keep the task/approval tray above the attachment-aware composer.
-function SteerableInput(props: any) {
-  const tray = useContext(TrayContext);
-  return <><ComposerTray tray={tray} /><AttachmentInput {...props} /></>;
-
-}
-
-// ComposerTray is the one place the chat says what it is waiting on — a tool
-// still working, a decision it needs — directly above the box the user would
-// answer in.
-//
-// It renders inside the composer's slot because that is where the answer is
-// given. It used to be two places: an approval that arrived live was drawn
-// inline among the messages by CopilotKit, and the same approval after a
-// reload was drawn above the transcript, so the same question moved depending
-// on how the page came to know about it. It also puts the note within reach
-// of a long conversation, where the top of the transcript is nowhere near
-// where the user is reading.
-//
-// Sitting in CopilotChat's input overlay means the transcript's bottom padding
-// tracks it — the overlay is measured — so nothing is left hidden behind it.
-function ComposerTray({ tray }: { tray: Tray }) {
-  if (!tray.tasks.length && !tray.interrupt) return null;
-
-  return (
-    <div className="composer-tray">
-      {tray.tasks.length > 0 && (
-        // Keyed by the tasks it is about, so dismissing it hides that set and
-        // a job starting later says so rather than staying silent because the
-        // note was waved away once.
-        <BackgroundTaskNote
-          key={tray.tasks.map((t) => t.taskId).join(",")}
-          tasks={tray.tasks}
-        />
-      )}
-      {tray.interrupt && (
-        <InterruptCard
-          key={tray.interrupt.key}
-          entries={tray.interrupt.entries}
-          onSubmit={tray.interrupt.onSubmit}
-        />
-      )}
-    </div>
-  );
-}
-
-// ── Sidebar ────────────────────────────────────────────────
-
-// Where the logo lives at runtime. public/ is copied to the build output
-// as-is, and BASE_URL keeps the reference relative so the UI still finds
-// it when the Go server is mounted under a sub-path.
-const LOGO = `${import.meta.env.BASE_URL}hastekit-logo.svg`;
-
-function Sidebar({
-  threads,
-  activeThreadId,
-  unseen,
-  unseenRoutines,
-  onSelect,
-  onNew,
-  onManageSkills,
-  onManageMCP,
-  onManageRoutines,
-  routines,
-  routinesLoading,
-  routineError,
-  selectedRoutineId,
-  onSelectRoutine,
-  onRetry,
-  listingSupported,
-  error,
-}: {
-  threads: ThreadInfo[];
-  activeThreadId: string;
-  unseen: Set<string>;
-  unseenRoutines: Set<string>;
-  onSelect: (t: ThreadInfo) => void;
-  onNew: () => void;
-  onManageSkills?: () => void;
-  onManageMCP?: () => void;
-  onManageRoutines?: () => void;
-  routines: Routine[];
-  selectedRoutineId?: string;
-  onSelectRoutine: (routine: Routine) => void;
-  routinesLoading: boolean;
-  routineError: string;
-  onRetry: () => void;
-  listingSupported: boolean;
-  error: string | null;
-}) {
-  return (
-    <ThreadsDrawer threads={listingSupported ? threads : []} activeThreadId={selectedRoutineId ? "" : activeThreadId}
-      error={error} onSelect={onSelect} onNew={onNew} onRetry={onRetry}>
-      <div slot="header" className="drawer-header">
-        <span className="brand"><img className="logo" src={LOGO} alt="" />HasteKit</span>
-        {onManageSkills && <button className="nav-item" onClick={onManageSkills}>Skill library</button>}
-        {onManageMCP && <button className="nav-item" onClick={onManageMCP}>MCP servers</button>}
-      </div>
-      <span slot="empty">{listingSupported ? "No conversations yet — start a new chat." : "Conversation history is not available for this agent."}</span>
-        {onManageRoutines && <section slot="footer" aria-label="Routines" className="sidebar-routines">
-          <div className="section-label routine-section-heading">
-            <span>Routines</span>
-            <button className="icon-btn" onClick={onManageRoutines} aria-label="Manage routines" title="Create and manage routines">+</button>
-          </div>
-          {routineError && <div className="hint error" role="alert">{routineError}</div>}
-          {routinesLoading && <div className="hint">Loading routines…</div>}
-          {!routinesLoading && !routineError && routines.length === 0 && <div className="hint">No enabled routines.</div>}
-          {routines.map(routine => {
-            const hasUnseen = unseenRoutines.has(routine.id);
-            return <button key={routine.id} className={"thread-item" + (selectedRoutineId === routine.id ? " selected" : "") + (hasUnseen ? " unseen" : "")} onClick={() => onSelectRoutine(routine)}
-              title={`${routine.name} · ${routine.agent}${hasUnseen ? " · new activity" : ""}`}>
-              <span className="thread-title">{routine.name}</span>
-              {hasUnseen && <span className="thread-dot" aria-label="New activity" />}
-            </button>;
-          })}
-        </section>}
-
-      {threads.map(thread => <span key={thread.thread_id} slot={`row:${thread.thread_id}`}
-        className={"drawer-thread-content" + (unseen.has(thread.thread_id) ? " unseen" : "")}
-        title={`${thread.title || "Untitled"} · ${relativeTime(thread.updated_at)}`}>
-        <span className="thread-title">{thread.title || "Untitled"}</span>
-        {unseen.has(thread.thread_id) && <span className="thread-dot" aria-label="New activity" />}
-      </span>)}
-    </ThreadsDrawer>
-  );
-}
-
-// ── Agent selector ─────────────────────────────────────────
-
-// The title-bar dropdown: the agent the chat is pointed at. A menu rather
-// than a <select> so it can carry the same weight as the rest of the bar —
-// and so a single registered agent reads as a heading, not a control.
-function AgentMenu({
-  agents,
-  agentName,
-  onAgentChange,
-}: {
-  agents: string[];
-  agentName: string;
-  onAgentChange: (name: string) => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const wrap = useRef<HTMLDivElement | null>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const onDown = (e: MouseEvent) => {
-      if (!wrap.current?.contains(e.target as Node)) setOpen(false);
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
-    };
-    document.addEventListener("mousedown", onDown);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDown);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [open]);
-
-  const single = agents.length < 2;
-
-  return (
-    <div className="agent-menu" ref={wrap}>
-      <button
-        className="agent-trigger"
-        onClick={() => !single && setOpen((v) => !v)}
-        aria-haspopup={single ? undefined : "menu"}
-        aria-expanded={single ? undefined : open}
-        disabled={single}
-      >
-        {agentName || "No agent"}
-        {!single && <ChevronIcon />}
-      </button>
-
-      {open && (
-        <div className="agent-pop" role="menu">
-          {agents.map((n) => (
-            <button
-              key={n}
-              role="menuitem"
-              className={"agent-opt" + (n === agentName ? " selected" : "")}
-              onClick={() => {
-                setOpen(false);
-                if (n !== agentName) onAgentChange(n);
-              }}
-            >
-              <span className="nm">{n}</span>
-              {n === agentName && <CheckIcon />}
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ── Icons ──────────────────────────────────────────────────
-
-const svg = {
-  width: 18,
-  height: 18,
-  viewBox: "0 0 24 24",
-  fill: "none",
-  stroke: "currentColor",
-  strokeWidth: 1.6,
-  strokeLinecap: "round" as const,
-  strokeLinejoin: "round" as const,
-};
-
-function ChevronIcon() {
-  return (
-    <svg {...svg} width={16} height={16}>
-      <path d="m6 9 6 6 6-6" />
-    </svg>
-  );
-}
-
-function CheckIcon() {
-  return (
-    <svg {...svg} width={16} height={16}>
-      <path d="m5 13 4 4L19 7" />
-    </svg>
-  );
-}
-
-// ── HITL: approvals and elicitations ───────────────────────
-
-// A run pauses in one of three ways, and each needs a different thing from
-// the user: approve/reject a call, fill in a form, or visit a URL. They
-// arrive on the same on_interrupt event and can be mixed in one pause, so
-// one card collects them all and resolves once.
-
-interface ApprovalDecision {
-  toolCallId: string;
-  approved: boolean;
-  content?: Record<string, unknown>;
-}
-
-interface PendingToolCall {
-  toolCallId: string;
-  toolCallName: string;
-  arguments: string;
-}
-
-interface SchemaProperty {
-  type?: string;
-  title?: string;
-  description?: string;
-  enum?: string[];
-  default?: unknown;
-}
-
-interface RequestedSchema {
-  properties?: Record<string, SchemaProperty>;
-  required?: string[];
-}
-
-interface InterruptEntry {
-  toolCallId: string;
-  toolCallName?: string;
-  arguments?: string;
-  mode?: string;
-  message?: string;
-  requestedSchema?: RequestedSchema;
-  url?: string;
-}
-
-interface InterruptPayload {
-  kind: string;
-  pendingToolCalls?: PendingToolCall[];
-  interrupts?: InterruptEntry[];
-}
-
-// InterruptHandler turns CopilotKit's inline interrupt into a tray entry.
-//
-// useInterrupt renders where it is asked to, which is among the messages. That
-// is one of the two places an approval used to appear, and the one that moved
-// when the page was reloaded. So the render hands the pause upward and draws
-// nothing itself; the tray decides where it goes.
-function InterruptHandler({
-  agentName,
-  publish,
-}: {
-  agentName: string;
-  publish: (next: (current: TrayInterrupt | null) => TrayInterrupt | null) => void;
-}) {
-  useInterrupt<ApprovalDecision[]>({
-    agentId: agentName,
-    enabled: (event: any) => {
-      const v = event?.value as InterruptPayload | undefined;
-      return (
-        v?.kind === "tool_approval" ||
-        v?.kind === "elicitation" ||
-        v?.kind === "mixed"
-      );
-    },
-    render: ({ event, resolve }: any) => {
-      const payload = event.value as InterruptPayload;
-      // interrupts carries every mode; pendingToolCalls is the older
-      // approval-only shape, kept working for servers that predate it.
-      const entries: InterruptEntry[] = payload.interrupts?.length
-        ? payload.interrupts
-        : (payload.pendingToolCalls ?? []).map((c) => ({ ...c, mode: "approval" }));
-      return (
-        <InterruptPublisher entries={entries} resolve={resolve} publish={publish} />
-      );
-    },
-  });
-  return null;
-}
-
-// InterruptPublisher is the pause, held as state for as long as CopilotKit
-// keeps it mounted, and drawn elsewhere.
-//
-// A component rather than a call in render because publishing is a state
-// change, and the mount/unmount pair is exactly the lifetime the pause has.
-function InterruptPublisher({
-  entries,
-  resolve,
-  publish,
-}: {
-  entries: InterruptEntry[];
-  resolve: (value: unknown) => void;
-  publish: (next: (current: TrayInterrupt | null) => TrayInterrupt | null) => void;
-}) {
-  // resolve is rebuilt on each of CopilotKit's renders; the tray holds one
-  // callback for the life of the pause, so it reaches the current one here
-  // instead of being republished to keep up.
-  const resolveRef = useRef(resolve);
-  useEffect(() => {
-    resolveRef.current = resolve;
-  });
-
-  const key = entries.map((e) => e.toolCallId).join(",");
-  useEffect(() => {
-    publish(() => ({
-      key,
-      entries,
-      onSubmit: (decisions) => {
-        // useInterrupt forwards resolve()'s argument verbatim under
-        // forwardedProps.command.resume on the next run. Wrap as
-        // { decisions } so the server's canonical parse path
-        // (command.resume.decisions) picks it up.
-        resolveRef.current({ decisions } as any);
-      },
-    }));
-    // Only if it is still ours: a pause resolved into another pause unmounts
-    // this one after the next has already published, and a blind clear would
-    // take the new one down with it.
-    return () => publish((current) => (current?.key === key ? null : current));
-    // entries is fixed for a given set of call ids, which is what key is.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key, publish]);
-
-  return null;
-}
-
-// coerce turns a form input's string back into the type the schema asked
-// for, so a number field does not arrive at the server quoted.
-function coerce(raw: string, prop?: SchemaProperty): unknown {
-  if (prop?.type === "number" || prop?.type === "integer") {
-    if (raw.trim() === "") return undefined;
-    const n = Number(raw);
-    return Number.isNaN(n) ? raw : n;
-  }
-  return raw;
-}
-
-function initialForm(schema?: RequestedSchema): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
-  for (const [name, prop] of Object.entries(schema?.properties ?? {})) {
-    if (prop.default !== undefined) out[name] = prop.default;
-    else if (prop.type === "boolean") out[name] = false;
-  }
-  return out;
-}
-
-function InterruptCard({
-  entries,
-  onSubmit,
-}: {
-  entries: InterruptEntry[];
-  onSubmit: (decisions: ApprovalDecision[]) => void;
-}) {
-  const approvals = entries.filter((e) => !e.mode || e.mode === "approval");
-  const forms = entries.filter((e) => e.mode === "form");
-  const urls = entries.filter((e) => e.mode === "url");
-
-  const [checked, setChecked] = useState<Record<string, boolean>>(() => {
-    const d: Record<string, boolean> = {};
-    for (const e of approvals) d[e.toolCallId] = true;
-    return d;
-  });
-  const [values, setValues] = useState<Record<string, Record<string, unknown>>>(() => {
-    const d: Record<string, Record<string, unknown>> = {};
-    for (const e of forms) d[e.toolCallId] = initialForm(e.requestedSchema);
-    return d;
-  });
-
-  // A required field left empty would be rejected by the server's schema
-  // validation, so catch it here where the user can still see the field.
-  const missing = forms.some((e) =>
-    (e.requestedSchema?.required ?? []).some((name) => {
-      const v = values[e.toolCallId]?.[name];
-      return v === undefined || v === "";
-    })
-  );
-
-  const submit = (approved: boolean) =>
-    onSubmit(
-      entries.map((e) => {
-        if (!approved) return { toolCallId: e.toolCallId, approved: false };
-        if (e.mode === "form") {
-          return {
-            toolCallId: e.toolCallId,
-            approved: true,
-            content: values[e.toolCallId] ?? {},
-          };
-        }
-        if (e.mode === "url") return { toolCallId: e.toolCallId, approved: true };
-        return { toolCallId: e.toolCallId, approved: checked[e.toolCallId] ?? true };
-      })
-    );
-
-  const title =
-    forms.length || urls.length
-      ? forms.length && !urls.length
-        ? "The agent needs some details"
-        : "The agent needs something from you"
-      : `Approve ${approvals.length} pending tool call${approvals.length === 1 ? "" : "s"}`;
-
-  return (
-    <div className="hk-approval">
-      <h4>⏸ {title}</h4>
-
-      {approvals.map((e) => (
-        <label className="hk-call" key={e.toolCallId}>
-          <input
-            type="checkbox"
-            checked={checked[e.toolCallId] ?? true}
-            onChange={(ev) =>
-              setChecked((p) => ({ ...p, [e.toolCallId]: ev.target.checked }))
-            }
-          />
-          <div className="meta">
-            <div className="nm">{e.toolCallName}</div>
-            <div className="args" title={e.arguments}>
-              {e.arguments}
-            </div>
-          </div>
-        </label>
-      ))}
-
-      {forms.map((e) => (
-        <div className="hk-elicit" key={e.toolCallId}>
-          {e.message && <p className="hk-elicit-msg">{e.message}</p>}
-          {Object.entries(e.requestedSchema?.properties ?? {}).map(([name, prop]) => {
-            const required = (e.requestedSchema?.required ?? []).includes(name);
-            const value = values[e.toolCallId]?.[name];
-            const set = (v: unknown) =>
-              setValues((p) => ({
-                ...p,
-                [e.toolCallId]: { ...(p[e.toolCallId] ?? {}), [name]: v },
-              }));
-            return (
-              <label className="hk-field" key={name}>
-                <span className="hk-field-label">
-                  {prop.title || name}
-                  {required && <em className="hk-req"> *</em>}
-                </span>
-                {prop.enum ? (
-                  <select
-                    value={String(value ?? "")}
-                    onChange={(ev) => set(ev.target.value)}
-                  >
-                    <option value="">—</option>
-                    {prop.enum.map((opt) => (
-                      <option key={opt} value={opt}>
-                        {opt}
-                      </option>
-                    ))}
-                  </select>
-                ) : prop.type === "boolean" ? (
-                  <input
-                    type="checkbox"
-                    checked={Boolean(value)}
-                    onChange={(ev) => set(ev.target.checked)}
-                  />
-                ) : (
-                  <input
-                    type={prop.type === "number" || prop.type === "integer" ? "number" : "text"}
-                    value={value === undefined ? "" : String(value)}
-                    onChange={(ev) => set(coerce(ev.target.value, prop))}
-                  />
-                )}
-                {prop.description && <span className="hk-hint">{prop.description}</span>}
-              </label>
-            );
-          })}
-        </div>
-      ))}
-
-      {urls.map((e) => (
-        <div className="hk-elicit" key={e.toolCallId}>
-          {e.message && <p className="hk-elicit-msg">{e.message}</p>}
-          <a className="hk-link" href={e.url} target="_blank" rel="noreferrer noopener">
-            {e.url}
-          </a>
-          <p className="hk-hint">Open the link, then continue below.</p>
-        </div>
-      ))}
-
-      <div className="hk-actions">
-        {approvals.length > 0 && !forms.length && !urls.length && (
-          <span className="count">
-            {Object.values(checked).filter(Boolean).length} of {approvals.length} approved
-          </span>
-        )}
-        <button className="hk-btn" onClick={() => submit(false)}>
-          {forms.length || urls.length ? "Cancel" : "Reject all"}
-        </button>
-        <button className="hk-btn primary" disabled={missing} onClick={() => submit(true)}>
-          {forms.length || urls.length ? "Continue" : "Submit"}
-        </button>
-      </div>
-    </div>
-  );
-}
-
-// ── Tool call rendering ────────────────────────────────────
-
-// InlineToolRenderer registers a wildcard renderer so every tool call
-// gets our collapsible card instead of CopilotKit's default.
-function InlineToolRenderer({ agentName }: { agentName: string }) {
-  useDefaultRenderTool(
-    {
-      render: (props: any) => <ToolCallCard {...props} />,
-    },
-    [agentName]
-  );
-  return null;
-}
-
-function ToolCallCard({
-  name,
-  status,
-  parameters,
-  result,
-}: {
-  name: string;
-  status: "inProgress" | "executing" | "complete";
-  parameters: unknown;
-  result: string | undefined;
-}) {
-  const dot =
-    status === "complete" ? "#10b981" : status === "executing" ? "#f59e0b" : "#94a3b8";
-  const pill =
-    status === "complete"
-      ? { label: "Done", bg: "#dcfce7", fg: "#166534" }
-      : status === "executing"
-      ? { label: "Running", bg: "#fef3c7", fg: "#854d0e" }
-      : { label: "Pending", bg: "#f1f5f9", fg: "#475569" };
-
-  return (
-    <div className="hk-tool">
-      <details>
-        <summary>
-          <span className="hk-dot" style={{ background: dot }} />
-          <code>{name}</code>
-          <span className="hk-pill" style={{ background: pill.bg, color: pill.fg }}>
-            {pill.label}
-          </span>
-        </summary>
-        <div className="body">
-          {hasContent(parameters) && <Block label="Arguments" value={parameters} />}
-          {result && <Block label="Result" value={result} />}
-        </div>
-      </details>
-    </div>
-  );
-}
-
-function Block({ label, value }: { label: string; value: unknown }) {
-  const text = typeof value === "string" ? value : safePretty(value);
-  const clipped = text.length > 800 ? text.slice(0, 800) + "…" : text;
-  return (
-    <div>
-      <div className="blk-label">{label}</div>
-      <pre>{clipped}</pre>
-    </div>
-  );
-}
-
-function hasContent(v: unknown): boolean {
-  if (v == null) return false;
-  if (typeof v === "string") return v.length > 0;
-  if (Array.isArray(v)) return v.length > 0;
-  if (typeof v === "object") return Object.keys(v as object).length > 0;
-  return true;
-}
-
-function safePretty(v: unknown): string {
-  try {
-    return JSON.stringify(v, null, 2);
-  } catch {
-    return String(v);
-  }
-}
-
-// BackgroundTaskNote says a tool is still working after the turn that called
-// it finished.
-//
-// Without it a reloaded page reads as though the agent simply stopped
-// talking: the tool answered, the run ended, and the actual work is somewhere
-// else entirely. The note is dismissible because the task may well outlast
-// the user's interest in being told about it.
-function BackgroundTaskNote({ tasks }: { tasks: ThreadBackgroundTask[] }) {
-  const [hidden, setHidden] = useState(false);
-  if (hidden) return null;
-
-  return (
-    <div className="background-note" role="status">
-      <span className="spinner" aria-hidden="true" />
-      <div className="msg">
-        {tasks.length === 1
-          ? `${tasks[0].toolName || "A background job"} is still running. Its result will arrive here when it finishes.`
-          : `${tasks.length} background jobs are still running. Their results will arrive here when they finish.`}
-      </div>
-      <button
-        className="dismiss"
-        onClick={() => setHidden(true)}
-        aria-label="Dismiss"
-      >
-        ×
-      </button>
+      {routine.selected && <RoutineHistory
+        routine={routine.selected}
+        threads={routine.threads}
+        loading={routine.loading}
+        error={routine.error}
+        activeThreadId={routine.threadOpen ? active.threadId : ""}
+        unseen={unseen}
+        onManage={() => setRoutinesOpen(true)}
+        onOpen={routine.openThread}
+      />}
     </div>
   );
 }

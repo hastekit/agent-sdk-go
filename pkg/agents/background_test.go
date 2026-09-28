@@ -194,6 +194,37 @@ func TestBackgroundTask_WakesAnIdleAgent(t *testing.T) {
 	assert.Equal(t, "indexed 4210 documents", output, "the result reaches the model as its own block")
 }
 
+// The run a finished task wakes offers the client's tools again: nobody sends
+// a request for it, so they come from the run that started the task.
+func TestBackgroundTask_WokenRunOffersTheClientsTools(t *testing.T) {
+	llm := &scriptedLLM{script: []*responses.Response{
+		toolCallResponse("call_1", "index", "{}"),
+		textResponse("indexing started"),
+		textResponse("the index is ready"),
+	}}
+	tool := newBackgroundTool("index", "task-1")
+	agent := agents.NewAgent(&agents.AgentOptions{Name: "main", Tools: []agents.Tool{tool}}).WithLLM(llm)
+
+	out := runAgent(t, agent, &agents.AgentInput{
+		Namespace: "test", ThreadID: "thread-bg-client-tools", Message: userMessage("index the docs"),
+		ClientTools: selectionTool,
+	})
+	requireStatus(t, out, agentstate.RunStatusCompleted)
+
+	close(tool.release)
+	agent.WaitForBackgroundTasks()
+	require.Equal(t, 3, llm.callCount())
+	require.Equal(t, selectionTool, tool.awaited()[0].ClientTools)
+
+	var offered []string
+	for _, def := range llm.request(2).Tools {
+		if def.OfFunction != nil {
+			offered = append(offered, def.OfFunction.Name)
+		}
+	}
+	assert.Contains(t, offered, "get_selection", "the woken run can call the client's tool")
+}
+
 // --- delivery: a run is still going ----------------------------------------
 
 // waitTool blocks until every background task has been delivered, which puts
