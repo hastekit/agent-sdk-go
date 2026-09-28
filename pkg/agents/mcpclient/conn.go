@@ -3,6 +3,7 @@ package mcpclient
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"maps"
 	"os"
@@ -56,6 +57,10 @@ type serverConn struct {
 	// when a provider declined to say, which is the case poolable rules out.
 	Principal string
 
+	// AuthorizationKey fingerprints the OAuth settings captured by a token source.
+	// Config edits need a new session; ordinary token refreshes do not.
+	AuthorizationKey string
+
 	DisableStandaloneSSE bool
 }
 
@@ -86,8 +91,20 @@ func (c serverConn) digest() string {
 		strings.Join(c.Command, " "),
 		sortedPairs(c.Headers),
 		sortedPairs(c.Env),
+		c.AuthorizationKey,
 	}, "|")))
 	return hex.EncodeToString(sum[:12])
+}
+
+// authorizationDigest includes refresh settings such as the client secret, while
+// keeping their plaintext out of pool keys and logs. OAuthConfig is JSON-safe.
+func authorizationDigest(config *OAuthConfig) string {
+	if config == nil {
+		return ""
+	}
+	data, _ := json.Marshal(config)
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
 }
 
 // poolable reports whether this connection may be shared with the next call

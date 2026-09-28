@@ -88,6 +88,10 @@ type ToolFilter struct {
 	Exclude []string `json:"exclude,omitempty"`
 }
 
+func (f ToolFilter) allows(name string) bool {
+	return (len(f.Include) == 0 || slices.Contains(f.Include, name)) && !slices.Contains(f.Exclude, name)
+}
+
 // withToolFilter controls which tools ListTools exposes.
 func withToolFilter(toolFilter ToolFilter) serverOption {
 	return func(srv *server) {
@@ -338,9 +342,8 @@ func (srv *server) cacheTTL(listing toolListing) time.Duration {
 // It takes the tool rather than looking one up by name. A durable runtime's
 // workflow already holds the tool as serialized data and hands it back here, so
 // there is nothing to resolve: tool.Name is the name the server knows, already
-// free of any prefix the model-facing name carries. That also means a tool the
-// filter excluded cannot be called here — one that was never listed has no
-// BaseTool to pass.
+// free of any prefix the model-facing name carries. The current filter is checked
+// again because configuration edits can revoke a previously listed tool.
 func (srv *server) CallToolDirect(ctx context.Context, runContext map[string]any, tool *agents.BaseTool, params *agents.ToolCall) (*agents.ToolCallResponse, error) {
 	// The call carries the execution namespace required to resolve credentials.
 	if params == nil {
@@ -349,6 +352,9 @@ func (srv *server) CallToolDirect(ctx context.Context, runContext map[string]any
 
 	if tool == nil || tool.Name == "" {
 		return nil, fmt.Errorf("mcp: cannot call %q without the tool it names", params.Name)
+	}
+	if !srv.ToolFilter.allows(tool.Name) {
+		return nil, fmt.Errorf("mcp: tool %q is excluded by the current filter for server %q", tool.Name, srv.Name)
 	}
 
 	// The run context comes in as its own argument on this path — a durable
@@ -407,6 +413,7 @@ func (srv *server) connFor(ctx context.Context, namespace string, runContext map
 		Env:                  resolveTemplates(srv.Env, runContext),
 		TokenSource:          tokens,
 		Principal:            principal,
+		AuthorizationKey:     authorizationDigest(srv.authorization),
 		DisableStandaloneSSE: srv.DisableStandaloneSSE,
 	}, nil
 }
@@ -480,10 +487,7 @@ func (srv *server) fetchToolSchemas(ctx context.Context, conn serverConn) (toolL
 func (srv *server) buildLazyTools(tools []*mcp.Tool, meta mcp.Meta, conn serverConn) []agents.Tool {
 	var result []agents.Tool
 	for _, tool := range tools {
-		if len(srv.ToolFilter.Include) > 0 && !slices.Contains(srv.ToolFilter.Include, tool.Name) {
-			continue
-		}
-		if slices.Contains(srv.ToolFilter.Exclude, tool.Name) {
+		if !srv.ToolFilter.allows(tool.Name) {
 			continue
 		}
 
