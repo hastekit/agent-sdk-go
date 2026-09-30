@@ -25,9 +25,12 @@ import (
 // broker rather than queued for the loop. A client tool waits there for its
 // result (StreamBroker.WaitToolResult), up to ClientToolOptions.Timeout, so the run
 // carries on without a second request. If the result has not arrived by then,
-// the run pauses on the call with a client_tool interrupt, and a tool message
-// sent after the pause starts the run that resumes it — which is also what
-// stock AG-UI clients such as CopilotKit send, after the run has ended.
+// the run pauses on the call with a client_tool interrupt, and is resumed like
+// any interrupt: with a resolution approving the call, its Content the
+// client's result. A tool output does not resume a pause; as input it answers
+// nothing (see history.AsInput). Stock AG-UI clients
+// such as CopilotKit answer with a tool message after the run has ended, and
+// the AG-UI handler turns those into resolutions.
 
 // ClientToolDefinition is one tool a client offers for a run.
 type ClientToolDefinition struct {
@@ -87,9 +90,9 @@ func (t *clientTool) Execute(ctx context.Context, call *ToolCall) (*ToolCallResp
 		return nil, errors.New("client tool requires a tool call")
 	}
 
-	// A resumed call carries the client's answer as its resolution — the
-	// content of the tool message that resumed it — or the client sent it
-	// while the paused run was still finishing. A resolution without content
+	// A resumed call carries the client's answer as its resolution's
+	// content, or the client sent it while the paused run was still
+	// finishing. A resolution without content
 	// is not an answer: the run resumed for something else (an approval the
 	// same pause was holding), so the call pauses again until the client
 	// answers. A rejected call never reaches here; the loop answers it.

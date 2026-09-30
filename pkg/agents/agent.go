@@ -441,7 +441,7 @@ func (e *Agent) ExecuteLocal(ctx context.Context, in *AgentInput) (output *Agent
 	}
 
 	// Add the incoming message to the run
-	run.AddMessages(ctx, in.Message)
+	run.AddMessages(ctx, in.Message, history.AsInput())
 
 	// A turn made only of tool outputs that answer nothing — a client tool's
 	// result arriving after its run moved on — leaves the model nothing to

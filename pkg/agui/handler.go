@@ -1,6 +1,7 @@
 package agui
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -688,6 +689,18 @@ func serveRun(w http.ResponseWriter, r *http.Request, agent *agents.Agent, o opt
 			return
 		}
 	}
+
+	// This request starts the run, so the thread is settled: tool messages
+	// answering the client tools it is paused on become the resolutions that
+	// resume them. See resolveClientTools.
+	resolved, err := resolveClientTools(r.Context(), agent, requestNamespace(r), input.ThreadID, turn.Messages)
+	if err != nil {
+		// Give back the claim, or the thread would look busy with no run on it.
+		_ = agent.StreamBroker().Close(context.WithoutCancel(r.Context()), streamID)
+		writeJSONError(w, http.StatusInternalServerError, "unable to read the thread's paused tools: "+err.Error())
+		return
+	}
+	turn.Messages = resolved
 
 	selection, _ := input.SkillSelection() // validated before claiming the run
 	mcpSelection, _ := input.MCPSelection()

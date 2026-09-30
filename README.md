@@ -729,6 +729,16 @@ a client_tool interrupt, and the tool message resumes it — which is what stock
 AG-UI clients such as CopilotKit send, after the run has ended. Client tools
 need no configuration; `AgentConfig.ClientTools` only changes the wait.
 
+Inside the agent the two cases stay apart: a waiting call takes the client's
+tool output through the stream broker, and a paused call is resumed like any
+other interrupt, by a resolution approving it with the result as its
+`Content`. The AG-UI handler turns a tool message answering a paused client
+tool into that resolution once it has claimed the thread, so a result sent
+just as the run pauses still resumes it. A caller driving `Agent.Execute`
+directly resumes a paused client tool the same way it answers an approval; a
+tool output in a run's input is kept only alongside the call it answers (a
+full-history replay), and dropped otherwise.
+
 The server knows a client's tools only from the request that starts a run, so a
 client sends them with every request, including tool results and resumes, as
 CopilotKit and both HasteKit packages do. A run the server starts itself, when a

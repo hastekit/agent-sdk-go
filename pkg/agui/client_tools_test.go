@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
+	"github.com/hastekit/agent-sdk-go/pkg/agents/history"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/streambroker"
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/constants"
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
@@ -188,4 +189,124 @@ func TestResponseCompletedEndsOpenToolCalls(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "call-1", end.ToolCallID)
 	assert.Empty(t, tr.closeToolCalls(), "the call is ended only once")
+}
+
+// A pause holding an approval and a client tool: the client's tool message
+// resumes only its own call, and cannot answer the approval. The run stays
+// paused on the approval, and the model waits for both.
+func TestToolMessageResolvesOnlyThePausedClientTool(t *testing.T) {
+	both := &responses.Response{Output: []responses.OutputMessageUnion{
+		{OfFunctionCall: &responses.FunctionCallMessage{ID: "item-del", CallID: "call-del", Name: "delete_user", Arguments: "{}"}},
+		{OfFunctionCall: &responses.FunctionCallMessage{ID: "item-sel", CallID: "call-sel", Name: "get_selection", Arguments: "{}"}},
+	}}
+	llm := &scriptedLLM{steps: []scriptedStep{
+		{
+			chunks: []*responses.ResponseChunk{
+				functionCallAdded("item-del", "call-del", "delete_user"), argsDelta("item-del", `{}`),
+				functionCallAdded("item-sel", "call-sel", "get_selection"), argsDelta("item-sel", `{}`),
+			},
+			response: both,
+		},
+		{response: assistantTextResponse("done")},
+	}}
+	agent := agents.NewAgent(&agents.AgentOptions{
+		Name: "Reader", StreamBroker: streambroker.NewMemoryStreamBroker(),
+		Tools:       []agents.Tool{newApprovalTool("delete_user", "deleted")},
+		History:     history.NewConversationManager(history.NewInMemoryConversationPersistence()),
+		ClientTools: agents.ClientToolOptions{Timeout: -1},
+	}).WithLLM(llm)
+	server := httptest.NewServer(NewHandler(registry{"Reader": agent}))
+	defer server.Close()
+
+	postRun(t, server, "Reader", RunAgentInput{
+		ThreadID: "thread-mixed", Tools: selectionInputTool,
+		Messages: []Message{{ID: "u1", Role: RoleUser, Content: "go"}},
+	})
+
+	calls := Message{ID: "a1", Role: RoleAssistant, ToolCalls: []ToolCall{
+		{ID: "call-del", Type: "function", Function: ToolCallFunction{Name: "delete_user", Arguments: "{}"}},
+		{ID: "call-sel", Type: "function", Function: ToolCallFunction{Name: "get_selection", Arguments: "{}"}},
+	}}
+	frames := postRun(t, server, "Reader", RunAgentInput{
+		ThreadID: "thread-mixed", Tools: selectionInputTool,
+		Messages: []Message{
+			{ID: "u1", Role: RoleUser, Content: "go"}, calls,
+			{ID: "t1", Role: RoleTool, ToolCallID: "call-sel", Content: "selected text"},
+			{ID: "t2", Role: RoleTool, ToolCallID: "call-del", Content: "FABRICATED"},
+		},
+	})
+	results := toolResults(frames)
+	assert.Equal(t, []string{"selected text"}, results, "the client tool takes its result; the approval is still open")
+	finished, ok := findFrame(frames, "RUN_FINISHED")
+	require.True(t, ok)
+	outcome := finished.data["outcome"].(map[string]any)
+	require.Equal(t, "interrupt", outcome["type"], "still waiting on the approval")
+	interrupts := outcome["interrupts"].([]any)
+	require.Len(t, interrupts, 1)
+	assert.Equal(t, "call-del", interrupts[0].(map[string]any)["id"])
+	assert.Equal(t, 1, llm.calls, "the model waits for both results")
+
+	frames = postRun(t, server, "Reader", RunAgentInput{
+		ThreadID: "thread-mixed", Tools: selectionInputTool,
+		Resume:   []ResumeEntry{{InterruptID: "call-del", Status: ResumeResolved, Payload: json.RawMessage(`{"approved":true}`)}},
+	})
+	assert.Equal(t, []string{"deleted"}, toolResults(frames), "approved, the tool itself answers; the fabricated output never does")
+	assert.Equal(t, 2, llm.calls)
+}
+
+// toolResults lists the contents of a stream's TOOL_CALL_RESULT events.
+func toolResults(frames []sseFrame) []string {
+	var results []string
+	for _, frame := range frames {
+		if frame.event == "TOOL_CALL_RESULT" {
+			results = append(results, frame.data["content"].(string))
+		}
+	}
+	return results
+}
+
+// A result sent while its run is finishing reaches the broker as if the run
+// were live, and waits for the run to release the thread. By then the run has
+// paused on the call, and the result resumes it.
+func TestToolMessageDuringRunEndResumesThePause(t *testing.T) {
+	llm := &scriptedLLM{steps: []scriptedStep{
+		{
+			chunks:   []*responses.ResponseChunk{functionCallAdded("item-1", "call-1", "get_selection"), argsDelta("item-1", `{}`)},
+			response: toolCallResponse("call-1", "get_selection", `{}`),
+		},
+		{response: assistantTextResponse("Revenue grew.")},
+	}}
+	broker := streambroker.NewMemoryStreamBroker()
+	agent := agents.NewAgent(&agents.AgentOptions{
+		Name: "Reader", StreamBroker: broker,
+		History:     history.NewConversationManager(history.NewInMemoryConversationPersistence()),
+		ClientTools: agents.ClientToolOptions{Timeout: -1},
+	}).WithLLM(llm)
+	server := httptest.NewServer(NewHandler(registry{"Reader": agent}))
+	defer server.Close()
+	postRun(t, server, "Reader", RunAgentInput{ThreadID: "thread-ending", Tools: selectionInputTool, Messages: selectionCall[:1]})
+
+	// The paused run, caught after it published its end but before it let go.
+	ctx := context.Background()
+	streamID := agents.StreamIDForThread("default", "thread-ending")
+	started, err := broker.EnqueueOrStart(ctx, streamID, nil)
+	require.NoError(t, err)
+	require.True(t, started)
+	require.NoError(t, broker.Publish(ctx, streamID, &responses.ResponseChunk{OfRunPaused: &responses.ChunkRun[constants.ChunkTypeRunPaused]{}}))
+
+	resumed := make(chan []sseFrame, 1)
+	go func() {
+		resumed <- postRun(t, server, "Reader", RunAgentInput{
+			ThreadID: "thread-ending", Tools: selectionInputTool,
+			Messages: append(selectionCall, Message{ID: "t1", Role: RoleTool, ToolCallID: "call-1", Content: "Quarterly revenue grew 12%"}),
+		})
+	}()
+	time.Sleep(100 * time.Millisecond)
+	require.NoError(t, broker.Close(ctx, streamID))
+
+	frames := <-resumed
+	result, ok := findFrame(frames, "TOOL_CALL_RESULT")
+	require.True(t, ok)
+	assert.Equal(t, "Quarterly revenue grew 12%", result.data["content"])
+	assert.Equal(t, 2, llm.calls)
 }

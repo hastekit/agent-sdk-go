@@ -29,6 +29,8 @@ var selectionTool = []agents.ClientToolDefinition{{
 }}
 
 // toolOutputMessage is what an AG-UI client sends after running its own tool.
+// A live run's waiting tool takes it through the broker; a paused call is
+// answered with clientToolResult instead.
 func toolOutputMessage(callID, output string) history.Message {
 	return messages.New("user", []responses.InputMessageUnion{{
 		OfFunctionCallOutput: &responses.FunctionCallOutputMessage{
@@ -54,42 +56,43 @@ func pausingAgent(llm *scriptedLLM, broker agents.StreamBroker) *agents.Agent {
 	}).WithLLM(llm)
 }
 
+// clientToolResult resumes a paused client tool with the client's result, as
+// any interrupt is resumed.
+func clientToolResult(callID, result string) history.Message {
+	content, _ := json.Marshal(result)
+	return elicitationMessage(callID, string(content))
+}
+
 func TestClientToolPauseResumesWithTheClientsResult(t *testing.T) {
-	for _, answer := range []struct {
-		name    string
-		message history.Message
-	}{
-		{"tool message", toolOutputMessage("call_sel", "Quarterly revenue grew 12%")},
-		{"resume decision", elicitationMessage("call_sel", `"Quarterly revenue grew 12%"`)},
-	} {
-		t.Run(answer.name, func(t *testing.T) {
-			llm := &scriptedLLM{script: []*responses.Response{
-				toolCallResponse("call_sel", "get_selection", "{}"),
-				textResponse("summarized"),
-			}}
-			agent := pausingAgent(llm, streambroker.NewMemoryStreamBroker())
-			out := runAgent(t, agent, &agents.AgentInput{
-				Namespace: "test", ThreadID: "thread-client-" + answer.name,
-				Message: userMessage("summarize my selection"), ClientTools: selectionTool,
-			})
-
-			// The model sees the client's tool, and the run pauses on the call.
-			require.Contains(t, requestJSON(t, llm, 0), "get_selection")
-			requireStatus(t, out, agentstate.RunStatusPaused)
-			require.Len(t, out.Interrupts, 1)
-			require.Equal(t, responses.InterruptModeClientTool, out.Interrupts[0].Mode)
-			require.Equal(t, "get_selection", out.Interrupts[0].FunctionCallMessage.Name)
-
-			// The client's answer becomes the tool's output for the model.
-			out = runAgent(t, agent, &agents.AgentInput{
-				Namespace: "test", ThreadID: "thread-client-" + answer.name, PreviousRunID: out.RunID,
-				Message: answer.message, ClientTools: selectionTool,
-			})
-			requireStatus(t, out, agentstate.RunStatusCompleted)
-			require.Contains(t, requestJSON(t, llm, 1), "Quarterly revenue grew 12%")
-			require.Contains(t, messagesText(out.Output), "Quarterly revenue grew 12%")
-		})
+	llm := &scriptedLLM{script: []*responses.Response{
+		toolCallResponse("call_sel", "get_selection", "{}"),
+		textResponse("summarized"),
+	}}
+	agent := pausingAgent(llm, streambroker.NewMemoryStreamBroker())
+	in := func(runID string, msg history.Message) *agents.AgentInput {
+		return &agents.AgentInput{Namespace: "test", ThreadID: "thread-client", PreviousRunID: runID, Message: msg, ClientTools: selectionTool}
 	}
+	out := runAgent(t, agent, in("", userMessage("summarize my selection")))
+
+	// The model sees the client's tool, and the run pauses on the call.
+	require.Contains(t, requestJSON(t, llm, 0), "get_selection")
+	requireStatus(t, out, agentstate.RunStatusPaused)
+	require.Len(t, out.Interrupts, 1)
+	require.Equal(t, responses.InterruptModeClientTool, out.Interrupts[0].Mode)
+	require.Equal(t, "get_selection", out.Interrupts[0].FunctionCallMessage.Name)
+
+	// A bare tool output does not resume a pause: it is not a resolution.
+	out = runAgent(t, agent, in(out.RunID, toolOutputMessage("call_sel", "unasked")))
+	requireStatus(t, out, agentstate.RunStatusPaused)
+	require.Equal(t, 1, llm.callCount())
+
+	// The client's result, as a resolution, becomes the tool's output for the model.
+	out = runAgent(t, agent, in(out.RunID, clientToolResult("call_sel", "Quarterly revenue grew 12%")))
+	requireStatus(t, out, agentstate.RunStatusCompleted)
+	request := requestJSON(t, llm, 1)
+	require.Contains(t, request, "Quarterly revenue grew 12%")
+	require.NotContains(t, request, "unasked")
+	require.Contains(t, messagesText(out.Output), "Quarterly revenue grew 12%")
 }
 
 func TestClientToolDeclinedByTheClient(t *testing.T) {
@@ -256,7 +259,7 @@ func TestMixedPauseWaitsForTheClientToolsResult(t *testing.T) {
 	require.Equal(t, responses.InterruptModeClientTool, out.Interrupts[0].Mode)
 	require.Equal(t, 1, llm.callCount(), "the model waits for both results")
 
-	out = runAgent(t, agent, in(out.RunID, toolOutputMessage("call_sel", "selected text")))
+	out = runAgent(t, agent, in(out.RunID, clientToolResult("call_sel", "selected text")))
 	requireStatus(t, out, agentstate.RunStatusCompleted)
 	request := requestJSON(t, llm, 1)
 	require.Contains(t, request, "selected text")
@@ -273,7 +276,7 @@ func TestResumeWithoutClientToolDefinitions(t *testing.T) {
 	out := runAgent(t, agent, &agents.AgentInput{Namespace: "test", ThreadID: "thread-undefined", Message: userMessage("go"), ClientTools: selectionTool})
 	requireStatus(t, out, agentstate.RunStatusPaused)
 
-	out = runAgent(t, agent, &agents.AgentInput{Namespace: "test", ThreadID: "thread-undefined", PreviousRunID: out.RunID, Message: toolOutputMessage("call_sel", "selected text")})
+	out = runAgent(t, agent, &agents.AgentInput{Namespace: "test", ThreadID: "thread-undefined", PreviousRunID: out.RunID, Message: clientToolResult("call_sel", "selected text")})
 	requireStatus(t, out, agentstate.RunStatusCompleted)
 	request := requestJSON(t, llm, 1)
 	require.Contains(t, request, "selected text")

@@ -142,6 +142,12 @@ func TestBackgroundTask_IsRecordedOnTheRunState(t *testing.T) {
 		Namespace: "test", ThreadID: "thread-bg-state", Message: userMessage("index the docs"),
 	})
 
+	// The wait runs on its own goroutine, which may not have reached the tool
+	// yet when the run returns; let the task finish before reading what it was
+	// asked to wait on.
+	close(tool.release)
+	agent.WaitForBackgroundTasks()
+
 	refs := tool.awaited()
 	require.Len(t, refs, 1, "the tool is asked to wait for the task it started")
 	assert.Equal(t, "task-1", refs[0].TaskID)
@@ -152,9 +158,6 @@ func TestBackgroundTask_IsRecordedOnTheRunState(t *testing.T) {
 		"the task streams on a channel of its own, derivable from its id")
 	assert.NotEmpty(t, refs[0].ThreadStreamID, "the result still goes to the thread")
 	assert.NotEqual(t, refs[0].TaskStreamID, refs[0].ThreadStreamID)
-
-	close(tool.release)
-	agent.WaitForBackgroundTasks()
 }
 
 // --- delivery: the agent is idle -------------------------------------------

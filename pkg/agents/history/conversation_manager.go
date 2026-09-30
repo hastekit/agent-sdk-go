@@ -141,8 +141,8 @@ type ConversationRunManager struct {
 	newMessages     []Message
 	lastMessageMeta map[string]any
 
-	// staleToolOutputs counts tool outputs dropped because they answered no
-	// call this run knows of.
+	// staleToolOutputs counts tool outputs dropped from the run's input (see
+	// AsInput).
 	staleToolOutputs int
 
 	// runContext
@@ -328,6 +328,7 @@ type AddMessageOption func(*addMessageConfig)
 
 type addMessageConfig struct {
 	estimate bool
+	input    bool
 }
 
 // AlreadyMeasured marks a bundle whose tokens the most recent usage report
@@ -342,19 +343,34 @@ func AlreadyMeasured() AddMessageOption {
 	return func(c *addMessageConfig) { c.estimate = false }
 }
 
+// AsInput marks a bundle from outside the run — the turn it was started with —
+// rather than one of the run's own.
+//
+// Input is held to one rule the run's own messages are not: a tool output is
+// kept only alongside the call it answers, as a full-history client replays
+// them. A client's result for a tool the run is waiting on goes to the waiting
+// tool through the stream broker, and a paused call is answered by an
+// interrupt resolution, so an output arriving on its own answers nothing the
+// run can use — a result that arrived after its run moved on, a duplicate, or
+// one for a call never made — and a provider would reject it.
+func AsInput() AddMessageOption {
+	return func(c *addMessageConfig) { c.input = true }
+}
+
 // AddMessages appends a bundle to the run
 func (cm *ConversationRunManager) AddMessages(ctx context.Context, message Message, opts ...AddMessageOption) {
 	cfg := addMessageConfig{estimate: true}
 	for _, o := range opts {
 		o(&cfg)
 	}
-	cm.processIncoming(message, false, cfg.estimate)
+	cm.processIncoming(message, false, cfg)
 }
 
 // AddMessagesToQueue appends bundles sent into the run while it was going.
+// They are input (see AsInput).
 func (cm *ConversationRunManager) AddMessagesToQueue(ctx context.Context, msgs []Message) {
 	for _, m := range msgs {
-		cm.processIncoming(m, true, true)
+		cm.processIncoming(m, true, addMessageConfig{estimate: true, input: true})
 	}
 }
 
@@ -750,13 +766,13 @@ func (cm *ConversationRunManager) loadSubAgentContext(ctx context.Context) {
 }
 
 // ProcessIncomingMessages appends an inbound message, estimating its size
-// against the context window. Use AddMessages with AlreadyMeasured to append
-// one the provider has already counted.
+// against the context window. It is input (see AsInput). Use AddMessages
+// with AlreadyMeasured to append one the provider has already counted.
 func (cm *ConversationRunManager) ProcessIncomingMessages(message Message, queue bool) {
-	cm.processIncoming(message, queue, true)
+	cm.processIncoming(message, queue, addMessageConfig{estimate: true, input: true})
 }
 
-func (cm *ConversationRunManager) processIncoming(message Message, queue, estimate bool) {
+func (cm *ConversationRunManager) processIncoming(message Message, queue bool, cfg addMessageConfig) {
 	// A background task's result landing is the answer to something the run is
 	// carrying, the same as an approval is — so it is reconciled here, where
 	// every incoming bundle already passes and where the run state is to hand.
@@ -767,6 +783,7 @@ func (cm *ConversationRunManager) processIncoming(message Message, queue, estima
 	// Process incoming message, and extract tool approvals and user messages
 	hasNewApproval := false
 	var stored []responses.InputMessageUnion
+	calls := map[string]bool{}
 	for _, msg := range message.Messages {
 		if msg.OfFunctionCallInterruptResolution != nil {
 			// Interrupt resume path. approve/reject actions drain onto the
@@ -791,29 +808,12 @@ func (cm *ConversationRunManager) processIncoming(message Message, queue, estima
 					cm.RunState.QueuedRejections = append(cm.RunState.QueuedRejections, res.CallID)
 				}
 			}
-		} else if res, ok := cm.clientToolResolution(msg); ok {
-			// A client answering a paused client tool sends the call's output,
-			// as AG-UI clients do after running a frontend tool. It resolves
-			// the pause; the resumed tool records the output itself.
-			hasNewApproval = true
-			cm.RunState.QueuedApprovals = append(cm.RunState.QueuedApprovals, res.CallID)
-			if cm.RunState.Resolutions == nil {
-				cm.RunState.Resolutions = map[string]responses.InterruptResolution{}
-			}
-			cm.RunState.Resolutions[res.CallID] = res
-		} else if out := msg.OfFunctionCallOutput; out != nil && !cm.acceptToolOutput(out.CallID) {
-			// An output for a call that is not open — a second one, such as a
-			// client tool's result arriving after its run moved on, or one for a
-			// call never made — or for a paused call, which only its interrupt
-			// answers. Stored, it would give the provider an output with no
-			// call, a call two outputs, or a tool result the tool never produced.
-			slog.Warn("dropping a tool output the run cannot accept", slog.String("call_id", out.CallID))
+		} else if out := msg.OfFunctionCallOutput; cfg.input && out != nil && !calls[out.CallID] {
+			slog.Warn("dropping a tool output with no call alongside it", slog.String("call_id", out.CallID))
 			cm.staleToolOutputs++
 		} else {
 			if call := msg.OfFunctionCall; call != nil {
-				// Replayed history (a full-history client) opens its calls here,
-				// before the outputs that follow them in the same bundle.
-				cm.RunState.OpenToolCall(call.CallID)
+				calls[call.CallID] = true
 			}
 			stored = append(stored, msg)
 		}
@@ -838,7 +838,7 @@ func (cm *ConversationRunManager) processIncoming(message Message, queue, estima
 		// not deciding against a reading that predates it. Queued messages count
 		// from the moment they are queued: draining only moves them between
 		// slices.
-		if estimate {
+		if cfg.estimate {
 			cm.RunState.PendingContextTokens += estimateBundleTokens(bundle)
 		}
 
@@ -858,56 +858,11 @@ func (cm *ConversationRunManager) processIncoming(message Message, queue, estima
 	}
 }
 
-// acceptToolOutput closes the call an output answers. A paused call is not
-// closed by an output: an approval or elicitation is answered by a resume
-// decision, and a client tool's output resolves its pause through
-// clientToolResolution, before this is asked. The resumed tool's own output
-// closes the call once the run is no longer paused.
-func (cm *ConversationRunManager) acceptToolOutput(callID string) bool {
-	if cm.RunState.IsToolCallPaused(callID) {
-		return false
-	}
-	return cm.RunState.CloseToolCall(callID)
-}
-
 // OnlyStaleToolOutputs reports whether everything the run was given so far was
-// tool outputs it dropped (see RunState.OpenToolCalls): there is nothing new
-// for the model to answer.
+// tool outputs it dropped (see AsInput): there is nothing new for the model
+// to answer.
 func (cm *ConversationRunManager) OnlyStaleToolOutputs() bool {
 	return cm.staleToolOutputs > 0 && len(cm.newMessages) == 0 && cm.RunState.CurrentStep == agentstate.StepCallLLM
-}
-
-// clientToolResolution turns a function_call_output into the resolution of a
-// client tool the run is paused on. Outputs for any other call pass through.
-func (cm *ConversationRunManager) clientToolResolution(msg responses.InputMessageUnion) (responses.InterruptResolution, bool) {
-	output := msg.OfFunctionCallOutput
-	if output == nil || cm.RunState.CurrentStep != agentstate.StepAwaitApproval {
-		return responses.InterruptResolution{}, false
-	}
-	intr, ok := cm.RunState.Interrupts[output.CallID]
-	if !ok || intr.Mode != responses.InterruptModeClientTool {
-		return responses.InterruptResolution{}, false
-	}
-	pending := false
-	for _, call := range cm.RunState.PendingToolCalls {
-		pending = pending || call.CallID == output.CallID
-	}
-	if !pending {
-		return responses.InterruptResolution{}, false
-	}
-
-	// Text stays text; structured output keeps its JSON shape.
-	var content []byte
-	var err error
-	if output.Output.OfString != nil {
-		content, err = sonic.Marshal(*output.Output.OfString)
-	} else {
-		content, err = sonic.Marshal(output.Output.OfList)
-	}
-	if err != nil {
-		return responses.InterruptResolution{}, false
-	}
-	return responses.InterruptResolution{CallID: output.CallID, Action: responses.InterruptActionApprove, Content: content}, true
 }
 
 // ProcessInterrupts records the bookkeeping for a paused tool call across
