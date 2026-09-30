@@ -14,6 +14,7 @@ import (
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/attachments"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/history"
+	"github.com/hastekit/agent-sdk-go/pkg/agents/mcpclient"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/messages"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/skills"
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/constants"
@@ -37,6 +38,8 @@ type options struct {
 	skillStore         skills.Store
 	attachmentStore    attachments.UploadStore
 	attachmentMaxBytes int64
+	mcpStore           mcpclient.MCPServerConfigStore
+	mcpOptions         []mcpclient.HandlerOption
 	namespaceResolver  NamespaceResolver
 	senderID           string
 	fullHistory        bool
@@ -70,6 +73,13 @@ func WithSkillStore(store skills.Store) Option { return func(o *options) { o.ski
 // namespace (see WithNamespaceResolver), the same one its runs read them under.
 func WithAttachmentStore(store attachments.UploadStore) Option {
 	return func(o *options) { o.attachmentStore = store }
+}
+
+// WithMCPStore mounts connector management and OAuth routes under /mcp.
+// Pass the same config store and optional OAuth provider used by the agent client.
+// The handler always uses AG-UI's authenticated namespace resolver.
+func WithMCPStore(store mcpclient.MCPServerConfigStore, handlerOptions ...mcpclient.HandlerOption) Option {
+	return func(o *options) { o.mcpStore = store; o.mcpOptions = handlerOptions }
 }
 
 // WithAttachmentUploadLimit bounds each HTTP upload (default 20 MiB).
@@ -160,6 +170,7 @@ func NewHandler(registry Registry, opts ...Option) http.Handler {
 	o := buildOptions(opts)
 	mux := http.NewServeMux()
 	o.mountA2A(mux, registry)
+	o.mountMCPCredentials(mux)
 	if o.routineService != nil {
 		h := routines.NewHTTPHandler(o.routineService, routines.HTTPConfig{
 			Scheduler:         o.routineScheduler,
@@ -671,8 +682,10 @@ func serveRun(w http.ResponseWriter, r *http.Request, agent *agents.Agent, o opt
 	}
 
 	selection, _ := input.SkillSelection() // validated before claiming the run
+	mcpSelection, _ := input.MCPSelection()
 	in := &agents.AgentInput{
 		Skills:    selection,
+		MCP:       mcpSelection,
 		Namespace: requestNamespace(r),
 		RunID:     runID,
 		ThreadID:  input.ThreadID,

@@ -48,7 +48,7 @@ type HumanNodeConfig struct {
 	Timeout time.Duration  `yaml:"-"` // expression timeout
 }
 type MCPNodeConfig struct {
-	Server    agents.MCPToolset
+	Server    agents.MCPClient
 	Tool      string
 	Arguments any           // JSON object or an expression returning one
 	Timeout   time.Duration // expression timeout

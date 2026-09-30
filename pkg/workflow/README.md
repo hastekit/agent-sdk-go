@@ -56,7 +56,7 @@ the APIs below. See the [runnable Go example](../../examples/workflow/programmat
 ```go
 compiled, err := workflow.LoadYAML(descriptorBytes, workflow.Dependencies{
     Agents: map[string]workflow.AgentRunner{"researcher": researcher},
-    MCPServers: map[string]agents.MCPToolset{"github": githubConnector},
+    MCPServers: map[string]agents.MCPClient{"github": githubConnector},
     HTTPClient: httpClient, // optional; configure transport/auth/network policy here
 })
 if err != nil { return err }

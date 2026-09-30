@@ -3,6 +3,7 @@ package mcpclient
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"maps"
 	"os"
@@ -21,11 +22,14 @@ import (
 // Which fields matter depends on Transport: the http transports read Endpoint
 // and Headers, stdio reads Command and Env.
 type serverConn struct {
-	// Name is the connector this describes — the one NewClient required, and
+	// Name is the configured connector this describes, and
 	// the one a failure is reported under. It is what makes a key or a log
 	// line legible; it is not what makes either of them correct, since nothing
 	// stops two clients being built with one name.
 	Name string
+
+	// Namespace is the configuration owner; empty identifies a global definition.
+	Namespace string
 
 	Transport string
 
@@ -53,6 +57,10 @@ type serverConn struct {
 	// when a provider declined to say, which is the case poolable rules out.
 	Principal string
 
+	// AuthorizationKey fingerprints the OAuth settings captured by a token source.
+	// Config edits need a new session; ordinary token refreshes do not.
+	AuthorizationKey string
+
 	DisableStandaloneSSE bool
 }
 
@@ -61,7 +69,7 @@ type serverConn struct {
 // — or the same one under different credentials — has to be in it, or two of
 // them would quietly share one connection and one set of cached schemas.
 func (c serverConn) key() string {
-	return fmt.Sprintf("%s|%s|%s", c.Name, c.Principal, c.digest())
+	return fmt.Sprintf("%q|%q|%q|%s", c.Namespace, c.Name, c.Principal, c.digest())
 }
 
 // digest fingerprints everything that decides which server this reaches and
@@ -83,8 +91,20 @@ func (c serverConn) digest() string {
 		strings.Join(c.Command, " "),
 		sortedPairs(c.Headers),
 		sortedPairs(c.Env),
+		c.AuthorizationKey,
 	}, "|")))
 	return hex.EncodeToString(sum[:12])
+}
+
+// authorizationDigest includes refresh settings such as the client secret, while
+// keeping their plaintext out of pool keys and logs. OAuthConfig is JSON-safe.
+func authorizationDigest(config *OAuthConfig) string {
+	if config == nil {
+		return ""
+	}
+	data, _ := json.Marshal(config)
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
 }
 
 // poolable reports whether this connection may be shared with the next call
@@ -107,7 +127,7 @@ func (c serverConn) poolable() bool {
 // connection, and it is also the prefix of every SchemaCache key, which reaches
 // whatever store was injected — a shared Redis, its slow log, whatever scrapes
 // its metrics. A header or an env var is a credential as often as not
-// (WithHeaders templating a bearer out of the run context is the documented way
+// (withHeaders templating a bearer out of the run context is the documented way
 // to pass one), so it is fingerprinted rather than reproduced. Two different
 // credentials still produce two different digests, which is all a key needs.
 func credentialDigest(headers, env map[string]string) string {
@@ -127,7 +147,7 @@ func (c serverConn) isStdio() bool { return c.Transport == TransportStdio }
 func (c serverConn) validate() error {
 	if c.isStdio() {
 		if len(c.Command) == 0 || c.Command[0] == "" {
-			return fmt.Errorf("mcp: the %s transport needs a command to run (see WithCommand)", TransportStdio)
+			return fmt.Errorf("mcp: the %s transport needs a command to run (see withCommand)", TransportStdio)
 		}
 		return nil
 	}

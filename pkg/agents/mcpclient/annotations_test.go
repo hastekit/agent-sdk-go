@@ -75,7 +75,7 @@ func TestLazyToolAnnotations(t *testing.T) {
 // The tools ListTools hands back carry each server tool's annotations, which
 // is what a later permission layer will read them from.
 func TestBuildLazyToolsKeepsAnnotations(t *testing.T) {
-	srv := &MCPClient{}
+	srv := &server{}
 
 	tools := srv.buildLazyTools([]*mcp.Tool{
 		{Name: "search", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true}},

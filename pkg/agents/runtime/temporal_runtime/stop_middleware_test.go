@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/hastekit/agent-sdk-go/internal/testutil"
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/runtime/temporal_runtime"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/streambroker"
@@ -66,7 +67,7 @@ func TestStopMiddlewareRunsInsideTemporalActivities(t *testing.T) {
 			case "tool":
 				fn = temporal_runtime.NewTemporalTool(tool, broker, middleware).Execute
 			case "mcp":
-				fn = temporal_runtime.NewTemporalMCPServer(&transformToolset{tool: tool}, broker, middleware).ExecuteTool
+				fn = temporal_runtime.NewTemporalMCPClient(testutil.NewMCPClient(&transformToolset{tool: tool}), broker, middleware).ExecuteTool
 				args = []any{tool.BaseTool, call, map[string]any{}}
 			case "model":
 				fn = temporal_runtime.NewTemporalLLM(nil, broker, middleware).NewStreamingResponsesActivity

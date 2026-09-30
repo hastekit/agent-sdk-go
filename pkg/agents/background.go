@@ -22,6 +22,7 @@ import (
 // the wait happens in this process or somewhere that had to be told about it.
 type BackgroundTaskRef struct {
 	Skills SkillSelection `json:"skills,omitempty"`
+	MCP    MCPSelection   `json:"mcp,omitempty"`
 	// TaskID is what the tool called the task when it answered. It is the
 	// tool's own identifier — a job id from whatever service it queued work
 	// with — and nothing here does more than carry it back.
@@ -374,6 +375,7 @@ func (s *backgroundSupervisor) deliver(ctx context.Context, agent *Agent, ref Ba
 		StreamID:   ref.ThreadStreamID,
 		RunContext: ref.RunContext,
 		Skills:     ref.Skills,
+		MCP:        ref.MCP,
 		Message:    msg,
 	})
 	if err != nil {
@@ -482,6 +484,7 @@ func (e *Agent) startBackgroundTask(ctx context.Context, in *AgentInput, runID s
 		ThreadStreamID: in.StreamID,
 		RunID:          runID,
 		RunContext:     in.RunContext,
+		MCP:            in.MCP.Clone(),
 		Skills:         SkillSelection{Enable: append([]string(nil), in.Skills.Enable...), Disable: append([]string(nil), in.Skills.Disable...)},
 		Payload:        resp.TaskPayload,
 	}

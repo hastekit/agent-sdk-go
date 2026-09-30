@@ -180,8 +180,11 @@ func (f workflowAgentFunc) Run(ctx context.Context, in *agents.AgentInput) (*age
 type workflowMCP struct{ tool agents.Tool }
 
 func (workflowMCP) GetName() string { return "test" }
-func (m workflowMCP) ListTools(context.Context, map[string]any) ([]agents.Tool, error) {
-	return []agents.Tool{m.tool}, nil
+func (m workflowMCP) ListTools(context.Context, string, map[string]any, ...agents.MCPSelection) ([]agents.ConnectorStatus, []agents.Tool, error) {
+	return nil, []agents.Tool{m.tool}, nil
+}
+func (m workflowMCP) CallTool(ctx context.Context, _ *agents.BaseTool, call *agents.ToolCall) (*agents.ToolCallResponse, error) {
+	return m.tool.Execute(ctx, call)
 }
 
 type workflowMCPTool struct {
@@ -223,7 +226,7 @@ nodes:
  - {id: child, type: agent, config: {agent: helper, message: '${{ "Amount " + input.amount }}'}}
  - {id: lookup, type: mcp, config: {server: test, tool: lookup, arguments: {amount: '${{ input.amount }}'}}}
 edges: [{from: child, to: lookup}]
-`), Dependencies{Agents: map[string]AgentRunner{"helper": agent}, MCPServers: map[string]agents.MCPToolset{"test": workflowMCP{mcpTool}}})
+`), Dependencies{Agents: map[string]AgentRunner{"helper": agent}, MCPServers: map[string]agents.MCPClient{"test": workflowMCP{mcpTool}}})
 	require.NoError(t, err)
 	tool, err := NewTool("process", "", nil, compiled)
 	require.NoError(t, err)
@@ -344,7 +347,7 @@ func TestMCPWorkflowHonorsApprovalBeforeExecution(t *testing.T) {
 id: approval
 nodes:
  - {id: call, type: mcp, config: {server: test, tool: lookup}}
-`), Dependencies{MCPServers: map[string]agents.MCPToolset{"test": workflowMCP{mcpTool}}})
+`), Dependencies{MCPServers: map[string]agents.MCPClient{"test": workflowMCP{mcpTool}}})
 	require.NoError(t, err)
 	tool, err := NewTool("process", "", nil, compiled)
 	require.NoError(t, err)

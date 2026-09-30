@@ -11,7 +11,7 @@ import (
 )
 
 var (
-	// globalPool is the package-level connection pool shared across all MCPClient instances.
+	// globalPool is the package-level connection pool shared across all Server instances.
 	// Since temporal/restate workers are long-lived processes, this pool is shared across
 	// all activity/handler executions on the same worker.
 	//

@@ -82,6 +82,8 @@ const APIPrefix = "/api/agui"
 // the registry, with the AG-UI protocol endpoints mounted under
 // APIPrefix. *hastekit.SDK satisfies agui.Registry.
 // Use agui.WithSkillStore to enable the skill library.
+// Use agui.WithMCPStore(store, mcpclient.WithOAuth(provider)) to mount connector
+// management and OAuth routes under /api/agui/mcp using the chat namespace resolver.
 // Use agui.WithRoutines(service, scheduler) to enable routine management at
 // /api/agui/routines and the Routines panel. The caller runs the scheduler.
 func Handler(registry agui.Registry, opts ...agui.Option) http.Handler {

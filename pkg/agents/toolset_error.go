@@ -50,7 +50,7 @@ func (e *ToolsetError) Unwrap() error { return e.Err }
 // ConnectorStatus is how one MCP server fared this run: whether it connected,
 // how many tools it contributed, and — when it did not — why.
 //
-// Every configured connector gets one, not just the ones that failed. What the
+// Every enabled connector gets one, not just the ones that failed. What the
 // agent has is as much a fact about the run as what it is missing, and a model
 // told a connector holds twelve tools stops guessing at a thirteenth.
 //
@@ -72,13 +72,13 @@ type ConnectorStatus struct {
 	Detail string           `json:"detail,omitempty"`
 }
 
-// connectedStatus records a connector that listed, and what it brought.
-func connectedStatus(name string, toolCount int) ConnectorStatus {
+// ConnectedConnectorStatus records a connector that listed, and what it brought.
+func ConnectedConnectorStatus(name string, toolCount int) ConnectorStatus {
 	return ConnectorStatus{Name: connectorName(name), Connected: true, ToolCount: toolCount}
 }
 
-// failedStatus records a connector that did not list, and why.
-func failedStatus(name string, err error) ConnectorStatus {
+// FailedConnectorStatus records a connector that did not list, and why.
+func FailedConnectorStatus(name string, err error) ConnectorStatus {
 	c := ConnectorStatus{Name: connectorName(name), Kind: classifyToolsetError(err)}
 	// An auth failure's text is only ever "Unauthorized" — the kind already
 	// says that, and better.
@@ -106,9 +106,8 @@ const toolsetDetailMax = 160
 // can make one: the kind comes from the HTTP status the server answered with,
 // which is known at the transport and nowhere above it.
 //
-// A toolset reached across a durable runtime's boundary has to carry its
-// classification over in that runtime's own terms, because a Go error does not
-// survive the crossing — see toolsetListError in each of them.
+// Catalog clients carry the resulting ConnectorStatus across durable boundaries,
+// preserving the classification without serializing the underlying Go error.
 func classifyToolsetError(err error) ToolsetErrorKind {
 	var te *ToolsetError
 	if errors.As(err, &te) && te.Kind != "" {

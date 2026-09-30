@@ -6,7 +6,7 @@ import (
 )
 
 // Resolve into new containers so cached tools can execute concurrently without
-// retaining another run's values. Template semantics match WithHeaders.
+// retaining another run's values. Template semantics match withHeaders.
 func resolveMeta(base mcp.Meta, runContext map[string]any) mcp.Meta {
 	if base == nil {
 		return nil

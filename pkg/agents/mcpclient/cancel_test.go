@@ -2,13 +2,13 @@ package mcpclient_test
 
 import (
 	"context"
+	"github.com/hastekit/agent-sdk-go/pkg/agents/mcpclient"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
-	"github.com/hastekit/agent-sdk-go/pkg/agents/mcpclient"
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/require"
@@ -51,16 +51,16 @@ func TestCallToolDirect_CancellationReachesServer(t *testing.T) {
 		httpSrv.Close()
 	}()
 
-	client, err := mcpclient.NewClient(context.Background(), "cancel", httpSrv.URL,
-		mcpclient.WithTransport("streamable-http"))
-	require.NoError(t, err)
+	client := mcpclient.NewClient(mcpclient.NewMemoryStore().WithMCPServerConfig([]mcpclient.ServerConfig{{Name: "cancel",
+		Endpoint:  httpSrv.URL,
+		Transport: "streamable-http"}}))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	callDone := make(chan error, 1)
 	go func() {
-		_, err := client.CallToolDirect(ctx, nil, &agents.BaseTool{Name: "block"}, &agents.ToolCall{
+		_, err := client.CallTool(ctx, &agents.BaseTool{Name: "block", MCPServerName: "cancel"}, &agents.ToolCall{
 			FunctionCallMessage: &responses.FunctionCallMessage{
 				ID:        "fc_block",
 				CallID:    "call_block",

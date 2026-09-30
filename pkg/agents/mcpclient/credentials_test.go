@@ -27,7 +27,7 @@ type stubProvider struct {
 	failWith error
 }
 
-func (p *stubProvider) Resolve(_ context.Context, connector Connector, runContext map[string]any) (*Credential, error) {
+func (p *stubProvider) Resolve(_ context.Context, _ string, connector Connector, runContext map[string]any) (*Credential, error) {
 	if p.failWith != nil {
 		return nil, p.failWith
 	}
@@ -69,9 +69,9 @@ func keyed(p *stubProvider) *stubProvider {
 	return p
 }
 
-func newTestClient(t *testing.T, endpoint string, opts ...McpServerOption) *MCPClient {
+func newTestClient(t *testing.T, endpoint string, opts ...serverOption) *server {
 	t.Helper()
-	client, err := NewClient(context.Background(), "creds", endpoint, opts...)
+	client, err := newServer(context.Background(), "creds", endpoint, opts...)
 	require.NoError(t, err)
 	return client
 }
@@ -87,11 +87,11 @@ func TestTokenSourceIsPresentedAsABearer(t *testing.T) {
 	defer srv.Close()
 
 	client := newTestClient(t, srv.URL,
-		WithTransport(TransportStreamableHTTP),
-		WithCredentialProvider(&stubProvider{tokens: map[string]string{"creds/ada": "tok-ada"}}),
+		withTransport(TransportStreamableHTTP),
+		withCredentials(&stubProvider{tokens: map[string]string{"creds/ada": "tok-ada"}}),
 	)
 
-	conn, err := client.connFor(context.Background(), map[string]any{"user": "ada"})
+	conn, err := client.connFor(context.Background(), "default", map[string]any{"user": "ada"})
 	require.NoError(t, err)
 
 	_, err = connect(context.Background(), conn)
@@ -109,12 +109,12 @@ func TestTokenSourceOverridesAConfiguredAuthorizationHeader(t *testing.T) {
 	defer srv.Close()
 
 	client := newTestClient(t, srv.URL,
-		WithTransport(TransportStreamableHTTP),
-		WithHeaders(map[string]string{"Authorization": "Bearer static", "X-Trace": "keep-me"}),
-		WithCredentialProvider(&stubProvider{tokens: map[string]string{"creds/ada": "tok-ada"}}),
+		withTransport(TransportStreamableHTTP),
+		withHeaders(map[string]string{"Authorization": "Bearer static", "X-Trace": "keep-me"}),
+		withCredentials(&stubProvider{tokens: map[string]string{"creds/ada": "tok-ada"}}),
 	)
 
-	conn, err := client.connFor(context.Background(), map[string]any{"user": "ada"})
+	conn, err := client.connFor(context.Background(), "default", map[string]any{"user": "ada"})
 	require.NoError(t, err)
 	assert.Equal(t, "keep-me", conn.Headers["X-Trace"], "other headers are untouched")
 
@@ -126,11 +126,11 @@ func TestTokenSourceOverridesAConfiguredAuthorizationHeader(t *testing.T) {
 // A provider that says nothing about this run is not a failure.
 func TestNilTokenSourceMeansNoAuth(t *testing.T) {
 	client := newTestClient(t, "https://example.test/mcp",
-		WithTransport(TransportStreamableHTTP),
-		WithCredentialProvider(&stubProvider{tokens: map[string]string{"creds/ada": "tok-ada"}}),
+		withTransport(TransportStreamableHTTP),
+		withCredentials(&stubProvider{tokens: map[string]string{"creds/ada": "tok-ada"}}),
 	)
 
-	conn, err := client.connFor(context.Background(), map[string]any{"user": "grace"})
+	conn, err := client.connFor(context.Background(), "default", map[string]any{"user": "grace"})
 	require.NoError(t, err)
 	assert.Nil(t, conn.TokenSource)
 	assert.True(t, conn.poolable(), "a connection with no credentials is shared as it always was")
@@ -138,11 +138,11 @@ func TestNilTokenSourceMeansNoAuth(t *testing.T) {
 
 func TestAProviderThatFailsFailsTheCall(t *testing.T) {
 	client := newTestClient(t, "https://example.test/mcp",
-		WithTransport(TransportStreamableHTTP),
-		WithCredentialProvider(&stubProvider{failWith: errors.New("token store unreachable")}),
+		withTransport(TransportStreamableHTTP),
+		withCredentials(&stubProvider{failWith: errors.New("token store unreachable")}),
 	)
 
-	_, err := client.connFor(context.Background(), map[string]any{"user": "ada"})
+	_, err := client.connFor(context.Background(), "default", map[string]any{"user": "ada"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "token store unreachable")
 	assert.Contains(t, err.Error(), `"creds"`, "the message says which server could not be reached for")
@@ -182,13 +182,13 @@ func (f tokenSourceFn) Token() (*oauth2.Token, error) { return f() }
 func TestPoolKeySeparatesPrincipals(t *testing.T) {
 	provider := keyed(&stubProvider{tokens: map[string]string{"creds/ada": "tok-ada", "creds/grace": "tok-grace"}})
 	client := newTestClient(t, "https://example.test/mcp",
-		WithTransport(TransportStreamableHTTP),
-		WithCredentialProvider(provider),
+		withTransport(TransportStreamableHTTP),
+		withCredentials(provider),
 	)
 
-	ada, err := client.connFor(context.Background(), map[string]any{"user": "ada"})
+	ada, err := client.connFor(context.Background(), "default", map[string]any{"user": "ada"})
 	require.NoError(t, err)
-	grace, err := client.connFor(context.Background(), map[string]any{"user": "grace"})
+	grace, err := client.connFor(context.Background(), "default", map[string]any{"user": "grace"})
 	require.NoError(t, err)
 
 	assert.Equal(t, "ada", ada.Principal)
@@ -197,7 +197,7 @@ func TestPoolKeySeparatesPrincipals(t *testing.T) {
 
 	// The key identifies the principal, not the token, so a refresh does not
 	// strand the pooled connection.
-	again, err := client.connFor(context.Background(), map[string]any{"user": "ada"})
+	again, err := client.connFor(context.Background(), "default", map[string]any{"user": "ada"})
 	require.NoError(t, err)
 	assert.Equal(t, ada.key(), again.key())
 }
@@ -206,11 +206,11 @@ func TestPoolKeySeparatesPrincipals(t *testing.T) {
 // another's, so it is not pooled at all.
 func TestUnidentifiedCredentialsAreNotPooled(t *testing.T) {
 	client := newTestClient(t, "https://example.test/mcp",
-		WithTransport(TransportStreamableHTTP),
-		WithCredentialProvider(&stubProvider{tokens: map[string]string{"creds/ada": "tok-ada"}}),
+		withTransport(TransportStreamableHTTP),
+		withCredentials(&stubProvider{tokens: map[string]string{"creds/ada": "tok-ada"}}),
 	)
 
-	conn, err := client.connFor(context.Background(), map[string]any{"user": "ada"})
+	conn, err := client.connFor(context.Background(), "default", map[string]any{"user": "ada"})
 	require.NoError(t, err)
 
 	require.NotNil(t, conn.TokenSource)
@@ -224,12 +224,12 @@ func TestUnidentifiedCredentialsAreNotPooled(t *testing.T) {
 func TestProviderIsAskedPerCallWithTheRunContext(t *testing.T) {
 	provider := &stubProvider{tokens: map[string]string{"creds/ada": "tok-ada", "creds/grace": "tok-grace"}}
 	client := newTestClient(t, "https://example.test/mcp",
-		WithTransport(TransportStreamableHTTP),
-		WithCredentialProvider(provider),
+		withTransport(TransportStreamableHTTP),
+		withCredentials(provider),
 	)
 
 	for _, user := range []string{"ada", "grace", "ada"} {
-		_, err := client.connFor(context.Background(), map[string]any{"user": user})
+		_, err := client.connFor(context.Background(), "default", map[string]any{"user": user})
 		require.NoError(t, err)
 	}
 
@@ -242,11 +242,11 @@ func TestProviderIsAskedPerCallWithTheRunContext(t *testing.T) {
 func TestListedToolsCarryNoCredentialAcrossTheBoundary(t *testing.T) {
 	provider := keyed(&stubProvider{tokens: map[string]string{"creds/ada": "tok-ada"}})
 	client := newTestClient(t, "https://example.test/mcp",
-		WithTransport(TransportStreamableHTTP),
-		WithCredentialProvider(provider),
+		withTransport(TransportStreamableHTTP),
+		withCredentials(provider),
 	)
 
-	conn, err := client.connFor(context.Background(), map[string]any{"user": "ada"})
+	conn, err := client.connFor(context.Background(), "default", map[string]any{"user": "ada"})
 	require.NoError(t, err)
 	require.NotNil(t, conn.TokenSource, "the connection itself does hold one")
 
@@ -270,17 +270,17 @@ func TestOneProviderServesEveryConnector(t *testing.T) {
 
 	run := map[string]any{"user": "ada"}
 
-	calendar, err := NewClient(context.Background(), "calendar", "https://calendar.test/mcp",
-		WithTransport(TransportStreamableHTTP), WithCredentialProvider(provider))
+	calendar, err := newServer(context.Background(), "calendar", "https://calendar.test/mcp",
+		withTransport(TransportStreamableHTTP), withCredentials(provider))
 	require.NoError(t, err)
 
-	jira, err := NewClient(context.Background(), "jira", "https://jira.test/mcp",
-		WithTransport(TransportStreamableHTTP), WithCredentialProvider(provider))
+	jira, err := newServer(context.Background(), "jira", "https://jira.test/mcp",
+		withTransport(TransportStreamableHTTP), withCredentials(provider))
 	require.NoError(t, err)
 
-	calConn, err := calendar.connFor(context.Background(), run)
+	calConn, err := calendar.connFor(context.Background(), "default", run)
 	require.NoError(t, err)
-	jiraConn, err := jira.connFor(context.Background(), run)
+	jiraConn, err := jira.connFor(context.Background(), "default", run)
 	require.NoError(t, err)
 
 	calToken, err := calConn.TokenSource.Token()
@@ -303,17 +303,17 @@ func TestOneProviderServesEveryConnector(t *testing.T) {
 func TestProviderIsToldTheEndpointToo(t *testing.T) {
 	var seen Connector
 
-	client, err := NewClient(context.Background(), "calendar", "https://calendar.test/mcp",
-		WithTransport(TransportStreamableHTTP),
-		WithCredentialProvider(CredentialProviderFn(
-			func(_ context.Context, connector Connector, _ map[string]any) (*Credential, error) {
+	client, err := newServer(context.Background(), "calendar", "https://calendar.test/mcp",
+		withTransport(TransportStreamableHTTP),
+		withCredentials(CredentialProviderFn(
+			func(_ context.Context, _ string, connector Connector, _ map[string]any) (*Credential, error) {
 				seen = connector
 				return nil, nil
 			})),
 	)
 	require.NoError(t, err)
 
-	_, err = client.connFor(context.Background(), nil)
+	_, err = client.connFor(context.Background(), "default", nil)
 	require.NoError(t, err)
 
 	assert.Equal(t, Connector{Name: "calendar", Endpoint: "https://calendar.test/mcp"}, seen)
@@ -364,6 +364,14 @@ func TestPoolKeySeparatesSameNamedConnectors(t *testing.T) {
 	globex := serverConn{Name: "jira", Transport: TransportStreamableHTTP, Endpoint: "https://globex.atlassian.net/mcp"}
 
 	assert.NotEqual(t, acme.key(), globex.key())
+
+	// Configuration owners keep separate sessions even when the destination is identical.
+	alice := acme
+	alice.Namespace = "alice"
+	bob := acme
+	bob.Namespace = "bob"
+	assert.NotEqual(t, acme.key(), alice.key())
+	assert.NotEqual(t, alice.key(), bob.key())
 
 	// Transport and command are part of it too.
 	sse := acme

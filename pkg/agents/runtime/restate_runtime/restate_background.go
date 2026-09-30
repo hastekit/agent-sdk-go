@@ -160,6 +160,7 @@ func (s *BackgroundTaskService) Await(ctx restate.Context, in *BackgroundTaskInp
 		Message:           decision.Message,
 		RunContext:        in.Ref.RunContext,
 		Skills:            in.Ref.Skills,
+		MCP:               in.Ref.MCP,
 		StreamID:          in.Ref.ThreadStreamID,
 		ProviderConfigKey: in.ProviderConfigKey,
 	})

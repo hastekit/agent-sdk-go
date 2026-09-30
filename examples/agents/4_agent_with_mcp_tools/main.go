@@ -29,23 +29,20 @@ func main() {
 
 	model := client.Model("OpenAI/gpt-4.1-mini")
 
-	mcpClient, err := mcpclient.NewClient(context.Background(), "users", "http://localhost:9001/sse",
-		mcpclient.WithHeaders(map[string]string{
+	mcpClient := mcpclient.NewClient(mcpclient.NewMemoryStore().WithMCPServerConfig([]mcpclient.ServerConfig{{Name: "users",
+		Endpoint: "http://localhost:9001/sse",
+		Headers: map[string]string{
 			"token": "your-token",
-		}),
-		mcpclient.WithToolFilter(mcpclient.ToolFilter{Include: []string{"list_users"}}),
-		mcpclient.WithApprovalRequiredTools("list_users"),
-		mcpclient.WithTransport("sse"),
-	)
-	if err != nil {
-		log.Fatal(err)
-	}
+		},
+		ToolFilter:            mcpclient.ToolFilter{Include: []string{"list_users"}},
+		ApprovalRequiredTools: []string{"list_users"},
+		Transport:             "sse"}}))
 
 	agent := hastekit.MustNewAgent(&hastekit.AgentConfig{
 		Name:        "Hello world agent",
 		Instruction: hastekit.NewPrompt("You are helpful assistant."),
 		LLM:         model,
-		McpServers:  []agents.MCPToolset{mcpClient},
+		MCPClient:   mcpClient,
 	})
 
 	handle, err := agent.Execute(context.Background(), &agents.AgentInput{

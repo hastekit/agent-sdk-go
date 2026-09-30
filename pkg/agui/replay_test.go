@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
@@ -26,6 +27,21 @@ func replayIDs(body string) []string {
 		}
 	}
 	return ids
+}
+
+// firstEventRecorder signals only after a complete event with a cursor is flushed.
+// Its body is read by the test only after the handler returns.
+type firstEventRecorder struct {
+	*httptest.ResponseRecorder
+	flushed chan struct{}
+	once    sync.Once
+}
+
+func (w *firstEventRecorder) Flush() {
+	w.ResponseRecorder.Flush()
+	if len(replayIDs(w.Body.String())) > 0 {
+		w.once.Do(func() { close(w.flushed) })
+	}
 }
 
 func TestResumeEveryEventFromInitialStreamAndCompletedReplay(t *testing.T) {
@@ -101,6 +117,8 @@ func TestResumeRejectsInvalidWrongStreamAndStaleCursors(t *testing.T) {
 
 func TestResumeAfterDisconnectedRunFinishes(t *testing.T) {
 	gate := newGateTool("gate")
+	release := sync.OnceFunc(func() { close(gate.release) })
+	defer release()
 	a := agents.NewAgent(&agents.AgentOptions{Name: "Helper", Tools: []agents.Tool{gate}}).WithLLM(&scriptedLLM{steps: []scriptedStep{
 		{response: toolCallResponse("call", "gate", "{}")}, {response: assistantTextResponse("done")},
 	}})
@@ -108,17 +126,20 @@ func TestResumeAfterDisconnectedRunFinishes(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	r := httptest.NewRequest("POST", "/agents/Helper/run", strings.NewReader(`{"threadId":"thread","messages":[{"id":"m","role":"user","content":"hello"}]}`)).WithContext(ctx)
-	initial := httptest.NewRecorder()
+	initial := &firstEventRecorder{ResponseRecorder: httptest.NewRecorder(), flushed: make(chan struct{})}
 	returned := make(chan struct{})
 	go func() { defer close(returned); h.ServeHTTP(initial, r) }()
 	<-gate.entered
+	// Tool execution can outrun the HTTP event pump. Disconnect only after the
+	// client has received a cursor that it can use to resume.
+	<-initial.flushed
 	cancel()
 	<-returned
 	ids := replayIDs(initial.Body.String())
 	require.NotEmpty(t, ids)
 	// The run is detached: reconnect after releasing the tool, and receive
 	// exactly the remaining events, including its terminal event.
-	close(gate.release)
+	release()
 	req := httptest.NewRequest("GET", "/agents/Helper/threads/thread/stream", nil)
 	req.Header.Set("Last-Event-ID", ids[len(ids)-1])
 	resumed := httptest.NewRecorder()

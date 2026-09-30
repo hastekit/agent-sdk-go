@@ -22,7 +22,7 @@ type AgentRunner interface {
 // agents and MCP connectors by name; they never construct credentials or clients.
 type Dependencies struct {
 	Agents            map[string]AgentRunner
-	MCPServers        map[string]agents.MCPToolset
+	MCPServers        map[string]agents.MCPClient
 	HTTPClient        *http.Client  // nil: a client with a 30-second timeout
 	JavaScriptTimeout time.Duration // zero: one second per expression/code execution
 	MaxResponseBytes  int64         // zero: 4 MiB per API response

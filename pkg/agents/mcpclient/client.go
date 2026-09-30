@@ -14,7 +14,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-type MCPClient struct {
+type server struct {
 	Name      string            `json:"-"`
 	Endpoint  string            `json:"-"`
 	Transport string            `json:"-"`
@@ -39,15 +39,17 @@ type MCPClient struct {
 	defaultCacheScope    string
 
 	// credentials resolves this server's access token per call
-	credentials CredentialProvider
+	credentials   CredentialProvider
+	authorization *OAuthConfig
+	namespace     string
 }
 
-func NewClient(ctx context.Context, name string, endpoint string, options ...McpServerOption) (*MCPClient, error) {
+func newServer(ctx context.Context, name string, endpoint string, options ...serverOption) (*server, error) {
 	if name == "" {
 		return nil, fmt.Errorf("name is required for mcp connector")
 	}
 
-	srv := &MCPClient{
+	srv := &server{
 		Name:     name,
 		Endpoint: endpoint,
 	}
@@ -59,7 +61,7 @@ func NewClient(ctx context.Context, name string, endpoint string, options ...Mcp
 		return nil, fmt.Errorf("invalid default MCP cache scope %q: want public or private", srv.defaultCacheScope)
 	}
 
-	// Copied, not written into: WithMeta stores the caller's own map, and two
+	// Copied, not written into: withMeta stores the caller's own map, and two
 	// clients built from one map would otherwise overwrite each other's
 	// server_name — and the caller's map besides.
 	meta := map[string]any{}
@@ -70,10 +72,10 @@ func NewClient(ctx context.Context, name string, endpoint string, options ...Mcp
 	return srv, nil
 }
 
-type McpServerOption func(*MCPClient)
+type serverOption func(*server)
 
-func WithHeaders(headers map[string]string) McpServerOption {
-	return func(server *MCPClient) {
+func withHeaders(headers map[string]string) serverOption {
+	return func(server *server) {
 		server.Headers = headers
 	}
 }
@@ -82,53 +84,57 @@ func WithHeaders(headers map[string]string) McpServerOption {
 // is applied. An empty Include allows all tools. Exclude takes precedence over
 // Include. Names are matched exactly.
 type ToolFilter struct {
-	Include []string
-	Exclude []string
+	Include []string `json:"include,omitempty"`
+	Exclude []string `json:"exclude,omitempty"`
 }
 
-// WithToolFilter controls which tools ListTools exposes.
-func WithToolFilter(toolFilter ToolFilter) McpServerOption {
-	return func(srv *MCPClient) {
+func (f ToolFilter) allows(name string) bool {
+	return (len(f.Include) == 0 || slices.Contains(f.Include, name)) && !slices.Contains(f.Exclude, name)
+}
+
+// withToolFilter controls which tools ListTools exposes.
+func withToolFilter(toolFilter ToolFilter) serverOption {
+	return func(srv *server) {
 		srv.ToolFilter = toolFilter
 	}
 }
 
-// WithToolPrefix namespaces this server's tools in the name the model sees,
+// withToolPrefix namespaces this server's tools in the name the model sees,
 // which keeps two servers that both publish a "search" from colliding.
 //
-// The prefix is used verbatim, separator included: WithToolPrefix("xyz__")
+// The prefix is used verbatim, separator included: withToolPrefix("xyz__")
 // exposes the server's "search" as "xyz__search". Passing "xyz" would produce
 // "xyzsearch", so carry the separator in the prefix.
 //
 // The prefix is presentation only. Calls are made on the server under its own
-// name, and WithToolFilter, WithApprovalRequiredTools and WithDeferredTools are
+// name, and withToolFilter, withApprovalRequiredTools and withDeferredTools are
 // all written against the server's own tool names, so they keep working
 // unchanged when a prefix is added.
-func WithToolPrefix(prefix string) McpServerOption {
-	return func(srv *MCPClient) {
+func withToolPrefix(prefix string) serverOption {
+	return func(srv *server) {
 		srv.ToolPrefix = prefix
 	}
 }
 
-func WithApprovalRequiredTools(tools ...string) McpServerOption {
-	return func(srv *MCPClient) {
+func withApprovalRequiredTools(tools ...string) serverOption {
+	return func(srv *server) {
 		srv.ApprovalRequiredTools = tools
 	}
 }
 
-// WithDeferredTools selects which exposed tools require discovery through ToolSearch.
+// withDeferredTools selects which exposed tools require discovery through ToolSearch.
 // Omitting this option defers no tools. An empty Include or "*" includes all tools;
 // Exclude takes precedence and keeps those tools directly available to the model.
 // Names match the server's original names, before any prefix. "*" in Exclude
-// keeps all tools directly available. WithToolFilter still controls visibility.
-func WithDeferredTools(tools ToolFilter) McpServerOption {
-	return func(srv *MCPClient) {
+// keeps all tools directly available. withToolFilter still controls visibility.
+func withDeferredTools(tools ToolFilter) serverOption {
+	return func(srv *server) {
 		srv.DeferredTools = &tools
 	}
 }
 
-func WithTransport(transport string) McpServerOption {
-	return func(srv *MCPClient) {
+func withTransport(transport string) serverOption {
+	return func(srv *server) {
 		if transport == "" {
 			srv.Transport = TransportSSE
 		} else {
@@ -137,26 +143,15 @@ func WithTransport(transport string) McpServerOption {
 	}
 }
 
-// WithCommand runs the server as a child process and speaks to it over its
-// stdin and stdout, which is how a server that ships as a command rather than a
-// URL is reached:
-//
-//	mcpclient.NewClient(ctx, "", mcpclient.WithCommand("npx", "-y", "@modelcontextprotocol/server-filesystem", "/tmp"))
-//
-// It selects the stdio transport, so WithTransport is not needed as well. The
-// endpoint passed to NewClient is unused by stdio and may be empty.
-//
-// The command is taken literally and is never templated from run context: what
-// this SDK runs as a process is fixed by the program that configured it, not by
-// anything a run carries. Per-run values belong in WithEnv.
-func WithCommand(command string, args ...string) McpServerOption {
-	return func(srv *MCPClient) {
+// withCommand sets argv and selects the stdio transport for the private connection.
+func withCommand(command string, args ...string) serverOption {
+	return func(srv *server) {
 		srv.Transport = TransportStdio
 		srv.Command = append([]string{command}, args...)
 	}
 }
 
-// WithEnv adds environment variables to a stdio server's process, on top of the
+// withEnv adds environment variables to a stdio server's process, on top of the
 // environment this process already has — the command still needs to be findable,
 // so PATH and the rest are inherited rather than replaced.
 //
@@ -164,36 +159,36 @@ func WithCommand(command string, args ...string) McpServerOption {
 // per-run credential reaches the server it belongs to:
 //
 //	mcpclient.WithEnv(map[string]string{"GITHUB_TOKEN": "{{github_token}}"})
-func WithEnv(env map[string]string) McpServerOption {
-	return func(srv *MCPClient) {
+func withEnv(env map[string]string) serverOption {
+	return func(srv *server) {
 		srv.Env = env
 	}
 }
 
-// WithCacheTTL caps a positive server TTL and supplies the TTL when the server
+// withCacheTTL caps a positive server TTL and supplies the TTL when the server
 // returns zero or omits it. If neither TTL is positive, schemas are not cached.
-func WithCacheTTL(ttl time.Duration) McpServerOption {
-	return func(srv *MCPClient) {
+func withCacheTTL(ttl time.Duration) serverOption {
+	return func(srv *server) {
 		srv.CacheTTL = ttl
 	}
 }
 
-// WithDefaultCacheScope selects the schema cache scope when the server omits
+// withDefaultCacheScope selects the schema cache scope when the server omits
 // cacheScope. Empty means private, the default. Explicit server scopes always
 // take precedence. Use public only when the tool list is the same for all users.
-// Legacy servers also need WithCacheTTL to enable caching when they omit ttlMs.
-func WithDefaultCacheScope(scope string) McpServerOption {
-	return func(srv *MCPClient) {
+// Legacy servers also need withCacheTTL to enable caching when they omit ttlMs.
+func withDefaultCacheScope(scope string) serverOption {
+	return func(srv *server) {
 		srv.defaultCacheScope = scope
 	}
 }
 
-// WithDisableStandaloneSSE disables the post-init server→client SSE stream
+// withDisableStandaloneSSE disables the post-init server→client SSE stream
 // on the streamable-http transport. Enable it for servers that don't
 // support the standalone GET stream (the client otherwise hangs waiting
 // on a stream that never opens). Has no effect on the sse transport.
-func WithDisableStandaloneSSE(disable bool) McpServerOption {
-	return func(srv *MCPClient) {
+func withDisableStandaloneSSE(disable bool) serverOption {
+	return func(srv *server) {
 		srv.DisableStandaloneSSE = disable
 	}
 }
@@ -201,23 +196,23 @@ func WithDisableStandaloneSSE(disable bool) McpServerOption {
 // WithSchemaCache injects a SchemaCache implementation for caching tool schemas.
 // When set, ListTools() will check the cache before connecting to the MCP server.
 // This enables multi-pod cache sharing when backed by Redis or similar stores.
-func WithSchemaCache(cache SchemaCache) McpServerOption {
-	return func(srv *MCPClient) {
+func withSchemaCache(cache SchemaCache) serverOption {
+	return func(srv *server) {
 		srv.schemaCache = cache
 	}
 }
 
-// WithMeta configures tools/call metadata. String values (including nested maps
+// withMeta configures tools/call metadata. String values (including nested maps
 // and arrays) use the same {{key}} templates as headers, resolved against each
 // ToolCall.RunContext at execution time. Non-string values retain their types.
 // Resolved values never enter schema caches, tool descriptors, or connection keys.
-func WithMeta(m map[string]any) McpServerOption {
-	return func(srv *MCPClient) {
+func withMeta(m map[string]any) serverOption {
+	return func(srv *server) {
 		srv.Meta = m
 	}
 }
 
-func (srv *MCPClient) GetName() string {
+func (srv *server) GetName() string {
 	return srv.Name
 }
 
@@ -251,15 +246,15 @@ type toolListing struct {
 // shareable applies the fallback only to an omitted scope. Unknown explicit
 // scopes remain private. Keep the original scope in cached entries so changing
 // the fallback cannot turn an old public fallback into an explicit promise.
-func (srv *MCPClient) shareable(scope string) bool {
+func (srv *server) shareable(scope string) bool {
 	if scope == "" {
 		scope = srv.defaultCacheScope
 	}
 	return scope == CacheScopePublic
 }
 
-func (srv *MCPClient) ListTools(ctx context.Context, runContext map[string]any) ([]agents.Tool, error) {
-	conn, err := srv.connFor(ctx, runContext)
+func (srv *server) ListTools(ctx context.Context, namespace string, runContext map[string]any) ([]agents.Tool, error) {
+	conn, err := srv.connFor(ctx, namespace, runContext)
 	if err != nil {
 		return nil, err
 	}
@@ -329,7 +324,7 @@ func (srv *MCPClient) ListTools(ctx context.Context, runContext map[string]any) 
 // bounds an upstream's. A non-positive server TTL uses the configured local
 // TTL. Responses bypass caching if neither TTL is positive, including legacy
 // responses without cache directives.
-func (srv *MCPClient) cacheTTL(listing toolListing) time.Duration {
+func (srv *server) cacheTTL(listing toolListing) time.Duration {
 	if listing.TTL > 0 && srv.CacheTTL > 0 {
 		return min(listing.TTL, srv.CacheTTL)
 	}
@@ -347,23 +342,30 @@ func (srv *MCPClient) cacheTTL(listing toolListing) time.Duration {
 // It takes the tool rather than looking one up by name. A durable runtime's
 // workflow already holds the tool as serialized data and hands it back here, so
 // there is nothing to resolve: tool.Name is the name the server knows, already
-// free of any prefix the model-facing name carries. That also means a tool the
-// filter excluded cannot be called here — one that was never listed has no
-// BaseTool to pass.
-func (srv *MCPClient) CallToolDirect(ctx context.Context, runContext map[string]any, tool *agents.BaseTool, params *agents.ToolCall) (*agents.ToolCallResponse, error) {
+// free of any prefix the model-facing name carries. The current filter is checked
+// again because configuration edits can revoke a previously listed tool.
+func (srv *server) CallToolDirect(ctx context.Context, runContext map[string]any, tool *agents.BaseTool, params *agents.ToolCall) (*agents.ToolCallResponse, error) {
+	// The call carries the execution namespace required to resolve credentials.
+	if params == nil {
+		return nil, errors.New("mcp: tool call is required")
+	}
+
 	if tool == nil || tool.Name == "" {
 		return nil, fmt.Errorf("mcp: cannot call %q without the tool it names", params.Name)
+	}
+	if !srv.ToolFilter.allows(tool.Name) {
+		return nil, fmt.Errorf("mcp: tool %q is excluded by the current filter for server %q", tool.Name, srv.Name)
 	}
 
 	// The run context comes in as its own argument on this path — a durable
 	// runtime's workflow holds only a serialized tool definition and calls back
 	// here to execute. Put it on the call so anything downstream reads it in
 	// the one place it reads it everywhere else.
-	if params != nil && params.RunContext == nil {
+	if params.RunContext == nil {
 		params.RunContext = runContext
 	}
 
-	conn, err := srv.connFor(ctx, runContext)
+	conn, err := srv.connFor(ctx, params.Namespace, runContext)
 	if err != nil {
 		return nil, err
 	}
@@ -377,11 +379,11 @@ func (srv *MCPClient) CallToolDirect(ctx context.Context, runContext map[string]
 }
 
 // InvalidateToolCache removes cached tool schemas for this MCP server.
-func (srv *MCPClient) InvalidateToolCache(ctx context.Context, runContext map[string]any) error {
+func (srv *server) InvalidateToolCache(ctx context.Context, namespace string, runContext map[string]any) error {
 	if srv.schemaCache == nil {
 		return nil
 	}
-	conn, err := srv.connFor(ctx, runContext)
+	conn, err := srv.connFor(ctx, namespace, runContext)
 	if err != nil {
 		return err
 	}
@@ -394,14 +396,16 @@ func (srv *MCPClient) InvalidateToolCache(ctx context.Context, runContext map[st
 // a per-run credential reaches the server whichever transport carries it, and
 // so does the token source — see credentialsFor for why that matters under a
 // durable runtime.
-func (srv *MCPClient) connFor(ctx context.Context, runContext map[string]any) (serverConn, error) {
-	tokens, principal, err := srv.credentialsFor(ctx, runContext)
+func (srv *server) connFor(ctx context.Context, namespace string, runContext map[string]any) (serverConn, error) {
+	tokens, principal, err := srv.credentialsFor(ctx, namespace, runContext)
 	if err != nil {
 		return serverConn{}, err
 	}
 
+	// Scope sessions by configuration owner without retaining configuration versions.
 	return serverConn{
 		Name:                 srv.Name,
+		Namespace:            srv.namespace,
 		Transport:            srv.Transport,
 		Endpoint:             srv.Endpoint,
 		Headers:              srv.resolveHeaders(runContext),
@@ -409,12 +413,13 @@ func (srv *MCPClient) connFor(ctx context.Context, runContext map[string]any) (s
 		Env:                  resolveTemplates(srv.Env, runContext),
 		TokenSource:          tokens,
 		Principal:            principal,
+		AuthorizationKey:     authorizationDigest(srv.authorization),
 		DisableStandaloneSSE: srv.DisableStandaloneSSE,
 	}, nil
 }
 
 // resolveHeaders resolves template variables in headers using the runContext.
-func (srv *MCPClient) resolveHeaders(runContext map[string]any) map[string]string {
+func (srv *server) resolveHeaders(runContext map[string]any) map[string]string {
 	return resolveTemplates(srv.Headers, runContext)
 }
 
@@ -437,27 +442,25 @@ func resolveTemplates(values map[string]string, runContext map[string]any) map[s
 // under a key that does name one: the tool list a server shows an admin is not
 // the one it shows everybody, and one user's must never be served to another.
 //
-// An omitted scope is private unless WithDefaultCacheScope explicitly opts
+// An omitted scope is private unless withDefaultCacheScope explicitly opts
 // into public sharing for a server known to expose the same tools to everyone.
 //
-// The connector's name is the whole of the server's identity here. It is
-// required, it is what the durable runtimes already build activity names from,
-// and it survives a server moving to a new URL — where a key built from the
-// endpoint would silently split on a trailing slash or an http/https change.
-// Two clients sharing a name are ambiguous well before they reach this cache.
+// The definition's namespace and name identify a server independently of config
+// edits. A public listing is shared only within that configuration's scope.
+// Existing schemas remain cached until their TTL expires or they are invalidated.
 //
 // What is cached is the server's listing as it gave it, so no client's own
 // view of it belongs in the key: ToolFilter and ToolPrefix are both applied by
 // buildLazyTools, on the way out, to a hit and a miss alike. Putting either
 // here only stored the same schemas twice.
-func (srv *MCPClient) schemaCacheKeys(conn serverConn) (shared, private string) {
-	shared = "mcp:schema:" + srv.Name
+func (srv *server) schemaCacheKeys(conn serverConn) (shared, private string) {
+	shared = fmt.Sprintf("mcp:schema:%q:%q", srv.namespace, srv.Name)
 	return shared, shared + "|" + conn.requesterKey()
 }
 
 // fetchToolSchemas connects to the MCP server, fetches tool schemas, and closes
 // the connection.
-func (srv *MCPClient) fetchToolSchemas(ctx context.Context, conn serverConn) (toolListing, error) {
+func (srv *server) fetchToolSchemas(ctx context.Context, conn serverConn) (toolListing, error) {
 	session, err := connect(ctx, conn)
 	if err != nil {
 		return toolListing{}, err
@@ -481,13 +484,10 @@ func (srv *MCPClient) fetchToolSchemas(ctx context.Context, conn serverConn) (to
 // buildLazyTools converts mcp.Tool schemas into LazyMcpTool instances, applying
 // tool filters, approval flags, and deferred flags against the server's original
 // names before adding the model-facing prefix.
-func (srv *MCPClient) buildLazyTools(tools []*mcp.Tool, meta mcp.Meta, conn serverConn) []agents.Tool {
+func (srv *server) buildLazyTools(tools []*mcp.Tool, meta mcp.Meta, conn serverConn) []agents.Tool {
 	var result []agents.Tool
 	for _, tool := range tools {
-		if len(srv.ToolFilter.Include) > 0 && !slices.Contains(srv.ToolFilter.Include, tool.Name) {
-			continue
-		}
-		if slices.Contains(srv.ToolFilter.Exclude, tool.Name) {
+		if !srv.ToolFilter.allows(tool.Name) {
 			continue
 		}
 
@@ -502,7 +502,7 @@ func (srv *MCPClient) buildLazyTools(tools []*mcp.Tool, meta mcp.Meta, conn serv
 }
 
 // isDeferred applies the configured selection to the server's original tool name.
-func (srv *MCPClient) isDeferred(name string) bool {
+func (srv *server) isDeferred(name string) bool {
 	// The default client exposes every allowed tool directly.
 	filter := srv.DeferredTools
 	if filter == nil {

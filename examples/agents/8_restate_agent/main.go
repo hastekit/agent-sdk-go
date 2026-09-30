@@ -46,12 +46,9 @@ func main() {
 		log.Fatal(err)
 	}
 
-	mcpClient, err := mcpclient.NewClient(context.Background(), "sample", "http://127.0.0.1:8000/mcp",
-		mcpclient.WithTransport("streamable-http"),
-	)
-	if err != nil {
-		log.Fatal(err)
-	}
+	mcpClient := mcpclient.NewClient(mcpclient.NewMemoryStore().WithMCPServerConfig([]mcpclient.ServerConfig{{Name: "sample",
+		Endpoint:  "http://127.0.0.1:8000/mcp",
+		Transport: "streamable-http"}}))
 
 	defer rt.Close()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
@@ -64,8 +61,8 @@ func main() {
 	}
 	agent, err := hastekit.NewAgent(&hastekit.AgentConfig{
 		Name: "SampleAgent", LLM: model, Instruction: hastekit.NewPrompt("You are a helpful assistant."), History: fileHistory,
-		Tools:      []agents.Tool{tools.NewAgentTool("joke-generator-agent", "Use to generate jokes", specialist, tools.SubAgentContextModeNone)},
-		McpServers: []agents.MCPToolset{mcpClient},
+		Tools:     []agents.Tool{tools.NewAgentTool("joke-generator-agent", "Use to generate jokes", specialist, tools.SubAgentContextModeNone)},
+		MCPClient: mcpClient,
 	}, hastekit.WithRuntime(rt))
 	if err != nil {
 		log.Fatal(err)
