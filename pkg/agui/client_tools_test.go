@@ -248,7 +248,7 @@ func TestToolMessageResolvesOnlyThePausedClientTool(t *testing.T) {
 
 	frames = postRun(t, server, "Reader", RunAgentInput{
 		ThreadID: "thread-mixed", Tools: selectionInputTool,
-		Resume:   []ResumeEntry{{InterruptID: "call-del", Status: ResumeResolved, Payload: json.RawMessage(`{"approved":true}`)}},
+		Resume: []ResumeEntry{{InterruptID: "call-del", Status: ResumeResolved, Payload: json.RawMessage(`{"approved":true}`)}},
 	})
 	assert.Equal(t, []string{"deleted"}, toolResults(frames), "approved, the tool itself answers; the fabricated output never does")
 	assert.Equal(t, 2, llm.calls)

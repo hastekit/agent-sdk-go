@@ -83,10 +83,19 @@ export async function uploadAttachment(file: File, sessionId: string): Promise<U
 }
 
 // The user's own skills, shared by every agent and on unless turned off. Agents'
-// global skills are configured on the server, always on, and never listed.
+// built-in skills are configured on the server and always on; see fetchBuiltInSkills.
 export interface SkillInfo {
   name: string;
   description: string;
+}
+
+// An agent's built-in skills: always on, and never in the user's library.
+export async function fetchBuiltInSkills(agentName: string): Promise<SkillInfo[]> {
+  const r = await fetch(`${API}/agents/${encodeURIComponent(agentName)}/skills`);
+  if (r.status === 404) return []; // an older server, or an unknown agent
+  if (!r.ok) throw new Error(`built-in skills → ${r.status}`);
+  const body: { skills?: SkillInfo[] } = await r.json();
+  return body.skills ?? [];
 }
 export async function fetchSkillCatalog(): Promise<SkillInfo[]> {
   const skills: SkillInfo[] = [];
@@ -195,11 +204,14 @@ export interface MCPServerConfig {
   transport?: "streamable-http" | "sse";
   toolPrefix?: string;
   headers?: Record<string, string>;
+  // Only redirectUrl is required: without a client ID the server discovers the
+  // authorization server and registers a client there. authUrl and tokenUrl pin
+  // the endpoints for servers that publish no metadata, and need a clientId.
   authorization?: {
-    clientId: string;
+    clientId?: string;
     clientSecret?: string;
-    authUrl: string;
-    tokenUrl: string;
+    authUrl?: string;
+    tokenUrl?: string;
     redirectUrl: string;
     scopes?: string[];
   };

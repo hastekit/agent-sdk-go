@@ -15,15 +15,25 @@ function buildConfig(form: typeof emptyForm, headers: Header[]): MCPServerConfig
   const filled = headers.filter(header => header.key.trim());
   if (filled.length) config.headers = Object.fromEntries(filled.map(header => [header.key.trim(), header.value]));
   if (form.oauth) {
-    config.authorization = {
-      clientId: form.clientId.trim(), authUrl: form.authUrl.trim(), tokenUrl: form.tokenUrl.trim(),
-      redirectUrl: mcpCallbackUrl(form.name.trim()),
-    };
+    // Only the callback is needed: the server discovers the rest, and registers a client.
+    config.authorization = { redirectUrl: mcpCallbackUrl(form.name.trim()) };
+    if (form.clientId.trim()) config.authorization.clientId = form.clientId.trim();
     if (form.clientSecret) config.authorization.clientSecret = form.clientSecret;
+    if (form.authUrl.trim()) config.authorization.authUrl = form.authUrl.trim();
+    if (form.tokenUrl.trim()) config.authorization.tokenUrl = form.tokenUrl.trim();
     const scopes = form.scopes.split(/[\s,]+/).filter(Boolean);
     if (scopes.length) config.authorization.scopes = scopes;
   }
   return config;
+}
+
+// oauthProblem says what the OAuth settings still need, mirroring the server's rules.
+function oauthProblem(form: typeof emptyForm): string {
+  const clientId = form.clientId.trim(), authUrl = form.authUrl.trim(), tokenUrl = form.tokenUrl.trim();
+  if ((authUrl === "") !== (tokenUrl === "")) return "Give both the authorization and token URLs, or neither.";
+  if (authUrl && !clientId) return "Your own endpoints need your client ID.";
+  if (form.clientSecret && !clientId) return "A client secret needs its client ID.";
+  return "";
 }
 
 function status(server: MCPServerInfo): string {
@@ -62,8 +72,8 @@ export function MCPLibrary({onClose, onChanged}: {onClose: () => void; onChanged
   const name = form.name.trim();
   const reserved = servers.some(server => server.name === name && isGlobalMCPServer(server));
   const invalidName = name !== "" && /[/\\]/.test(name);
-  const ready = name !== "" && !invalidName && !reserved && form.endpoint.trim() !== "" &&
-    (!form.oauth || (form.clientId.trim() !== "" && form.authUrl.trim() !== "" && form.tokenUrl.trim() !== ""));
+  const oauthError = form.oauth ? oauthProblem(form) : "";
+  const ready = name !== "" && !invalidName && !reserved && form.endpoint.trim() !== "" && !oauthError;
 
   async function save() {
     setBusy(true); setError(""); setNotice("");
@@ -118,13 +128,21 @@ export function MCPLibrary({onClose, onChanged}: {onClose: () => void; onChanged
         </div>
         <label className="mcp-oauth-toggle"><input type="checkbox" checked={form.oauth} onChange={event => setForm(old => ({ ...old, oauth: event.target.checked }))} />Sign in with OAuth</label>
         {form.oauth && <>
-          <label>Client ID<input value={form.clientId} onChange={set("clientId")} /></label>
-          <label>Client secret (optional)<input type="password" autoComplete="off" value={form.clientSecret} onChange={set("clientSecret")} /></label>
-          <label>Authorization URL<input type="url" value={form.authUrl} onChange={set("authUrl")} placeholder="https://auth.example.com/authorize" /></label>
-          <label>Token URL<input type="url" value={form.tokenUrl} onChange={set("tokenUrl")} placeholder="https://auth.example.com/token" /></label>
-          <label>Scopes (optional)<input value={form.scopes} onChange={set("scopes")} placeholder="read write" /></label>
-          <label>Redirect URL<input readOnly value={name ? mcpCallbackUrl(name) : ""} placeholder="Enter a name first" />
-            <small>Register this URL with the OAuth provider.</small></label>
+          <small>Most MCP servers need nothing more: connecting finds their sign-in page and registers this app with them.</small>
+          <label>Scopes (optional)<input value={form.scopes} onChange={set("scopes")} placeholder="read write" />
+            <small>Leave empty to request what the server asks for.</small></label>
+          <details className="mcp-oauth-app" open={form.clientId !== "" || form.authUrl !== "" || form.tokenUrl !== ""}>
+            <summary>Use your own OAuth app</summary>
+            <small>For servers that do not register apps automatically, or to sign in through an app you manage.</small>
+            <label>Client ID<input value={form.clientId} onChange={set("clientId")} /></label>
+            <label>Client secret (optional)<input type="password" autoComplete="off" value={form.clientSecret} onChange={set("clientSecret")} /></label>
+            <label>Authorization URL (optional)<input type="url" value={form.authUrl} onChange={set("authUrl")} placeholder="https://auth.example.com/authorize" /></label>
+            <label>Token URL (optional)<input type="url" value={form.tokenUrl} onChange={set("tokenUrl")} placeholder="https://auth.example.com/token" />
+              <small>Only for servers that do not publish their sign-in endpoints.</small></label>
+            <label>Redirect URL<input readOnly value={name ? mcpCallbackUrl(name) : ""} placeholder="Enter a name first" />
+              <small>Register this URL with your OAuth app.</small></label>
+          </details>
+          {oauthError && <small role="alert" className="skill-library-error">{oauthError}</small>}
         </>}
         <button disabled={busy || !ready} onClick={() => void save()}>{busy ? "Working…" : "Save server"}</button>
       </fieldset>

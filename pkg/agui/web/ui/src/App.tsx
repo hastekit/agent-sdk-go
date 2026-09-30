@@ -17,6 +17,7 @@ import { InterruptHandler } from "./components/Interrupts";
 import { RoutineHistory } from "./components/RoutineHistory";
 import { Sidebar } from "./components/Sidebar";
 import { InlineToolRenderer } from "./components/ToolCallCard";
+import { useBuiltInSkills } from "./hooks/useBuiltInSkills";
 import { useCatalogChoices } from "./hooks/useCatalogChoices";
 import { useNavigation } from "./hooks/useNavigation";
 import { useRoutineList } from "./hooks/useRoutineList";
@@ -76,6 +77,8 @@ export default function App() {
   // The user's own skills and MCP servers are shared by every agent: loaded
   // once, remembered once per browser, and sent with every run and resume.
   const skills = useCatalogChoices({ enabled: server.skillStoreEnabled, storageKey: "hastekit-skills", load: fetchSkillCatalog });
+  // The agent's own skills: always on, shown beside the user's for reference.
+  const builtInSkills = useBuiltInSkills(agentName);
   const mcp = useCatalogChoices({ enabled: server.mcpStoreEnabled, storageKey: "hastekit-mcp", load: fetchMCPServers, optional: isUserMCPServer });
   useEffect(() => {
     if (agent) agent.skillSelection = { disable: skills.disabled };
@@ -143,7 +146,7 @@ export default function App() {
       data-copilotkit
     >
       {routinesOpen && <RoutineLibrary initialAgent={agentName} onChanged={routineList.reload} onClose={() => setRoutinesOpen(false)} />}
-      {libraryOpen && <SkillLibrary onClose={() => setLibraryOpen(false)} onSaved={skills.reload} />}
+      {libraryOpen && <SkillLibrary builtIn={builtInSkills} onClose={() => setLibraryOpen(false)} onSaved={skills.reload} />}
       {mcpLibraryOpen && <MCPLibrary onClose={() => setMCPLibraryOpen(false)} onChanged={mcp.reload} />}
       <Sidebar
         threads={threadList.threads}
@@ -199,7 +202,7 @@ export default function App() {
                 </button>
               </div>
             )}
-            <ComposerSkillsContext.Provider value={{ skills: skills.items, choices: skills.choices, error: skills.error, toggle: skills.toggle, canManage: server.skillStoreEnabled, onManage: () => setLibraryOpen(true) }}>
+            <ComposerSkillsContext.Provider value={{ builtIn: builtInSkills, skills: skills.items, choices: skills.choices, error: skills.error, toggle: skills.toggle, canManage: server.skillStoreEnabled, onManage: () => setLibraryOpen(true) }}>
             <ComposerMCPContext.Provider value={{ servers: mcp.items, choices: mcp.choices, error: mcp.error, toggle: mcp.toggle, canManage: server.mcpStoreEnabled, onManage: () => setMCPLibraryOpen(true) }}>
             <TrayContext.Provider value={activity.tray}>
               <HistoryPager key={`${agentName}:${active.threadId}`} agent={agent} initialCursor={active.nextCursor ?? ""}>

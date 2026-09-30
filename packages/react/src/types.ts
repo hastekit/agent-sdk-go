@@ -37,12 +37,15 @@ export interface MCPSelection {
   disable: string[];
 }
 
-// OAuth application settings for a user-owned MCP server.
+// OAuth settings for a user-owned MCP server. Only redirectUrl is required:
+// without a client ID the server discovers the MCP server's authorization server
+// and registers a client there. authUrl and tokenUrl pin the endpoints for
+// servers that publish no metadata, and need a clientId.
 export interface MCPOAuthConfig {
-  clientId: string;
+  clientId?: string;
   clientSecret?: string;
-  authUrl: string;
-  tokenUrl: string;
+  authUrl?: string;
+  tokenUrl?: string;
   // Must be this server's callback route; see MCPTransport.callbackUrl.
   redirectUrl: string;
   scopes?: string[];

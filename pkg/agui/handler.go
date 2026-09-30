@@ -148,12 +148,14 @@ func buildOptions(opts []Option) options {
 //	POST /a2a/{agent}                            → A2A 1.0 JSON-RPC (including SSE)
 //	GET  /agents                                  → {"agents": ["name", ...]}
 //	POST /agents/{agent}/run                      → run the agent; SSE stream of AG-UI events
+//	GET  /agents/{agent}/skills                   → the agent's built-in skills, always on
 //	GET  /agents/{agent}/threads                  → stored conversation threads, newest first
 //	GET  /agents/{agent}/threads/{thread}/messages → thread history as AG-UI messages
 //	GET  /skills                                  → the caller's own skills (WithSkillStore)
 //
-// Skills are not scoped to an agent: /skills manages the caller's own skills,
-// which every agent using the store can read. Runs turn them off with
+// The caller's own skills are not scoped to an agent: /skills manages them,
+// and every agent using the store can read them. An agent's built-in skills
+// are configured in code, so /agents/{agent}/skills lists them per agent. Runs turn them off with
 // forwardedProps.skills.disable; an agent's global skills are always on.
 //
 // The run endpoint accepts the canonical AG-UI RunAgentInput body and
@@ -333,6 +335,21 @@ func NewHandler(registry Registry, opts ...Option) http.Handler {
 			return
 		}
 		serveThreads(w, r, agent, o)
+	})
+
+	handleFunc("GET /agents/{agent}/skills", func(w http.ResponseWriter, r *http.Request) {
+		agent, ok := registry.Agent(r.PathValue("agent"))
+		if !ok {
+			writeJSONError(w, http.StatusNotFound, "agent not found")
+			return
+		}
+		skills, err := builtInSkills(r, agent)
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "unable to list skills")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"skills": skills})
 	})
 
 	handleFunc("GET /agents/{agent}/threads/{thread}/messages", func(w http.ResponseWriter, r *http.Request) {
@@ -825,8 +842,31 @@ func collectHeaders(headers http.Header) map[string]string {
 	return out
 }
 
+// BuiltInSkill is one of an agent's developer-owned skills: configured in code,
+// always on, and never managed through /skills.
+type BuiltInSkill struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+}
+
+// builtInSkills lists an agent's developer-owned skills. An empty namespace asks
+// its skill client for globals only.
+func builtInSkills(r *http.Request, agent *agents.Agent) ([]BuiltInSkill, error) {
+	catalog, err := agent.ListSkills(r.Context(), "", map[string]any{"Header": collectHeaders(r.Header)}, agents.SkillSelection{})
+	if err != nil {
+		return nil, err
+	}
+	skills := []BuiltInSkill{}
+	for _, skill := range catalog {
+		if skill.Global {
+			skills = append(skills, BuiltInSkill{Name: skill.Name, Description: skill.Description})
+		}
+	}
+	return skills, nil
+}
+
 // globalSkillNames lists every registered agent's developer-owned skills, which
-// user uploads may not reuse. An empty namespace asks each client for globals only.
+// user uploads may not reuse.
 func globalSkillNames(r *http.Request, registry Registry) ([]string, error) {
 	var names []string
 	for _, name := range registry.AgentNames() {
@@ -834,14 +874,12 @@ func globalSkillNames(r *http.Request, registry Registry) ([]string, error) {
 		if !ok {
 			continue
 		}
-		catalog, err := agent.ListSkills(r.Context(), "", map[string]any{"Header": collectHeaders(r.Header)}, agents.SkillSelection{})
+		skills, err := builtInSkills(r, agent)
 		if err != nil {
 			return nil, err
 		}
-		for _, skill := range catalog {
-			if skill.Global {
-				names = append(names, skill.Name)
-			}
+		for _, skill := range skills {
+			names = append(names, skill.Name)
 		}
 	}
 	return names, nil

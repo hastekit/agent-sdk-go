@@ -3,13 +3,15 @@ import * as Menu from "@radix-ui/react-dropdown-menu";
 import { isGlobalMCPServer, type MCPServerInfo, type SkillInfo } from "./api";
 
 export const ComposerSkillsContext = createContext<{
+  // The agent's own skills, always on, listed before the user's.
+  builtIn: SkillInfo[];
   skills: SkillInfo[];
   choices: Record<string, boolean>;
   error: string;
   toggle: (name: string, enabled: boolean) => void;
   canManage: boolean;
   onManage: () => void;
-}>({ skills: [], choices: {}, error: "", toggle: () => {}, canManage: false, onManage: () => {} });
+}>({ builtIn: [], skills: [], choices: {}, error: "", toggle: () => {}, canManage: false, onManage: () => {} });
 
 export const ComposerMCPContext = createContext<{
   servers: MCPServerInfo[];
@@ -58,7 +60,7 @@ function MCPSubmenu() {
 // A stable slot component keeps the draft and uploaded files mounted when a
 // skill choice changes. Radix supplies focus, keyboard and collision handling.
 export function ComposerMenu({ onAddFile, disabled }: { onAddFile?: () => void; disabled?: boolean }) {
-  const { skills, choices, error, toggle, canManage, onManage } = useContext(ComposerSkillsContext);
+  const { builtIn, skills, choices, error, toggle, canManage, onManage } = useContext(ComposerSkillsContext);
   return <Menu.Root>
     <Menu.Trigger asChild>
       <button type="button" className="composer-menu-trigger" disabled={disabled}
@@ -79,7 +81,12 @@ export function ComposerMenu({ onAddFile, disabled }: { onAddFile?: () => void; 
               <Menu.Label className="composer-skills-heading">Skills</Menu.Label>
               <p className="composer-skills-hint">Applies to the next run.</p>
               {error && <p className="composer-skills-hint" role="alert">{error}</p>}
-              {!error && !skills.length && <p className="composer-skills-hint">{canManage ? "Your skill library is empty." : "No skills of your own on this server."}</p>}
+              {builtIn.map(skill => <Menu.CheckboxItem key={`built-in:${skill.name}`} className="composer-skill" role="switch"
+                aria-label={skill.name} checked disabled onSelect={event => event.preventDefault()}>
+                <span className="composer-skill-copy"><strong>{skill.name}</strong><small>Built in · always on</small></span>
+                <span className="skill-switch" data-checked aria-hidden="true"><span /></span>
+              </Menu.CheckboxItem>)}
+              {!error && !skills.length && !builtIn.length && <p className="composer-skills-hint">{canManage ? "Your skill library is empty." : "No skills of your own on this server."}</p>}
               {skills.map(skill => {
                 const checked = choices[skill.name] ?? true;
                 return <Menu.CheckboxItem key={skill.name} className="composer-skill" role="switch"

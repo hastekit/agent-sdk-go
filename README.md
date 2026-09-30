@@ -879,8 +879,12 @@ handler := web.Handler(registry,
 ```
 
 The web routes live under `/api/agui/mcp`; OAuth connect/callback routes read settings
-from the store even before the first agent run. See [persisted MCP credentials and
-Gmail setup](pkg/agents/mcpclient/OAUTH.md) and `samples/new/main.go`.
+from the store even before the first agent run. A server that publishes its
+authorization metadata needs only its URL and the callback: connecting discovers
+its authorization server and registers a client there (dynamic client
+registration), using the MCP Go SDK's authorization flow, and keeps the
+registration in the credential store. See [persisted MCP credentials, discovery
+and Gmail setup](pkg/agents/mcpclient/OAUTH.md) and `samples/new/main.go`.
 
 #### Tool Annotations
 

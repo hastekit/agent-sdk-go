@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { deleteSkill, fetchStoredSkills, skillFileUrl, uploadSkill, type StoredSkill } from "./api";
+import { deleteSkill, fetchStoredSkills, skillFileUrl, uploadSkill, type SkillInfo, type StoredSkill } from "./api";
 
 import { validateSkillUpload } from "./skill-upload";
 
-export function SkillLibrary({onClose, onSaved}: {onClose: () => void; onSaved: () => void}) {
+// builtIn are the current agent's own skills: listed for reference, always on, not managed here.
+export function SkillLibrary({builtIn, onClose, onSaved}: {builtIn: SkillInfo[]; onClose: () => void; onSaved: () => void}) {
   const dialog = useRef<HTMLDialogElement>(null);
   const [skills, setSkills] = useState<StoredSkill[]>([]);
   const [cursor, setCursor] = useState("");
@@ -60,7 +61,7 @@ export function SkillLibrary({onClose, onSaved}: {onClose: () => void; onSaved: 
     } catch (err) { if (request === previewRequest.current) {setContent(""); setError(String(err));} }
   }
   return <dialog ref={dialog} className="skill-library" onCancel={onClose} aria-labelledby="skill-library-title">
-    <header><div><h2 id="skill-library-title">Skill library</h2><p>Manage the shared library for agents configured to use it.</p></div><button onClick={onClose} aria-label="Close skill library">Close</button></header>
+    <header><div><h2 id="skill-library-title">Skill library</h2><p>Manage the shared library for agents configured to use it. Built-in skills come from the agent and are always on.</p></div><button onClick={onClose} aria-label="Close skill library">Close</button></header>
     <details className="skill-upload" open>
       <summary>Upload a skill</summary>
       <p>Choose a folder with SKILL.md and supporting files, or select individual files. SKILL.md must include a name and description in its frontmatter.</p>
@@ -74,7 +75,10 @@ export function SkillLibrary({onClose, onSaved}: {onClose: () => void; onSaved: 
     {error && <p role="alert" className="skill-library-error">{error}</p>}
     {notice && <p role="status" className="skill-library-notice">{notice}</p>}
     <section aria-label="Stored skills">
-      <h3>Stored skills <span className="skill-count">{skills.length}{cursor ? "+" : ""}</span></h3>
+      <h3>Skills <span className="skill-count">{builtIn.length + skills.length}{cursor ? "+" : ""}</span></h3>
+      {builtIn.map(skill => <article key={`built-in:${skill.name}`}>
+        <div className="skill-summary"><strong>{skill.name}</strong><p>{skill.description}</p><small>Built in · always on</small></div>
+      </article>)}
       {!skills.length && <p className="skill-empty">{busy ? "Loading skills…" : "Your library is empty. Upload a skill to get started."}</p>}
       {skills.map(skill => <article key={skill.name} className={selected?.name === skill.name ? "selected" : ""}>
         <div className="skill-summary"><strong>{skill.name}</strong><p>{skill.description}</p><small>{1 + (skill.resources?.length || 0)} files</small></div>

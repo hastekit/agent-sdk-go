@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
+	"github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/oauth2"
@@ -98,7 +99,10 @@ func TestOAuthHandlerRejectsExpiredState(t *testing.T) {
 		client:    NewClient(oauthTestStore("https://accounts.example/token")),
 		namespace: func(*http.Request) (string, error) { return "ada", nil },
 		pending: map[string]pendingAuthorization{
-			"expired": {namespace: "ada", server: "gmail", key: oauthTestKey("gmail", "https://accounts.example/token"), verifier: "verifier", expires: time.Now().Add(-time.Second)},
+			"expired": {namespace: "ada", server: "gmail", expires: time.Now().Add(-time.Second), complete: func(context.Context, *auth.AuthorizationResult) error {
+				t.Error("an expired attempt must not be completed")
+				return nil
+			}},
 		},
 	}
 	request := httptest.NewRequest(http.MethodGet, "/gmail/callback?state=expired&code=unused", nil)

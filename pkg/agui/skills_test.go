@@ -56,10 +56,12 @@ func TestSkillsAreNotScopedToAgents(t *testing.T) {
 	agent := agents.NewAgent(&agents.AgentOptions{Name: "helper", SkillClient: skills.NewClient(store)})
 	handler := NewHandler(skillAgents{"helper": agent}, WithSkillStore(store), WithNamespaceResolver(func(*http.Request) (string, error) { return "tenant", nil }))
 
-	// The per-agent catalog route is gone; users manage one library for every agent.
+	// Users manage one library for every agent; the per-agent route lists only
+	// the agent's built-in skills, of which this one has none.
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/agents/helper/skills", nil))
-	require.Equal(t, http.StatusNotFound, recorder.Code)
+	require.Equal(t, http.StatusOK, recorder.Code)
+	require.JSONEq(t, `{"skills":[]}`, recorder.Body.String())
 	recorder = httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/skills", nil))
 	require.Equal(t, http.StatusOK, recorder.Code)
@@ -148,6 +150,17 @@ func TestUploadsCannotReuseAnyAgentsGlobalSkillName(t *testing.T) {
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/skills", nil))
 	require.Equal(t, http.StatusOK, recorder.Code)
 	require.Contains(t, recorder.Body.String(), "mine")
+
+	// Each agent lists its own built-in skills, and not the user's.
+	for name, global := range map[string]string{"reviewer": "review", "writer": "style"} {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/agents/"+name+"/skills", nil))
+		require.Equal(t, http.StatusOK, recorder.Code)
+		require.JSONEq(t, `{"skills":[{"name":"`+global+`","description":"Developer `+global+`"}]}`, recorder.Body.String())
+	}
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/agents/nobody/skills", nil))
+	require.Equal(t, http.StatusNotFound, recorder.Code)
 	require.NotContains(t, recorder.Body.String(), "review")
 	require.NotContains(t, recorder.Body.String(), "style")
 }

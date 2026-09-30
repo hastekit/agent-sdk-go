@@ -200,6 +200,10 @@ func (h *configHandler) remove(w http.ResponseWriter, r *http.Request) {
 		lock := h.options.oauth.credentialLock(namespace, key)
 		lock.Lock()
 		err := h.options.oauth.store.Delete(r.Context(), namespace, key)
+		// A client registered for a discovered server goes with it.
+		if clients, ok := h.options.oauth.store.(OAuthClientStore); ok && err == nil {
+			err = clients.DeleteOAuthClient(r.Context(), namespace, key)
+		}
 		lock.Unlock()
 		if err != nil {
 			http.Error(w, "Unable to remove MCP authorization", http.StatusInternalServerError)

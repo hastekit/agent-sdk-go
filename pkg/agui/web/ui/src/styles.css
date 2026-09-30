@@ -808,3 +808,7 @@ body {
 .context-meter[data-level="critical"] .context-meter-label {
   color: var(--destructive, #f7768e);
 }
+/* The OAuth app a user brings for themselves, folded away by default: most
+   servers register the app themselves. */
+.routine-form .mcp-oauth-app { display: grid; gap: 10px; padding-left: 12px; border-left: 1px solid var(--hk-line); }
+.routine-form .mcp-oauth-app > summary { cursor: pointer; color: var(--hk-muted); }

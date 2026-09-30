@@ -85,8 +85,10 @@ stored skills, previews SKILL.md as text, downloads resources, and deletes skill
 with an inline confirmation. The upload button replaces a same-named skill's
 entire bundle. The composer's Skills menu lists the same library, which is not
 scoped to an agent: a new upload is on for every agent using this store until
-the user turns it off there, and that choice applies to every agent. Global
-skills are always on and do not appear in the menu.
+the user turns it off there, and that choice applies to every agent. The
+agent's global skills are listed too, in the menu and the library, marked
+"Built in · always on" and never switchable or deletable; the UI reads them from
+`GET /agents/{agent}/skills`.
 
 Run `go run ./examples/agents/15_dynamic_skills -serve -skill-store /tmp/skills`
 from the repository root to try it. Model calls require `OPENAI_API_KEY`; uploading
