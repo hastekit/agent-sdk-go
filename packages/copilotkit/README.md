@@ -60,6 +60,11 @@ export function Chat({ threadId }: { threadId: string }) {
 `agentId`. Pass `headers` for authentication and `fetch` to customise requests.
 They are used for every request the agent makes.
 
+By default, requests contain only new messages. Messages already submitted or
+loaded from the server stay visible but are excluded from later requests, even
+if their run failed before producing an assistant reply. Set `fullHistory: true`
+only for a stateless server that needs the entire transcript on every request.
+
 ## Opening an existing thread
 
 Load the thread's latest page before creating the agent and pass it as

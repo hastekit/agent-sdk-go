@@ -1159,5 +1159,5 @@ func (c *NativeResponseChunkToResponseChunkConverter) buildMessageStop() Respons
 }
 
 func IsAdaptiveThinkingModel(model string) bool {
-	return strings.Contains(model, "4-6") || strings.Contains(model, "4-7")
+	return !strings.Contains(model, "4-5")
 }

@@ -72,6 +72,96 @@ describe("HastekitAgent", () => {
     expect(requests[0].body.messages.map((m: Message) => m.id)).toEqual(["u1", "a1", "u2"]);
   });
 
+  it.each(["none", "text", "custom"])("does not resend a failed turn with the next message (%s echo)", async (echo) => {
+    const { fetch, requests } = server((runId) => runId === "failed" ? [
+      { type: "RUN_STARTED", threadId: "thread", runId },
+      ...(echo === "text" ? [
+        { type: "TEXT_MESSAGE_START", messageId: "msg_u1", role: "user" },
+        { type: "TEXT_MESSAGE_CONTENT", messageId: "msg_u1", delta: "hey" },
+        { type: "TEXT_MESSAGE_END", messageId: "msg_u1" },
+      ] : echo === "custom" ? [
+        { type: "CUSTOM", name: HastekitEvent.InputMessage, value: user("msg_u1", "hey") },
+      ] : []),
+      { type: "RUN_ERROR", message: "Provider failed" },
+    ] : defaultRun(runId));
+    const agent = new HastekitAgent({ agentName: "a", threadId: "thread", fetch });
+    agent.addMessage(user("u1", "hey"));
+    await agent.runAgent({ runId: "failed" });
+    agent.addMessage(user("u2", "list my previous messages"));
+    await agent.runAgent({ runId: "next" });
+
+    expect(requests.map((r) => r.body.messages)).toEqual([
+      [user("u1", "hey")],
+      [user("u2", "list my previous messages")],
+    ]);
+    expect(agent.messages.filter((m) => m.role === "user")).toHaveLength(2);
+  });
+
+  it("excludes failed messages loaded from history but sends every newly added message", async () => {
+    const { fetch, requests } = server();
+    const agent = new HastekitAgent({ agentName: "a", threadId: "thread", fetch, initialMessages: [user("failed", "hey")] });
+    agent.prependMessages([user("older", "hey")]);
+    agent.addMessage(user("new-1", "hey"));
+    agent.addMessage(user("new-2", "hey"));
+    await agent.runAgent();
+    expect(requests[0].body.messages).toEqual([user("new-1", "hey"), user("new-2", "hey")]);
+  });
+
+  it.each(["text", "custom"])("excludes a failed turn received while joining another client's run (%s echo)", async (echo) => {
+    const { fetch, requests } = server((runId) => runId === "joined" ? [
+      { type: "RUN_STARTED", threadId: "thread", runId },
+      ...(echo === "text" ? [
+        { type: "TEXT_MESSAGE_START", messageId: "msg_remote", role: "user" },
+        { type: "TEXT_MESSAGE_CONTENT", messageId: "msg_remote", delta: "hey" },
+        { type: "TEXT_MESSAGE_END", messageId: "msg_remote" },
+      ] : [
+        { type: "CUSTOM", name: HastekitEvent.InputMessage, value: user("msg_remote", "hey") },
+      ]),
+      { type: "RUN_ERROR", message: "Provider failed" },
+    ] : defaultRun(runId));
+    const agent = new HastekitAgent({ agentName: "a", threadId: "thread", fetch });
+    await agent.connectAgent();
+    expect(agent.messages).toEqual([user("msg_remote", "hey")]);
+    agent.addMessage(user("new"));
+    await agent.runAgent();
+    expect(requests[1].body.messages).toEqual([user("new")]);
+  });
+
+  it("still sends failed turns in full-history mode for stateless servers", async () => {
+    const { fetch, requests } = server(() => [{ type: "RUN_ERROR", message: "Provider failed" }]);
+    const agent = new HastekitAgent({ agentName: "a", threadId: "thread", fullHistory: true, fetch });
+    agent.addMessage(user("failed"));
+    await agent.runAgent();
+    agent.addMessage(user("new"));
+    await agent.runAgent();
+    expect(requests[1].body.messages).toEqual([user("failed"), user("new")]);
+  });
+
+  it("keeps submitted turns across clones without sharing their bookkeeping", async () => {
+    const { fetch, requests } = server(() => [{ type: "RUN_ERROR", message: "Provider failed" }]);
+    const agent = new HastekitAgent({ agentName: "a", threadId: "thread", fetch });
+    agent.addMessage(user("failed"));
+    await agent.runAgent();
+    const copy = agent.clone();
+    copy.addMessage(user("new"));
+    await copy.runAgent();
+    agent.addMessage(user("new"));
+    await agent.runAgent();
+    expect(requests.map((r) => r.body.messages)).toEqual([[user("failed")], [user("new")], [user("new")]]);
+  });
+
+  it("does not resend a steered message when the user starts the next turn", async () => {
+    const { fetch, requests } = server();
+    const agent = new HastekitAgent({ agentName: "a", threadId: "thread", fetch: async (url, init) => {
+      if (JSON.parse(String(init.body)).messages[0]?.content === "steered") return new Response(null, { status: 204 });
+      return fetch(url, init);
+    } });
+    await agent.steer("steered");
+    agent.addMessage(user("new"));
+    await agent.runAgent();
+    expect(requests[0].body.messages).toEqual([user("new")]);
+  });
+
   it("keeps loaded history when the agent is cleared to join the thread", async () => {
     const { fetch, requests } = server();
     const agent = new HastekitAgent({ agentName: "a", threadId: "thread", fetch, initialMessages: [user("u1"), assistant("a1")] });

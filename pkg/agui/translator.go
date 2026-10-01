@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/hastekit/agent-sdk-go/pkg/agents/attachments"
@@ -52,6 +53,11 @@ type Translator struct {
 	openToolCallsByItemID map[string]string
 	toolCallNamesByID     map[string]string
 
+	// toolCallArgs follows each open call's arguments, keyed by item_id:
+	// what the deltas streamed, and the whole arguments a provider states on
+	// item_added or at the end. See flushToolCallArgs.
+	toolCallArgs map[string]*toolCallArgs
+
 	// Open reasoning block — empty when none is open. We bracket
 	// reasoning text deltas with REASONING_MESSAGE_* and the whole
 	// reasoning item with REASONING_START/_END.
@@ -74,6 +80,13 @@ type Translator struct {
 	emittedImageIDs map[string]bool
 }
 
+// toolCallArgs is what the client has been sent of one call's arguments, and
+// the whole arguments as the provider last stated them.
+type toolCallArgs struct {
+	streamed string
+	whole    string
+}
+
 // NewTranslator returns a fresh translator for one run.
 func NewTranslator(threadID, runID string) *Translator {
 	return &Translator{
@@ -81,6 +94,7 @@ func NewTranslator(threadID, runID string) *Translator {
 		runID:                 runID,
 		openToolCallsByItemID: map[string]string{},
 		toolCallNamesByID:     map[string]string{},
+		toolCallArgs:          map[string]*toolCallArgs{},
 		openSteps:             map[string]bool{},
 		emittedImageIDs:       map[string]bool{},
 	}
@@ -319,6 +333,9 @@ func (t *Translator) Translate(chunk *responses.ResponseChunk) []Event {
 			// Defensive — the agent loop should always emit item_added first.
 			return nil
 		}
+		if args := t.toolCallArgs[chunk.OfFunctionCallArgumentsDelta.ItemId]; args != nil {
+			args.streamed += chunk.OfFunctionCallArgumentsDelta.Delta
+		}
 		return []Event{&ToolCallArgsEvent{
 			BaseEvent:  baseNow(),
 			ToolCallID: callID,
@@ -326,7 +343,10 @@ func (t *Translator) Translate(chunk *responses.ResponseChunk) []Event {
 		}}
 	}
 	if chunk.OfFunctionCallArgumentsDone != nil {
-		// Closed on item_done.
+		// Closed on item_done, which sends whatever the deltas left out.
+		if args := t.toolCallArgs[chunk.OfFunctionCallArgumentsDone.ItemId]; args != nil && chunk.OfFunctionCallArgumentsDone.Arguments != "" {
+			args.whole = chunk.OfFunctionCallArgumentsDone.Arguments
+		}
 		return nil
 	}
 
@@ -577,24 +597,22 @@ func (t *Translator) handleOutputItemAdded(item responses.ChunkOutputItemData) [
 		}
 		t.openToolCallsByItemID[item.Id] = callID
 		t.toolCallNamesByID[callID] = name
-		out := []Event{&ToolCallStartEvent{
+		// Arguments on item_added are not sent yet: providers put a
+		// placeholder there ("{}" before Anthropic streams the input) or
+		// the whole arguments they go on to stream anyway (Gemini), and
+		// either, followed by the deltas, is not one JSON document. They
+		// stand in for the whole arguments until the provider states them.
+		args := &toolCallArgs{}
+		if item.Arguments != nil {
+			args.whole = *item.Arguments
+		}
+		t.toolCallArgs[item.Id] = args
+		return []Event{&ToolCallStartEvent{
 			BaseEvent:       baseNow(),
 			ToolCallID:      callID,
 			ToolCallName:    name,
 			ParentMessageID: t.openTextMessageID,
 		}}
-		// Some chunks ship the full arguments on item_added when the
-		// model didn't stream them (cached responses). Emit them as a
-		// single ARGS event so CopilotKit's incremental renderer
-		// still receives delta data.
-		if item.Arguments != nil && *item.Arguments != "" {
-			out = append(out, &ToolCallArgsEvent{
-				BaseEvent:  baseNow(),
-				ToolCallID: callID,
-				Delta:      *item.Arguments,
-			})
-		}
-		return out
 
 	case "reasoning":
 		out := []Event{}
@@ -639,10 +657,14 @@ func (t *Translator) handleOutputItemDone(item responses.ChunkOutputItemData) []
 			return nil
 		}
 		delete(t.openToolCallsByItemID, item.Id)
-		return []Event{&ToolCallEndEvent{
+		if args := t.toolCallArgs[item.Id]; args != nil && item.Arguments != nil && *item.Arguments != "" {
+			args.whole = *item.Arguments
+		}
+		out := t.flushToolCallArgs(item.Id, callID)
+		return append(out, &ToolCallEndEvent{
 			BaseEvent:  baseNow(),
 			ToolCallID: callID,
-		}}
+		})
 
 	case "reasoning":
 		if t.openReasoningItemID != item.Id {
@@ -749,13 +771,34 @@ func (t *Translator) closeToolCalls() []Event {
 	sort.Strings(itemIDs)
 	out := make([]Event, 0, len(itemIDs))
 	for _, itemID := range itemIDs {
+		callID := t.openToolCallsByItemID[itemID]
+		out = append(out, t.flushToolCallArgs(itemID, callID)...)
 		out = append(out, &ToolCallEndEvent{
 			BaseEvent:  baseNow(),
-			ToolCallID: t.openToolCallsByItemID[itemID],
+			ToolCallID: callID,
 		})
 		delete(t.openToolCallsByItemID, itemID)
 	}
 	return out
+}
+
+// flushToolCallArgs sends, as a call ends, whatever of its whole arguments
+// the deltas did not: all of them for a call that streamed none (a cached
+// response, or a provider that states them only at the end), the rest for one
+// cut short. What the client holds is then the whole arguments, once. Deltas
+// that do not lead up to the whole arguments are left as streamed; appending
+// to them could not make one document.
+func (t *Translator) flushToolCallArgs(itemID, callID string) []Event {
+	args := t.toolCallArgs[itemID]
+	delete(t.toolCallArgs, itemID)
+	if args == nil || len(args.whole) <= len(args.streamed) || !strings.HasPrefix(args.whole, args.streamed) {
+		return nil
+	}
+	return []Event{&ToolCallArgsEvent{
+		BaseEvent:  baseNow(),
+		ToolCallID: callID,
+		Delta:      args.whole[len(args.streamed):],
+	}}
 }
 
 func (t *Translator) closeOpenItems() []Event {

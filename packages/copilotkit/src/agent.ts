@@ -33,13 +33,13 @@ const JOIN_SETTLE_MS = 250;
 const CLIENT_ROLES = new Set<string>(["user", "system", "developer"]);
 
 /**
- * The messages that are new this turn: the trailing block of client-authored
+ * Candidates for this turn: the trailing block of client-authored
  * messages, or trailing tool messages when the client is returning results for
  * its own tools. Empty for a resume, whose answers travel in `resume`.
  *
- * Mirrors the server's rule (RunAgentInput.NewTurnSDKMessages), which it
- * applies to whatever it is sent; sending only this block therefore changes
- * the payload and not the run.
+ * Mirrors the server's rule (RunAgentInput.NewTurnSDKMessages). A failed run
+ * may leave no assistant message separating turns, so the caller must also
+ * exclude messages already submitted or loaded from the server.
  */
 export function newTurnOf(messages: Message[]): Message[] {
   let start = messages.length;
@@ -101,6 +101,10 @@ export class HastekitAgent extends HttpAgent {
 
   // Per-instance run bookkeeping; see bind().
   private history: Message[] = [];
+  // Loaded or submitted messages remain part of the transcript, even when a
+  // run fails before replying. They must not become input to the next turn.
+  // Store server-normalized IDs so an echoed user message stays recognised.
+  private sentMessages = new Set<string>();
   private steered: Message[] = [];
   private acked = new Set<string>();
   private active = false;
@@ -147,6 +151,7 @@ export class HastekitAgent extends HttpAgent {
     // The internal subscriber is bound to this instance; the copy gets its own.
     copy.subscribers = copy.subscribers.filter((subscriber) => subscriber !== this.internal);
     copy.bind([...this.history]);
+    copy.sentMessages = new Set(this.sentMessages);
     return copy;
   }
 
@@ -302,6 +307,7 @@ export class HastekitAgent extends HttpAgent {
 
   /** Adds an older page of history ahead of the messages already loaded. */
   prependMessages(messages: Message[]): void {
+    for (const message of messages) this.sentMessages.add(serverIdOf(message.id));
     const stored = new Set(this.history.map((m) => m.id));
     this.history = [...messages.filter((m) => !stored.has(m.id)), ...this.history];
     const visible = new Set(this.messages.map((m) => m.id));
@@ -334,11 +340,18 @@ export class HastekitAgent extends HttpAgent {
   // the event pipeline and subscribers see as the transcript, and requestInit
   // is the last place the input is only a request body.
   protected requestInit(input: RunAgentInput): RequestInit {
-    return super.requestInit({
+    const messages = this.fullHistory
+      ? input.messages
+      : newTurnOf(input.messages).filter((message) => !this.sentMessages.has(serverIdOf(message.id)));
+    const init = super.requestInit({
       ...input,
-      messages: this.fullHistory ? input.messages : newTurnOf(input.messages),
+      messages,
       forwardedProps: { ...input.forwardedProps, skills: this.skillSelection, mcp: this.mcpSelection },
     });
+    // Remember the attempt, not just successful replies: the server persists
+    // input before calling the model, which can then fail without a reply.
+    for (const message of messages) this.sentMessages.add(serverIdOf(message.id));
+    return init;
   }
 
   // ── Internals ──────────────────────────────────────────────────────
@@ -379,6 +392,7 @@ export class HastekitAgent extends HttpAgent {
 
   private bind(history: Message[]): void {
     this.history = history;
+    this.sentMessages = new Set(history.map((message) => serverIdOf(message.id)));
     this.steered = [];
     this.acked = new Set();
     this.answeredCalls = new Set();
@@ -421,6 +435,7 @@ export class HastekitAgent extends HttpAgent {
         if (event.name === HastekitEvent.InputMessage) {
           const incoming = event.value as Message | undefined;
           if (!incoming?.id) return;
+          this.sentMessages.add(serverIdOf(incoming.id));
           const matches = (m: Message) => m.id === incoming.id || serverIdOf(m.id) === incoming.id;
           this.steered = this.steered.map((m) => (matches(m) ? incoming : m));
           return {
@@ -438,6 +453,7 @@ export class HastekitAgent extends HttpAgent {
       // reload, and the echoed text is then suppressed.
       onTextMessageStartEvent: ({ event, messages }) => {
         const id = event.messageId;
+        this.sentMessages.add(serverIdOf(id));
         if (messages.some((m) => m.id === id)) {
           this.acked.add(id);
           return;
