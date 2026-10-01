@@ -451,6 +451,30 @@ func TestGeminiToNative_FunctionCallInCompleted(t *testing.T) {
 	assert.Equal(t, "get_weather", completed.Response.Output[0].OfFunctionCall.Name)
 }
 
+// A function call keeps the ID it was streamed with: the call a client drew on
+// output_item.added is the one the completed response, and so the tool's
+// result, refers to.
+func TestGeminiToNative_FunctionCallKeepsItsID(t *testing.T) {
+	converter := newGeminiToNativeConverter()
+	chunks := converter.ResponseChunkToNativeResponseChunk(createGeminiFunctionCallChunk("resp_fn_id", "gemini-1.5-pro", "get_weather", map[string]any{"city": "NYC"}, 100, 15, 115))
+	chunks = append(chunks, converter.ResponseChunkToNativeResponseChunk(nil)...)
+
+	var added, done, completed string
+	for _, chunk := range chunks {
+		switch {
+		case chunk.OfOutputItemAdded != nil && chunk.OfOutputItemAdded.Item.Type == "function_call":
+			added = *chunk.OfOutputItemAdded.Item.CallID
+		case chunk.OfOutputItemDone != nil && chunk.OfOutputItemDone.Item.Type == "function_call":
+			done = *chunk.OfOutputItemDone.Item.CallID
+		case chunk.OfResponseCompleted != nil:
+			completed = chunk.OfResponseCompleted.Response.Output[0].OfFunctionCall.CallID
+		}
+	}
+	require.NotEmpty(t, added)
+	assert.Equal(t, added, done)
+	assert.Equal(t, added, completed)
+}
+
 // =============================================================================
 // Test: Model Version Propagation
 // =============================================================================

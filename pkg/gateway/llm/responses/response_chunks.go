@@ -16,6 +16,9 @@ type ResponseChunk struct {
 	OfSummarizationStarted   *ChunkSummarization[constants.ChunkTypeSummarizationStarted]   `json:",omitempty"`
 	OfSummarizationCompleted *ChunkSummarization[constants.ChunkTypeSummarizationCompleted] `json:",omitempty"`
 
+	// OfContextUsage reports the context token count after each model call.
+	OfContextUsage *ChunkContextUsage[constants.ChunkTypeContextUsage] `json:",omitempty"`
+
 	// OfError is a terminal provider or transport failure. It survives broker
 	// serialization so remote consumers see the same failure as local callers.
 	OfError *StreamError `json:",omitempty"`
@@ -113,6 +116,11 @@ func (u *ResponseChunk) UnmarshalJSON(data []byte) error {
 	var completed *ChunkSummarization[constants.ChunkTypeSummarizationCompleted]
 	if err := sonic.Unmarshal(data, &completed); err == nil {
 		*u = ResponseChunk{OfSummarizationCompleted: completed}
+		return nil
+	}
+	var contextUsage *ChunkContextUsage[constants.ChunkTypeContextUsage]
+	if err := sonic.Unmarshal(data, &contextUsage); err == nil {
+		*u = ResponseChunk{OfContextUsage: contextUsage}
 		return nil
 	}
 
@@ -359,6 +367,9 @@ func (u *ResponseChunk) MarshalJSON() ([]byte, error) {
 	if u.OfSummarizationCompleted != nil {
 		return sonic.Marshal(u.OfSummarizationCompleted)
 	}
+	if u.OfContextUsage != nil {
+		return sonic.Marshal(u.OfContextUsage)
+	}
 	if u.OfError != nil {
 		return sonic.Marshal(u.OfError)
 	}
@@ -527,6 +538,9 @@ func (u *ResponseChunk) ChunkType() string {
 	}
 	if u.OfSummarizationCompleted != nil {
 		return u.OfSummarizationCompleted.Type.Value()
+	}
+	if u.OfContextUsage != nil {
+		return u.OfContextUsage.Type.Value()
 	}
 	if u.OfError != nil {
 		return "error"
@@ -781,6 +795,11 @@ const (
 	// which the agent loop delivers to the resuming tool via its
 	// ToolCall.ResumeMessages.
 	InterruptModeForm InterruptMode = "form"
+	// InterruptModeClientTool is a tool the client runs itself, such as a
+	// browser action. The client answers with the tool's result, which returns
+	// as the resolution Content (a JSON string, or any JSON value) and becomes
+	// the tool's output when the paused call resumes.
+	InterruptModeClientTool InterruptMode = "client_tool"
 )
 
 // Interrupt is the unified representation of one paused tool call awaiting
@@ -1029,6 +1048,15 @@ type ChunkResponseUsage struct {
 		ReasoningTokens int `json:"reasoning_tokens"`
 	} `json:"output_tokens_details"`
 	TotalTokens int `json:"total_tokens"`
+}
+
+// ChunkContextUsage reports the tokens the next prompt starts from
+// (the last call's measured prompt and reply).
+type ChunkContextUsage[T any] struct {
+	Type      T      `json:"type"`
+	RunID     string `json:"run_id"`
+	AgentName string `json:"agent_name"`
+	Tokens    int    `json:"tokens"`
 }
 
 // ChunkSummarization brackets a summarizer invocation. Compacted distinguishes

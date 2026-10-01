@@ -78,7 +78,7 @@ func TestA2ADiscoverySendAndTaskIsolation(t *testing.T) {
 	client := a2aClient(t, endpoint, "alice")
 	msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("world"))
 	msg.ContextID = "conversation"
-	msg.Metadata = map[string]any{"hastekit.skills": map[string]any{"enable": []string{"review"}}}
+	msg.Metadata = map[string]any{"hastekit.skills": map[string]any{"disable": []string{"review"}}}
 	result, err := client.SendMessage(t.Context(), &a2a.SendMessageRequest{Message: msg, Tenant: "bob", Metadata: map[string]any{"namespace": "bob"}})
 	require.NoError(t, err)
 	task, ok := result.(*a2a.Task)
@@ -89,7 +89,7 @@ func TestA2ADiscoverySendAndTaskIsolation(t *testing.T) {
 	require.Equal(t, "conversation", task.ContextID)
 	input := <-inputs
 	require.Equal(t, "alice", input.Namespace)
-	require.Empty(t, input.Skills.Enable)
+	require.Empty(t, input.Skills.Disable)
 	fetched, err := client.GetTask(t.Context(), &a2a.GetTaskRequest{ID: task.ID})
 	require.NoError(t, err)
 	require.Equal(t, task.ID, fetched.ID)

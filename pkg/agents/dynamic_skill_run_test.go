@@ -13,14 +13,14 @@ import (
 )
 
 func TestDynamicSkillRunAdvertisesAndReadsOneSnapshot(t *testing.T) {
-	set := &runSkillSet{t: t}
+	set := &runSkillClient{t: t}
 	llm := &scriptedLLM{script: []*responses.Response{
 		toolCallResponse("read1", "read_skill", `{"name":"review"}`),
 		toolCallResponse("read2", "read_skill", `{"name":"review","file":"check.md"}`),
 		textResponse("ready"),
 	}}
-	agent := agents.NewAgent(&agents.AgentOptions{Name: "reviewer", Skills: []agents.SkillSet{set}, Instruction: prompts.New("Use skills.", prompts.WithResolver(prompts.DefaultResolvers()...))}).WithLLM(llm)
-	out := runAgent(t, agent, &agents.AgentInput{Namespace: "test", ThreadID: "dynamic-skills", Message: userMessage("review the release"), Skills: agents.SkillSelection{Enable: []string{"review", "secret"}}})
+	agent := agents.NewAgent(&agents.AgentOptions{Name: "reviewer", SkillClient: set, Instruction: prompts.New("Use skills.", prompts.WithResolver(prompts.DefaultResolvers()...))}).WithLLM(llm)
+	out := runAgent(t, agent, &agents.AgentInput{Namespace: "test", ThreadID: "dynamic-skills", Message: userMessage("review the release"), Skills: agents.SkillSelection{Disable: []string{"secret"}}})
 	requireStatus(t, out, agentstate.RunStatusCompleted)
 	require.Equal(t, 1, set.lists)
 	require.Equal(t, 2, set.reads)
@@ -33,19 +33,17 @@ func TestDynamicSkillRunAdvertisesAndReadsOneSnapshot(t *testing.T) {
 	require.Contains(t, string(encoded), "review instructions")
 }
 
-type runSkillSet struct {
+type runSkillClient struct {
 	t            *testing.T
 	lists, reads int
 }
 
-func (s *runSkillSet) GetName() string { return "team" }
-
-func (s *runSkillSet) ListSkills(context.Context, string, map[string]any) ([]agents.Skill, error) {
+func (s *runSkillClient) ListSkills(context.Context, string, map[string]any) ([]agents.Skill, error) {
 	s.lists++
-	return []agents.Skill{{Name: "review", Description: "Review releases", Resources: []string{"check.md"}}}, nil
+	return []agents.Skill{{Name: "review", Description: "Review releases", Resources: []string{"check.md"}}, {Name: "secret", Description: "Hidden by the run's selection"}}, nil
 }
 
-func (s *runSkillSet) ResolveSkill(_ context.Context, namespace string, _ map[string]any, name, file string) (string, error) {
+func (s *runSkillClient) ReadSkill(_ context.Context, namespace string, _ map[string]any, name, file string) (string, error) {
 	s.reads++
 	require.Equal(s.t, "review", name)
 	return "review instructions", nil

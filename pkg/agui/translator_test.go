@@ -232,15 +232,13 @@ func TestRunPausedEmitsInterruptThenFinished(t *testing.T) {
 		CallID: "call_1", Name: "dangerous_tool", Arguments: "{}",
 	}))
 	types := eventTypes(events)
-	require.Equal(t, []EventType{EventStateSnapshot, EventCustom, EventRunFinished}, types)
+	require.Equal(t, []EventType{EventRunFinished}, types, "the pause is the outcome, not a custom event")
 
-	custom := events[1].(*CustomEvent)
-	assert.Equal(t, CustomNameInterrupt, custom.Name)
-	value := custom.Value.(map[string]any)
-	assert.Equal(t, "tool_approval", value["kind"])
-	pending := value["pendingToolCalls"].([]map[string]any)
-	require.Len(t, pending, 1)
-	assert.Equal(t, "call_1", pending[0]["toolCallId"])
+	outcome := events[0].(*RunFinishedEvent).Outcome
+	require.NotNil(t, outcome)
+	assert.Equal(t, OutcomeInterrupt, outcome.Type)
+	require.Len(t, outcome.Interrupts, 1)
+	assert.Equal(t, "call_1", outcome.Interrupts[0].ToolCallID)
 }
 
 func TestStepsDedupeAndPair(t *testing.T) {
@@ -364,22 +362,22 @@ func runPausedWith(interrupts ...responses.Interrupt) *responses.ResponseChunk {
 	}
 }
 
-func pauseValue(t *testing.T, chunk *responses.ResponseChunk) (map[string]any, map[string]any) {
+// pauseOutcome translates a pause and returns its RUN_FINISHED outcome.
+func pauseOutcome(t *testing.T, chunk *responses.ResponseChunk) *RunFinishedOutcome {
 	t.Helper()
 	tr := NewTranslator("thread-1", "run-1")
 	tr.Start()
 	events := tr.Translate(chunk)
-	require.Equal(t, []EventType{EventStateSnapshot, EventCustom, EventRunFinished}, eventTypes(events))
-	return events[0].(*StateSnapshotEvent).Snapshot.(map[string]any),
-		events[1].(*CustomEvent).Value.(map[string]any)
+	require.Equal(t, []EventType{EventRunFinished}, eventTypes(events), "a pause neither replaces the client's state nor emits a custom event")
+	finished := events[0].(*RunFinishedEvent)
+	require.NotNil(t, finished.Outcome)
+	return finished.Outcome
 }
 
-// A form elicitation must reach the client with the schema it has to render.
-// Before this, non-approval interrupts were filtered out entirely: the run
-// paused, the client was told nothing about what was wanted, and the run could
-// never be resumed from a browser.
+// A form elicitation reaches the client as an input_required interrupt with the
+// schema it has to render.
 func TestRunPausedEmitsFormElicitation(t *testing.T) {
-	snapshot, value := pauseValue(t, runPausedWith(responses.Interrupt{
+	outcome := pauseOutcome(t, runPausedWith(responses.Interrupt{
 		FunctionCallMessage: responses.FunctionCallMessage{
 			CallID: "call_1", Name: "book_flight", Arguments: `{"flight_no":"TP1234"}`,
 		},
@@ -390,23 +388,20 @@ func TestRunPausedEmitsFormElicitation(t *testing.T) {
 		}},
 	}))
 
-	// No approve/reject verdict is outstanding, so an approval prompt must not
-	// be raised for this pause.
-	assert.Equal(t, false, snapshot["awaitingApproval"])
-	assert.Empty(t, snapshot["pendingToolCalls"])
-
-	assert.Equal(t, "elicitation", value["kind"])
-	interrupts := value["interrupts"].([]map[string]any)
-	require.Len(t, interrupts, 1)
-	assert.Equal(t, "call_1", interrupts[0]["toolCallId"])
-	assert.Equal(t, "book_flight", interrupts[0]["toolCallName"])
-	assert.Equal(t, "form", interrupts[0]["mode"])
-	assert.Equal(t, "Passenger details, as printed on the passport.", interrupts[0]["message"])
-	assert.NotNil(t, interrupts[0]["requestedSchema"])
+	assert.Equal(t, OutcomeInterrupt, outcome.Type)
+	require.Len(t, outcome.Interrupts, 1)
+	it := outcome.Interrupts[0]
+	assert.Equal(t, "call_1", it.ID)
+	assert.Equal(t, "call_1", it.ToolCallID)
+	assert.Equal(t, InterruptReasonInputRequired, it.Reason)
+	assert.Equal(t, "Passenger details, as printed on the passport.", it.Message)
+	assert.Equal(t, map[string]any{"type": "object"}, it.ResponseSchema)
+	assert.Equal(t, "form", it.Metadata["mode"])
+	assert.Equal(t, "book_flight", it.Metadata["toolName"])
 }
 
 func TestRunPausedEmitsURLElicitation(t *testing.T) {
-	_, value := pauseValue(t, runPausedWith(responses.Interrupt{
+	outcome := pauseOutcome(t, runPausedWith(responses.Interrupt{
 		FunctionCallMessage: responses.FunctionCallMessage{CallID: "call_1", Name: "link_loyalty"},
 		Mode:                responses.InterruptModeURL,
 		Elicitations: []mcp.ElicitParams{{
@@ -415,31 +410,28 @@ func TestRunPausedEmitsURLElicitation(t *testing.T) {
 		}},
 	}))
 
-	interrupts := value["interrupts"].([]map[string]any)
-	require.Len(t, interrupts, 1)
-	assert.Equal(t, "url", interrupts[0]["mode"])
-	assert.Equal(t, "https://example.test/oauth/start", interrupts[0]["url"])
+	require.Len(t, outcome.Interrupts, 1)
+	assert.Equal(t, InterruptReasonInputRequired, outcome.Interrupts[0].Reason)
+	assert.Equal(t, "url", outcome.Interrupts[0].Metadata["mode"])
+	assert.Equal(t, "https://example.test/oauth/start", outcome.Interrupts[0].Metadata["url"])
 }
 
-// Clients written against the approval-only shape must keep working: an
-// all-approval pause reports the same kind, flag and pendingToolCalls it
-// always did.
-func TestApprovalOnlyPauseKeepsLegacyShape(t *testing.T) {
-	snapshot, value := pauseValue(t, runPaused(responses.FunctionCallMessage{
+// An approval is a tool_call interrupt answered with {"approved": bool}.
+func TestApprovalPauseIsAToolCallInterrupt(t *testing.T) {
+	outcome := pauseOutcome(t, runPaused(responses.FunctionCallMessage{
 		CallID: "call_1", Name: "issue_refund", Arguments: "{}",
 	}))
 
-	assert.Equal(t, true, snapshot["awaitingApproval"])
-	assert.Len(t, snapshot["pendingToolCalls"], 1)
-	assert.Equal(t, "tool_approval", value["kind"])
-	assert.Len(t, value["pendingToolCalls"], 1)
-	assert.Len(t, value["interrupts"], 1)
+	require.Len(t, outcome.Interrupts, 1)
+	it := outcome.Interrupts[0]
+	assert.Equal(t, InterruptReasonToolCall, it.Reason)
+	assert.Equal(t, "call_1", it.ToolCallID)
+	assert.Equal(t, approvalSchema, it.ResponseSchema)
 }
 
-// A run can pause on both at once. pendingToolCalls stays the approval subset
-// so a legacy client renders exactly the decisions it can actually take.
+// A run can pause on both at once; the outcome lists each with its own reason.
 func TestMixedPauseSeparatesApprovalsFromElicitations(t *testing.T) {
-	snapshot, value := pauseValue(t, runPausedWith(
+	outcome := pauseOutcome(t, runPausedWith(
 		responses.Interrupt{
 			FunctionCallMessage: responses.FunctionCallMessage{CallID: "call_1", Name: "issue_refund"},
 			Mode:                responses.InterruptModeApproval,
@@ -451,23 +443,45 @@ func TestMixedPauseSeparatesApprovalsFromElicitations(t *testing.T) {
 		},
 	))
 
-	assert.Equal(t, true, snapshot["awaitingApproval"])
-	pending := value["pendingToolCalls"].([]map[string]any)
-	require.Len(t, pending, 1)
-	assert.Equal(t, "call_1", pending[0]["toolCallId"])
+	require.Len(t, outcome.Interrupts, 2)
+	assert.Equal(t, InterruptReasonToolCall, outcome.Interrupts[0].Reason)
+	assert.Equal(t, InterruptReasonInputRequired, outcome.Interrupts[1].Reason)
+}
 
-	assert.Equal(t, "mixed", value["kind"])
-	assert.Len(t, value["interrupts"], 2)
+// A pause only on client tools is a successful run that leaves the calls
+// unanswered for the client; there is nothing for a person to answer, so no
+// interrupt event. The outcome does not name the calls: pre-1.0 AG-UI clients
+// reject pendingToolCallIds.
+func TestClientToolPauseIsASuccessWithUnansweredCalls(t *testing.T) {
+	tr := NewTranslator("thread-1", "run-1")
+	tr.Start()
+	events := tr.Translate(runPausedWith(
+		responses.Interrupt{FunctionCallMessage: responses.FunctionCallMessage{CallID: "call_a", Name: "get_selection"}, Mode: responses.InterruptModeClientTool},
+		responses.Interrupt{FunctionCallMessage: responses.FunctionCallMessage{CallID: "call_b", Name: "get_time"}, Mode: responses.InterruptModeClientTool},
+	))
+	require.Equal(t, []EventType{EventRunFinished}, eventTypes(events))
+	outcome := events[0].(*RunFinishedEvent).Outcome
+	assert.Equal(t, &RunFinishedOutcome{Type: OutcomeSuccess}, outcome)
+
+	// Mixed with an approval, the interrupt wins and the client tool call stays unanswered in the stream.
+	outcome = pauseOutcome(t, runPausedWith(
+		responses.Interrupt{FunctionCallMessage: responses.FunctionCallMessage{CallID: "call_a", Name: "get_selection"}, Mode: responses.InterruptModeClientTool},
+		responses.Interrupt{FunctionCallMessage: responses.FunctionCallMessage{CallID: "call_1", Name: "issue_refund"}, Mode: responses.InterruptModeApproval},
+	))
+	assert.Equal(t, OutcomeInterrupt, outcome.Type)
+	require.Len(t, outcome.Interrupts, 1)
+	assert.Equal(t, "call_1", outcome.Interrupts[0].ID)
 }
 
 // An interrupt with no mode set is an approval — the synthesized shape older
 // state rows and tool-level RequiresApproval gates produce.
 func TestUnsetModeProjectsAsApproval(t *testing.T) {
-	_, value := pauseValue(t, runPausedWith(responses.Interrupt{
+	outcome := pauseOutcome(t, runPausedWith(responses.Interrupt{
 		FunctionCallMessage: responses.FunctionCallMessage{CallID: "call_1", Name: "t"},
 	}))
-	assert.Equal(t, "tool_approval", value["kind"])
-	assert.Equal(t, "approval", value["interrupts"].([]map[string]any)[0]["mode"])
+	require.Len(t, outcome.Interrupts, 1)
+	assert.Equal(t, InterruptReasonToolCall, outcome.Interrupts[0].Reason)
+	assert.Equal(t, "approval", outcome.Interrupts[0].Metadata["mode"])
 }
 
 func inputMessageChunk(id, role, content string) *responses.ResponseChunk {

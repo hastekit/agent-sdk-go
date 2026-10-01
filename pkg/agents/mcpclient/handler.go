@@ -38,6 +38,9 @@ type ConnectorInfo struct {
 	OAuth     bool   `json:"oauth"`
 	// Error explains why a user-owned definition is unusable; delete or replace it to recover.
 	Error string `json:"error,omitempty"`
+	// Connected reports whether the requester has authorized an OAuth server. It is
+	// set only when the handler serves OAuth routes, so a client can offer connect.
+	Connected *bool `json:"connected,omitempty"`
 }
 
 // NewHandler serves GET /, PUT /{server}, DELETE /{server}, and optional OAuth
@@ -101,10 +104,16 @@ func (h *configHandler) list(w http.ResponseWriter, r *http.Request) {
 	// Return safe summaries rather than serializing configuration secrets to the browser.
 	result := make([]ConnectorInfo, 0, len(resolved.configs)+len(resolved.invalid))
 	for _, config := range resolved.configs {
-		result = append(result, ConnectorInfo{
+		info := ConnectorInfo{
 			Name: config.Name, Namespace: config.Namespace, Transport: config.Transport,
 			ReadOnly: h.readOnly(config.Namespace, config.Name), OAuth: config.Authorization != nil,
-		})
+		}
+		if h.options.oauth != nil && config.Authorization != nil {
+			_, err := h.options.oauth.store.Load(r.Context(), namespace, OAuthCredentialKey(connectorFor(config)))
+			connected := err == nil
+			info.Connected = &connected
+		}
+		result = append(result, info)
 	}
 
 	// Unusable records stay visible to their owner, who can delete or replace them.
@@ -131,25 +140,25 @@ func (h *configHandler) readOnly(namespace, name string) bool {
 }
 
 // writer protects globals regardless of the namespace specified in an incoming JSON body.
-func (h *configHandler) writer(w http.ResponseWriter, r *http.Request) (string, MutableMCPServerConfigStore, bool) {
+func (h *configHandler) writer(w http.ResponseWriter, r *http.Request) (string, catalog, MutableMCPServerConfigStore, bool) {
 	namespace, resolved, ok := h.resolve(w, r)
 	if !ok {
-		return "", nil, false
+		return "", catalog{}, nil, false
 	}
 	if config, exists := resolved.configs[r.PathValue("server")]; exists && config.Namespace == "" {
 		http.Error(w, "Global MCP configurations are read-only", http.StatusForbidden)
-		return "", nil, false
+		return "", catalog{}, nil, false
 	}
 	store, ok := h.store.(MutableMCPServerConfigStore)
 	if !ok {
 		http.Error(w, "MCP configuration store is read-only", http.StatusForbidden)
-		return "", nil, false
+		return "", catalog{}, nil, false
 	}
-	return namespace, store, true
+	return namespace, resolved, store, true
 }
 
 func (h *configHandler) put(w http.ResponseWriter, r *http.Request) {
-	namespace, store, ok := h.writer(w, r)
+	namespace, _, store, ok := h.writer(w, r)
 	if !ok {
 		return
 	}
@@ -180,9 +189,26 @@ func (h *configHandler) put(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *configHandler) remove(w http.ResponseWriter, r *http.Request) {
-	namespace, store, ok := h.writer(w, r)
+	namespace, resolved, store, ok := h.writer(w, r)
 	if !ok {
 		return
+	}
+
+	// Forget the user's grant before the definition, so a failure never leaves an orphaned token.
+	if config, exists := resolved.configs[r.PathValue("server")]; exists && config.Authorization != nil && h.options.oauth != nil {
+		key := OAuthCredentialKey(connectorFor(config))
+		lock := h.options.oauth.credentialLock(namespace, key)
+		lock.Lock()
+		err := h.options.oauth.store.Delete(r.Context(), namespace, key)
+		// A client registered for a discovered server goes with it.
+		if clients, ok := h.options.oauth.store.(OAuthClientStore); ok && err == nil {
+			err = clients.DeleteOAuthClient(r.Context(), namespace, key)
+		}
+		lock.Unlock()
+		if err != nil {
+			http.Error(w, "Unable to remove MCP authorization", http.StatusInternalServerError)
+			return
+		}
 	}
 	if err := store.Delete(r.Context(), namespace, r.PathValue("server")); err != nil {
 		configWriteError(w, err)
@@ -197,4 +223,9 @@ func configWriteError(w http.ResponseWriter, err error) {
 		return
 	}
 	http.Error(w, "Unable to persist MCP configuration", http.StatusInternalServerError)
+}
+
+// connectorFor names the definition the way credential providers see it.
+func connectorFor(config ServerConfig) Connector {
+	return Connector{Namespace: config.Namespace, Name: config.Name, Endpoint: config.Endpoint, Authorization: config.Authorization}
 }

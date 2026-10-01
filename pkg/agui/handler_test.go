@@ -258,7 +258,7 @@ func TestEndToEndTextRun(t *testing.T) {
 
 	finished, ok := findFrame(frames, "RUN_FINISHED")
 	require.True(t, ok)
-	assert.Equal(t, "completed", finished.data["result"].(map[string]any)["status"])
+	assert.Equal(t, "success", finished.data["outcome"].(map[string]any)["type"])
 }
 
 func TestEndToEndApprovalFlow(t *testing.T) {
@@ -292,34 +292,18 @@ func TestEndToEndApprovalFlow(t *testing.T) {
 		Messages: []Message{{ID: "u1", Role: RoleUser, Content: "delete user 123"}},
 	})
 
-	interrupt, ok := findFrame(frames, "CUSTOM")
-	require.True(t, ok)
-	// First CUSTOM is the stream id; find the interrupt specifically.
-	for _, f := range frames {
-		if f.event == "CUSTOM" && f.data["name"] == CustomNameInterrupt {
-			interrupt = f
-		}
-	}
-	require.Equal(t, CustomNameInterrupt, interrupt.data["name"])
-	value := interrupt.data["value"].(map[string]any)
-	pending := value["pendingToolCalls"].([]any)
-	require.Len(t, pending, 1)
-	assert.Equal(t, "call-1", pending[0].(map[string]any)["toolCallId"])
-
 	finished, ok := findFrame(frames, "RUN_FINISHED")
 	require.True(t, ok)
-	assert.Equal(t, "paused", finished.data["result"].(map[string]any)["status"])
+	outcome := finished.data["outcome"].(map[string]any)
+	assert.Equal(t, "interrupt", outcome["type"])
+	interrupts := outcome["interrupts"].([]any)
+	require.Len(t, interrupts, 1)
+	assert.Equal(t, "call-1", interrupts[0].(map[string]any)["toolCallId"])
 
 	// Second POST: approval-only resume on the same thread.
 	frames = postRun(t, server, "UserManager", RunAgentInput{
 		ThreadID: "thread-1",
-		ForwardedProps: map[string]any{
-			"command": map[string]any{
-				"resume": map[string]any{
-					"decisions": []any{map[string]any{"toolCallId": "call-1", "approved": true}},
-				},
-			},
-		},
+		Resume:   []ResumeEntry{{InterruptID: "call-1", Status: ResumeResolved, Payload: json.RawMessage(`{"approved":true}`)}},
 	})
 
 	result, ok := findFrame(frames, "TOOL_CALL_RESULT")
@@ -336,5 +320,5 @@ func TestEndToEndApprovalFlow(t *testing.T) {
 
 	finished, ok = findFrame(frames, "RUN_FINISHED")
 	require.True(t, ok)
-	assert.Equal(t, "completed", finished.data["result"].(map[string]any)["status"])
+	assert.Equal(t, "success", finished.data["outcome"].(map[string]any)["type"])
 }

@@ -3,28 +3,49 @@ import assert from "node:assert/strict";
 import { ChatController, createAGUITransport } from "../dist/index.js";
 import { deferred, transport } from "./helpers.mjs";
 
-// Preserve authentication, cancellation, and encoded agent identifiers for catalog requests.
-test("skill catalog uses the agent endpoint", async () => {
+// The catalog is the user's own library: not scoped to an agent, paged, and empty without a store.
+test("skill catalog uses the agent-independent library endpoint", async () => {
   const signal = new AbortController().signal;
+  const urls = [];
   const client = createAGUITransport({
     headers: { Authorization: "Bearer test" },
     fetch: async (url, init) => {
-      assert.equal(url, "/api/agui/agents/a%2Fb/skills");
+      urls.push(url);
       assert.equal(init.signal, signal);
       assert.equal(init.headers.get("Authorization"), "Bearer test");
-      return Response.json({ skills: [{ name: "review", enabled: false }] });
+      return url.endsWith("cursor=")
+        ? Response.json({
+            skills: [{ name: "review", description: "Review" }],
+            nextCursor: "next",
+          })
+        : Response.json({ skills: [{ name: "notes", description: "Notes" }] });
     },
   });
-  assert.equal((await client.listSkills("a/b", signal))[0].name, "review");
+  const skills = await client.listSkills(signal);
+  assert.deepEqual(urls, [
+    "/api/agui/skills?limit=200&cursor=",
+    "/api/agui/skills?limit=200&cursor=next",
+  ]);
+  assert.deepEqual(
+    skills.map((skill) => [skill.name, skill.enabled]),
+    [
+      ["review", true],
+      ["notes", true],
+    ],
+  );
+
+  const withoutStore = createAGUITransport({
+    fetch: async () => new Response("404 page not found", { status: 404 }),
+  });
+  assert.deepEqual(await withoutStore.listSkills(signal), []);
 });
 
-// Required policy and optional choices must survive refresh and reach the outgoing run.
-test("skill choices respect policy and serialize per run", async () => {
+// The user's choices must survive refresh and reach the outgoing run.
+test("skill choices serialize per run", async () => {
   let input;
   let catalog = [
-    { name: "required", required: true, enabled: true },
-    { name: "default", enabled: true },
-    { name: "optional", enabled: false },
+    { name: "mine", enabled: true },
+    { name: "drafts", enabled: true },
   ];
   const controller = new ChatController({
     agent: "a",
@@ -39,28 +60,28 @@ test("skill choices respect policy and serialize per run", async () => {
     }),
   });
   await controller.refreshSkills();
-  assert.throws(
-    () => controller.setSkillEnabled("required", false),
-    /required/,
-  );
-  controller.setSkillEnabled("default", false);
-  controller.setSkillEnabled("optional", true);
+  controller.setSkillEnabled("drafts", false);
+  controller.setSkillEnabled("mine", false);
+  controller.setSkillEnabled("mine", true);
   await controller.refreshSkills();
   await controller.sendMessage("hello");
   assert.deepEqual(input.forwardedProps, {
     tenant: "test",
-    skills: { enable: ["optional"], disable: ["default"] },
+    skills: { disable: ["drafts"] },
   });
+  assert.deepEqual(
+    controller.getSnapshot().skills.map((skill) => skill.enabled),
+    [true, false],
+  );
 
-  // A changed catalog removes stale choices and reapplies required policy.
-  catalog = [{ name: "optional", required: true, enabled: true }];
+  // A skill deleted from the library drops its stale choice.
+  catalog = [{ name: "mine", enabled: true }];
   await controller.refreshSkills();
-  assert.deepEqual(controller.getSnapshot().skillSelection, {
-    enable: [],
-    disable: [],
-  });
+  assert.deepEqual(controller.getSnapshot().skillSelection, { disable: [] });
+  controller.setSkillEnabled("mine", false);
   controller.resetSkills();
   assert.equal(controller.getSnapshot().skills[0].enabled, true);
+  assert.deepEqual(controller.getSnapshot().skillSelection, { disable: [] });
 });
 
 // Late catalogs cannot overwrite a newer refresh even when a transport ignores cancellation.
@@ -71,7 +92,7 @@ test("catalog refresh ignores stale responses and isolates errors", async () => 
     agent: "a",
     transport: transport({
       listSkills: async () =>
-        ++count === 1 ? old.promise : [{ name: "new", enabled: false }],
+        ++count === 1 ? old.promise : [{ name: "new", enabled: true }],
     }),
   });
   const pending = controller.refreshSkills();

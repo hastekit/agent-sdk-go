@@ -205,9 +205,6 @@ func (r *runtimeLifecycle) register(options *agents.AgentOptions) error {
 	if r.closed || r.cancel != nil {
 		return fmt.Errorf("runtime is serving or closed")
 	}
-	if err := agents.ValidateSkillSets(options.Skills); err != nil {
-		return err
-	}
 	if _, exists := r.configs[options.Name]; exists {
 		return fmt.Errorf("%w: %s", ErrAgentAlreadyRegistered, options.Name)
 	}

@@ -1,6 +1,7 @@
 package agui
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -61,10 +62,12 @@ func WithRoutines(service *routines.Service, schedulers ...routines.Scheduler) O
 	}
 }
 
-// WithSkillStore enables namespace-scoped skill management APIs and the embedded
-// UI library, shared across agents. Configure an adapter over the same store
-// in each participating agent's Skills. Agent names do not scope stored content.
-// Protect management routes with application authorization middleware.
+// WithSkillStore mounts /skills for users' own skills, independent of any agent:
+// the embedded UI's library and Skills menu both use it. Pass the same store to
+// skills.NewClient for each participating agent. Global skills are configured
+// per agent in code, are always on, and never appear here; uploads cannot reuse
+// a registered agent's global skill name. Protect management routes with
+// application authorization middleware.
 func WithSkillStore(store skills.Store) Option { return func(o *options) { o.skillStore = store } }
 
 // WithAttachmentStore enables upload/download endpoints and owned file references.
@@ -144,10 +147,16 @@ func buildOptions(opts []Option) options {
 //	GET  /a2a/{agent}/.well-known/agent-card.json  → A2A discovery card
 //	POST /a2a/{agent}                            → A2A 1.0 JSON-RPC (including SSE)
 //	GET  /agents                                  → {"agents": ["name", ...]}
-//	GET  /agents/{agent}/skills                   → visible skill catalog and default enablement
 //	POST /agents/{agent}/run                      → run the agent; SSE stream of AG-UI events
+//	GET  /agents/{agent}/skills                   → the agent's built-in skills, always on
 //	GET  /agents/{agent}/threads                  → stored conversation threads, newest first
 //	GET  /agents/{agent}/threads/{thread}/messages → thread history as AG-UI messages
+//	GET  /skills                                  → the caller's own skills (WithSkillStore)
+//
+// The caller's own skills are not scoped to an agent: /skills manages them,
+// and every agent using the store can read them. An agent's built-in skills
+// are configured in code, so /agents/{agent}/skills lists them per agent. Runs turn them off with
+// forwardedProps.skills.disable; an agent's global skills are always on.
 //
 // The run endpoint accepts the canonical AG-UI RunAgentInput body and
 // streams back the canonical event wire format, so any AG-UI client
@@ -183,7 +192,10 @@ func NewHandler(registry Registry, opts ...Option) http.Handler {
 		mux.Handle(pattern, o.withNamespace(fn))
 	}
 	if o.skillStore != nil {
-		h := o.withNamespace(skills.NewHandler(o.skillStore, func(r *http.Request) (string, error) { return requestNamespace(r), nil }))
+		h := o.withNamespace(skills.NewHandler(o.skillStore,
+			skills.WithNamespaceResolver(func(r *http.Request) (string, error) { return requestNamespace(r), nil }),
+			skills.WithReservedNames(func(r *http.Request) ([]string, error) { return globalSkillNames(r, registry) }),
+		))
 		mux.Handle("/skills", h)
 		mux.Handle("/skills/", h)
 	}
@@ -275,26 +287,9 @@ func NewHandler(registry Registry, opts ...Option) http.Handler {
 			"full_history": o.fullHistory,
 			"attachments":  o.attachmentStore != nil,
 			"skill_store":  o.skillStore != nil,
+			"mcp_store":    o.mcpStore != nil,
 			"routines":     o.routineService != nil,
 		})
-	})
-
-	handleFunc("GET /agents/{agent}/skills", func(w http.ResponseWriter, r *http.Request) {
-		agent, ok := registry.Agent(r.PathValue("agent"))
-		if !ok {
-			writeJSONError(w, http.StatusNotFound, "agent not found")
-			return
-		}
-		catalog, err := agent.ListSkills(r.Context(), requestNamespace(r), map[string]any{"Header": collectHeaders(r.Header)}, agents.SkillSelection{})
-		if err != nil {
-			writeJSONError(w, http.StatusInternalServerError, "unable to list skills: "+err.Error())
-			return
-		}
-		if catalog == nil {
-			catalog = []agents.ListedSkill{}
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"skills": catalog})
 	})
 
 	handleFunc("POST /agents/{agent}/run", func(w http.ResponseWriter, r *http.Request) {
@@ -340,6 +335,21 @@ func NewHandler(registry Registry, opts ...Option) http.Handler {
 			return
 		}
 		serveThreads(w, r, agent, o)
+	})
+
+	handleFunc("GET /agents/{agent}/skills", func(w http.ResponseWriter, r *http.Request) {
+		agent, ok := registry.Agent(r.PathValue("agent"))
+		if !ok {
+			writeJSONError(w, http.StatusNotFound, "agent not found")
+			return
+		}
+		skills, err := builtInSkills(r, agent)
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "unable to list skills")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"skills": skills})
 	})
 
 	handleFunc("GET /agents/{agent}/threads/{thread}/messages", func(w http.ResponseWriter, r *http.Request) {
@@ -406,6 +416,7 @@ func serveThreadMessages(w http.ResponseWriter, r *http.Request, agent *agents.A
 		"sessionId":  sessionIDFromRows(threadID, latest),
 		"messages":   HistoryToMessages(page.Rows),
 		"run":        threadRunState(latest),
+		"context":    threadContextUsage(latest, agent),
 		"nextCursor": nextMessageCursor(namespace, threadID, page.NextBeforeRunID),
 		"hasMore":    page.NextBeforeRunID != "",
 	})
@@ -662,6 +673,21 @@ func serveRun(w http.ResponseWriter, r *http.Request, agent *agents.Agent, o opt
 	// A thread always streams on the same channel, so a client that
 	// reconnects can find the run without having kept the id.
 	streamID := agents.StreamIDForThread(requestNamespace(r), input.ThreadID)
+
+	// A client returning its tools' results: see answeringToolOutputs.
+	if !o.fullHistory && onlyToolOutputs(sdkMessages) {
+		kept, err := answeringToolOutputs(r.Context(), agent, requestNamespace(r), input.ThreadID, streamID, sdkMessages)
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "unable to check the thread's paused tools: "+err.Error())
+			return
+		}
+		if len(kept) == 0 {
+			w.Header().Set("X-Stream-Id", streamID)
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		sdkMessages = kept
+	}
 	turn := messages.New(o.senderID, sdkMessages)
 
 	// A turn arriving while the thread is already running folds into that
@@ -681,17 +707,30 @@ func serveRun(w http.ResponseWriter, r *http.Request, agent *agents.Agent, o opt
 		}
 	}
 
+	// This request starts the run, so the thread is settled: tool messages
+	// answering the client tools it is paused on become the resolutions that
+	// resume them. See resolveClientTools.
+	resolved, err := resolveClientTools(r.Context(), agent, requestNamespace(r), input.ThreadID, turn.Messages)
+	if err != nil {
+		// Give back the claim, or the thread would look busy with no run on it.
+		_ = agent.StreamBroker().Close(context.WithoutCancel(r.Context()), streamID)
+		writeJSONError(w, http.StatusInternalServerError, "unable to read the thread's paused tools: "+err.Error())
+		return
+	}
+	turn.Messages = resolved
+
 	selection, _ := input.SkillSelection() // validated before claiming the run
 	mcpSelection, _ := input.MCPSelection()
 	in := &agents.AgentInput{
-		Skills:    selection,
-		MCP:       mcpSelection,
-		Namespace: requestNamespace(r),
-		RunID:     runID,
-		ThreadID:  input.ThreadID,
-		SessionID: sessionID,
-		StreamID:  streamID,
-		Message:   turn,
+		Skills:      selection,
+		MCP:         mcpSelection,
+		ClientTools: input.ClientTools(),
+		Namespace:   requestNamespace(r),
+		RunID:       runID,
+		ThreadID:    input.ThreadID,
+		SessionID:   sessionID,
+		StreamID:    streamID,
+		Message:     turn,
 		// Fold AG-UI context into the prompt RunContext. forwardedProps
 		// and state land at top-level keys so prompt templates can
 		// reach them via {{State.x}} / {{ForwardedProps.y}}.
@@ -801,4 +840,47 @@ func collectHeaders(headers http.Header) map[string]string {
 		}
 	}
 	return out
+}
+
+// BuiltInSkill is one of an agent's developer-owned skills: configured in code,
+// always on, and never managed through /skills.
+type BuiltInSkill struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+}
+
+// builtInSkills lists an agent's developer-owned skills. An empty namespace asks
+// its skill client for globals only.
+func builtInSkills(r *http.Request, agent *agents.Agent) ([]BuiltInSkill, error) {
+	catalog, err := agent.ListSkills(r.Context(), "", map[string]any{"Header": collectHeaders(r.Header)}, agents.SkillSelection{})
+	if err != nil {
+		return nil, err
+	}
+	skills := []BuiltInSkill{}
+	for _, skill := range catalog {
+		if skill.Global {
+			skills = append(skills, BuiltInSkill{Name: skill.Name, Description: skill.Description})
+		}
+	}
+	return skills, nil
+}
+
+// globalSkillNames lists every registered agent's developer-owned skills, which
+// user uploads may not reuse.
+func globalSkillNames(r *http.Request, registry Registry) ([]string, error) {
+	var names []string
+	for _, name := range registry.AgentNames() {
+		agent, ok := registry.Agent(name)
+		if !ok {
+			continue
+		}
+		skills, err := builtInSkills(r, agent)
+		if err != nil {
+			return nil, err
+		}
+		for _, skill := range skills {
+			names = append(names, skill.Name)
+		}
+	}
+	return names, nil
 }

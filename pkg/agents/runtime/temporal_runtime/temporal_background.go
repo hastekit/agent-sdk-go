@@ -155,14 +155,15 @@ func (w *BackgroundTaskWorkflow) Execute(ctx workflow.Context, in *BackgroundTas
 		ParentClosePolicy: enums.PARENT_CLOSE_POLICY_ABANDON,
 	})
 	run := workflow.ExecuteChildWorkflow(runCtx, in.AgentName+"_AgentWorkflow", &agents.AgentInput{
-		Namespace:  in.Ref.Namespace,
-		ThreadID:   in.Ref.ThreadID,
-		SessionID:  in.Ref.SessionID,
-		StreamID:   in.Ref.ThreadStreamID,
-		RunContext: in.Ref.RunContext,
-		Skills:     in.Ref.Skills,
-		MCP:        in.Ref.MCP,
-		Message:    decision.Message,
+		Namespace:   in.Ref.Namespace,
+		ThreadID:    in.Ref.ThreadID,
+		SessionID:   in.Ref.SessionID,
+		StreamID:    in.Ref.ThreadStreamID,
+		RunContext:  in.Ref.RunContext,
+		Skills:      in.Ref.Skills,
+		MCP:         in.Ref.MCP,
+		ClientTools: in.Ref.ClientTools,
+		Message:     decision.Message,
 	})
 	return run.GetChildWorkflowExecution().Get(runCtx, nil)
 }

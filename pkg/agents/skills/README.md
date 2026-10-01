@@ -10,59 +10,61 @@ skill folder. `SKILL.md` must have YAML frontmatter with an explicit `name` and
 to 100 files and 10 MiB of decoded content; absolute and traversing paths are rejected.
 The HTTP upload limit is 20 MiB including multipart or base64 JSON overhead.
 
-## Skill sources and agent integration
+## Global and user skills
 
-`skills.NewFilesystemSkillSet(name, directory)` reads ordinary skill folders.
-`skills.NewFSSkillSet(name, fsys)` reads embedded or other `fs.FS` content.
-Both discover metadata on each listing and treat discovered skills as global, enabled by default.
-`skills.NewSkillSet(name, store)` reads uploaded bundles from a persistent store
-and defaults to opt-in. All implement the consumer-owned `agents.SkillSet`.
+`skills.Client` is an agent's `SkillClient`. It works like `mcpclient.Client`:
 
-The agent selects skills, builds the prompt metadata, and creates one `read_skill`
-tool. Folder discovery, frontmatter parsing, and persistence live in this package.
-A request for instructions returns the body without YAML frontmatter; an explicit
+- **Global skills** belong to the developer. Attach them per agent with
+  `WithGlobalSkills(sources...)`, which returns a copy sharing the same user
+  store. Globals are always on: users cannot turn them off, and a global shadows
+  a user skill with the same name. Two global sources claiming one name is an error.
+- **User skills** are the bundles a namespace saved in the `Store` passed to
+  `NewClient`. They are on unless a run disables them with `Input.Skills.Disable`.
+  An empty namespace, or a nil store, lists globals only.
+
+A `Source` lists and reads a fixed set of developer-owned skills:
+
+| Constructor | Serves |
+| --- | --- |
+| `NewDirSource(directory)` | Ordinary skill folders, rediscovered on every listing |
+| `NewFSSource(fsys)` | An `embed.FS` or other `fs.FS`, the same way |
+| `NewBundleSource(bundles...)` | Inline bundles, validated and copied at construction |
+| `NewStoreSource(store, namespace)` | One store namespace your application manages at run time |
+
+Implement `Source` (`List`, `Read`) for a database or service. The agent selects
+skills, builds the prompt metadata, and creates one `read_skill` tool. A request
+for instructions returns the body without YAML frontmatter; an explicit
 `file: "SKILL.md"` returns the original document. Supporting files are read as-is.
-
-The old public `SkillRegistry`, `AsSkillSet`, `SkillTool`, `SkillHint`, and
-`NewReadSkillTool` APIs have been removed. Use source constructors directly in
-`AgentConfig.Skills`. The root `hastekit.NewFilesystemSkillSet` and
-`hastekit.NewFSSkillSet` convenience aliases remain supported.
-
-## Sharing a store across agents
-
-Create the store once and inject a `StoredSkillSet` backed by it into each agent
-that should have access. Storage is shared across agents within the caller's
-namespace; neither the agent name nor the skill-set name creates a storage scope.
-Agents without an injected skill set do not receive the library automatically.
 
 ```go
 store, err := skills.NewFileStore("./data/skills")
 if err != nil { return err }
-library, err := skills.NewSkillSet("library", store)
+reviewSkills, err := skills.NewDirSource("./skills/review")
+if err != nil { return err }
+styleGuide, err := skills.NewFSSource(embeddedStyle)
 if err != nil { return err }
 
-reviewer := &hastekit.AgentConfig{Name: "Reviewer", Skills: []hastekit.SkillSet{library}}
-writer := &hastekit.AgentConfig{Name: "Writer", Skills: []hastekit.SkillSet{library}}
+base := skills.NewClient(store) // users' own skills, shared by every agent
+reviewer := &hastekit.AgentConfig{Name: "Reviewer", SkillClient: base.WithGlobalSkills(reviewSkills)}
+writer := &hastekit.AgentConfig{Name: "Writer", SkillClient: base.WithGlobalSkills(styleGuide)}
 // Set each agent's LLM and instruction before constructing it.
 ```
 
-Separate adapters over the same store can configure different availability
-policies for each agent. Uploads, replacements, and deletions are visible on the
-next catalog listing or run; agents do not need to be reconstructed. Pass the
-same store to `agui.WithSkillStore(store)` to manage that shared library.
+Storage is shared across agents within the caller's namespace; neither the agent
+name nor the client creates a storage scope. Agents without a `SkillClient` get no
+skills. Uploads, replacements, and deletions are visible on the next catalog
+listing or run; agents do not need to be reconstructed.
 
-## Filesystem setup and embedded UI
+## Embedded UI
 
 ```go
 store, err := skills.NewFileStore("./data/skills")
-if err != nil { return err }
-source, err := skills.NewSkillSet("library", store)
 if err != nil { return err }
 
 agent, err := hastekit.NewAgent(&hastekit.AgentConfig{
     Name: "Assistant",
     LLM: model,
-    Skills: []hastekit.SkillSet{source},
+    SkillClient: skills.NewClient(store),
     Instruction: hastekit.NewPrompt("Use the relevant skills.",
         prompts.WithResolver(prompts.DefaultResolvers()...)),
 })
@@ -72,19 +74,21 @@ if err := registry.Register(agent); err != nil { return err }
 return web.Serve(":8080", registry, agui.WithSkillStore(store))
 ```
 
-Imports: `pkg/skills`, `pkg/agents/prompts`, `pkg/agui`, `pkg/agui/web`, and the root
-SDK as `hastekit`. `model` is your configured provider. Protect the HTTP handler
-with your application's authentication and management authorization before
-exposing it publicly; `web.Handler` can be wrapped with that middleware.
+Imports: `pkg/agents/skills`, `pkg/agents/prompts`, `pkg/agui`, `pkg/agui/web`,
+and the root SDK as `hastekit`. `model` is your configured provider. Protect the
+HTTP handler with your application's authentication and management authorization
+before exposing it publicly; `web.Handler` can be wrapped with that middleware.
 
 The sidebar's **Skill library** action (also available through the composer's
-**+ → Skills → Manage Skills**) uploads a skill folder or selected
-files, lists stored skills, previews SKILL.md as text, downloads resources, and deletes skills with an inline confirmation. Deletion refreshes the agent picker.
-The upload button explicitly replaces a same-named skill's entire bundle.
-Newly uploaded skills appear in the agent picker when it uses this store adapter.
-Saving content does not automatically enable opt-in skills. The library represents
-the namespace's stored content; an agent's picker reflects its configured sources
-and policies, so a stored skill need not be available to every agent.
+**+ → Skills → Manage Skills**) uploads a skill folder or selected files, lists
+stored skills, previews SKILL.md as text, downloads resources, and deletes skills
+with an inline confirmation. The upload button replaces a same-named skill's
+entire bundle. The composer's Skills menu lists the same library, which is not
+scoped to an agent: a new upload is on for every agent using this store until
+the user turns it off there, and that choice applies to every agent. The
+agent's global skills are listed too, in the menu and the library, marked
+"Built in · always on" and never switchable or deletable; the UI reads them from
+`GET /agents/{agent}/skills`.
 
 Run `go run ./examples/agents/15_dynamic_skills -serve -skill-store /tmp/skills`
 from the repository root to try it. Model calls require `OPENAI_API_KEY`; uploading
@@ -98,7 +102,7 @@ store, err := skills.NewS3Store(s3Client, skills.S3Config{
     Prefix: "skills",
 })
 if err != nil { return err }
-source, err := skills.NewSkillSet("library", store)
+client := skills.NewClient(store)
 ```
 
 `s3Client` is an AWS SDK v2 S3 client. Credentials, region, endpoint, bucket creation,
@@ -112,7 +116,7 @@ The filesystem store also uses one JSON file per bundle. Replacements use a temp
 file and atomic rename; S3 replaces one object atomically. Readers see a complete
 old or new bundle. Concurrent replacements use last-writer-wins semantics. The
 filesystem root must be application-owned, not writable by untrusted processes.
-This persistent format is separate from `NewFilesystemSkillSet`, which reads an
+This persistent format is separate from `NewDirSource`, which reads an
 existing tree of ordinary skill folders without an upload API.
 
 ## Listing cache
@@ -170,58 +174,26 @@ when the configured TTL expires. Pass `WithCache(nil)` or `WithCacheTTL(0)` to
 bypass caching. Cache errors are returned; if invalidation fails after a backing
 write, the operation reports that the write may already have been applied.
 
-## Namespaces and policies
+## Namespaces
 
-Management routes use `agui.WithNamespaceResolver`, defaulting to `default`.
-Request bodies and query parameters cannot select another namespace. An agent
-execution passes `Input.Namespace` explicitly to skill listing and reading, using
-`default` when empty. Direct calls use `ListSkills(ctx, namespace, runContext)`
-and `ResolveSkill(ctx, namespace, runContext, name, file)`. The agent picker uses
-`agent.ListSkills(ctx, namespace, runContext, selection)`. `RunContext` remains
+Management routes use the authenticated namespace from
+`agui.WithNamespaceResolver`. Request bodies and query parameters cannot select
+another namespace. An agent execution passes `Input.Namespace` explicitly to
+skill listing and reading. Direct calls use `ListSkills(ctx, namespace, runContext)`
+and `ReadSkill(ctx, namespace, runContext, name, file)`. To see one agent's full
+catalog, globals included, call `agent.ListSkills(ctx, namespace, runContext, selection)`
+in Go; the HTTP API lists only the user's own skills. `RunContext` remains
 application data; a key named `Namespace` has no special meaning.
 
-Configure an additional shared namespace with:
-
-```go
-set, err := skills.NewSkillSet("library", store,
-    skills.WithGlobalNamespace("global"),
-)
-```
-
-The set lists all pages from the global namespace and then the caller's namespace.
-An empty global namespace disables this behavior; matching namespaces are listed
-only once. Global skills take precedence on duplicate names. Conflicting user bundles remain
-in storage but are silently omitted from the agent catalog. Resolution checks the
-global namespace first and falls back to the caller only when the bundle is absent,
-never for a missing resource or an authorization/storage error. Required flags apply
-only to global skills; user-owned skills are always optional. The management UI
-rejects uploads whose frontmatter name conflicts with the current agent's global catalog.
-
-This setting affects only skill-set reads. UI uploads and management operations
-continue to use the authenticated user's namespace through `agui.WithNamespaceResolver`;
-request parameters cannot select the global namespace. Populate shared skills
-through trusted server-side calls to the store.
-
-The adapter defaults to optional and disabled. Configure defaults and required
-names when constructing it:
-
-```go
-source, err := skills.NewSkillSet("library", store,
-    skills.WithGlobalNamespace("global"),
-    skills.WithDefaultEnabled(true),
-    skills.WithRequiredSkills("safety-checklist"),
-)
-```
-
-`WithRequiredSkills` only affects names present in the global namespace. No flags
-are read from uploaded content. A required skill is always available to the model;
-it does not force the model to read it. Optional skills follow the user's choice,
-or `DefaultEnabled` when no choice is supplied. Choices remain browser-local.
+To manage a shared library at run time, keep it in a store namespace that users
+cannot write to and attach it with `NewStoreSource(store, "library")`. Populate it
+through trusted server-side calls to the store, never through the user routes.
 
 New runs refresh the catalog. An active run's enabled names and resource allowlist
-remain fixed; content reads see the latest saved bundle. The store keeps only the latest bundle; there are no skill versions or aliases. Deleting a skill
-makes later reads fail; it does not erase previously read text from conversation history.
-Temporal and Restate use the existing skill-set activity/run-step wrappers.
+remain fixed; content reads see the latest saved bundle. The store keeps only the
+latest bundle; there are no skill versions or aliases. Deleting a skill makes later
+reads fail; it does not erase previously read text from conversation history.
+Temporal and Restate run listing and reads as activities or run steps.
 
 ## HTTP API
 
@@ -229,7 +201,7 @@ Pass `agui.WithSkillStore(store)` to `web.Serve` or `web.Handler` to enable mana
 
 | Method | Path | Behavior |
 | --- | --- | --- |
-| GET | `/skills?limit=50&cursor=...` | Metadata page, with opaque `nextCursor` |
+| GET | `/skills?limit=50&cursor=...` | The caller's own skills, with opaque `nextCursor`; the Skills menu reads this too |
 | POST | `/skills` | Upload/replace a complete bundle |
 | PUT | `/skills/{name}` | Replace via JSON; name must match frontmatter |
 | GET | `/skills/{name}` | JSON bundle, files encoded as base64 |
@@ -243,15 +215,17 @@ is not supported. ZIP extraction is not performed.
 
 POST and PUT also accept `application/json`: `{"files":{"SKILL.md":"<base64>"}}`.
 Success returns metadata. Listing limits are 1–200. Errors use 400 for invalid
-content, 403 for namespace denial, 404 for missing content, and 413 for size limits.
+content, 403 for namespace denial, 404 for missing content, 409 for a name
+reserved by a global skill, and 413 for size limits.
 Backend errors return 500 without exposing storage details. File responses are
 attachments with `nosniff`; the UI never executes uploaded scripts or renders
 uploaded HTML.
 
-To mount management APIs without AG-UI, use `skills.NewHandler(store, resolver)`.
-The resolver receives the authenticated request and returns the allowed namespace.
+Uploads whose name matches a global skill of any registered agent are rejected
+with 409, so a user's skill never sits shadowed and unusable.
 
-Skill names have no source prefix. Global entries always win against user entries,
-regardless of source order. Between entries of the same scope, the last entry in
-`AgentConfig.Skills` wins, replacing the metadata and resolver. Selection applies
-after merging. Source names must remain unique for runtime registration.
+To mount management APIs without AG-UI, use
+`skills.NewHandler(store, skills.WithNamespaceResolver(resolve), skills.WithReservedNames(globals))`.
+The resolver receives the authenticated request and returns the allowed namespace;
+without one, every route returns 403. `WithReservedNames` returns the global skill
+names uploads may not reuse.

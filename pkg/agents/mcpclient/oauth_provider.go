@@ -21,12 +21,21 @@ import (
 type authorizationConfig struct {
 	OAuth           oauth2.Config
 	AuthCodeOptions []oauth2.AuthCodeOption
+	// AuthCodeParams are AuthCodeOptions as written, for an authorization URL
+	// built by the MCP SDK rather than by OAuth.
+	AuthCodeParams map[string]string
 }
 
 // oauthServerConfig is a snapshot used by one authorization attempt or token source.
 type oauthServerConfig struct {
 	Endpoint  string
 	Namespace string
+	// Discovered marks endpoints found through the server's metadata, and a
+	// client registered there when the config names none; both are kept in
+	// the credential store (see OAuthClientStore) once the user authorizes.
+	Discovered bool
+	// Key names the stored grant, as OAuthCredentialKey does for the config.
+	Key string
 	authorizationConfig
 }
 
@@ -80,37 +89,55 @@ func NewOAuthCredentialProvider(cfg OAuthCredentialProviderConfig) (*OAuthCreden
 // reaches a different definition that reuses the name, and a refresh token is never
 // sent through a different client or token endpoint: changing either requires the
 // user to reconnect. Pass it to CredentialStore.Delete to disconnect an account.
+//
+// A definition whose endpoints are discovered is bound to its MCP endpoint
+// instead of a token endpoint it does not name: the endpoint decides which
+// authorization server, and which registered client, issue its grants.
 func OAuthCredentialKey(connector Connector) string {
 	var clientID, tokenURL string
+	discovered := false
 	if connector.Authorization != nil {
 		clientID, tokenURL = connector.Authorization.ClientID, connector.Authorization.TokenURL
+		discovered = connector.Authorization.discovered()
 	}
-	return oauthCredentialKey(connector.Namespace != "", connector.Name, clientID, tokenURL)
+	return oauthCredentialKey(connector.Namespace != "", connector.Name, clientID, tokenURL, discovered, connector.Endpoint)
 }
 
 // oauthCredentialKey is unambiguous because server names cannot contain path separators.
-func oauthCredentialKey(userOwned bool, name, clientID, tokenURL string) string {
+func oauthCredentialKey(userOwned bool, name, clientID, tokenURL string, discovered bool, endpoint string) string {
 	scope := "global"
 	if userOwned {
 		scope = "user"
 	}
 	data, _ := json.Marshal([2]string{clientID, tokenURL})
+	if discovered {
+		data, _ = json.Marshal([3]string{"discovered", clientID, endpoint})
+	}
 	digest := sha256.Sum256(data)
 	return scope + "/" + name + "/" + hex.EncodeToString(digest[:8])
 }
 
-// credentialKey names the grant this snapshot exchanges or refreshes, matching OAuthCredentialKey.
-func (c oauthServerConfig) credentialKey(name string) string {
-	return oauthCredentialKey(c.Namespace != "", name, c.OAuth.ClientID, c.OAuth.Endpoint.TokenURL)
-}
-
 // resolveOAuthConfig validates the current store definition before exchanging credentials.
 func resolveOAuthConfig(connector Connector) (oauthServerConfig, error) {
-	if connector.Authorization == nil || strings.TrimSpace(connector.Authorization.ClientID) == "" {
-		return oauthServerConfig{}, errors.New("MCP OAuth requires authorization config with a client ID")
+	authorization := connector.Authorization
+	if authorization == nil {
+		return oauthServerConfig{}, errors.New("MCP OAuth requires authorization config")
 	}
-	config := connector.Authorization.authorizationConfig()
-	for _, endpoint := range []string{connector.Endpoint, config.OAuth.Endpoint.AuthURL, config.OAuth.Endpoint.TokenURL, config.OAuth.RedirectURL} {
+	discovered := authorization.discovered()
+	switch {
+	case !discovered && (authorization.AuthURL == "" || authorization.TokenURL == ""):
+		return oauthServerConfig{}, errors.New("MCP OAuth needs both an authorization URL and a token URL, or neither to discover them")
+	case !discovered && strings.TrimSpace(authorization.ClientID) == "":
+		return oauthServerConfig{}, errors.New("MCP OAuth with its own endpoints requires a client ID")
+	case authorization.ClientSecret != "" && strings.TrimSpace(authorization.ClientID) == "":
+		return oauthServerConfig{}, errors.New("MCP OAuth client secret requires a client ID")
+	}
+	config := authorization.authorizationConfig()
+	endpoints := []string{connector.Endpoint, config.OAuth.RedirectURL}
+	if !discovered {
+		endpoints = append(endpoints, config.OAuth.Endpoint.AuthURL, config.OAuth.Endpoint.TokenURL)
+	}
+	for _, endpoint := range endpoints {
 		if !validOAuthURL(endpoint) {
 			return oauthServerConfig{}, fmt.Errorf("MCP OAuth server %q requires HTTPS URLs (HTTP is allowed for loopback only)", connector.Name)
 		}
@@ -119,14 +146,24 @@ func resolveOAuthConfig(connector Connector) (oauthServerConfig, error) {
 	// Only the endpoint and token URL are requested by this process, so only they can reach
 	// internal services. The auth and redirect URLs are browser navigations, which a loopback
 	// callback needs during local development.
+	// Discovered endpoints are checked as they are requested, by the same transport.
 	if connector.Namespace != "" {
 		for _, endpoint := range []string{connector.Endpoint, config.OAuth.Endpoint.TokenURL} {
+			if endpoint == "" {
+				continue
+			}
 			if err := validatePublicURL(endpoint); err != nil {
 				return oauthServerConfig{}, err
 			}
 		}
 	}
-	return oauthServerConfig{Endpoint: connector.Endpoint, Namespace: connector.Namespace, authorizationConfig: *config}, nil
+	return oauthServerConfig{
+		Endpoint:            connector.Endpoint,
+		Namespace:           connector.Namespace,
+		Discovered:          discovered,
+		Key:                 OAuthCredentialKey(connector),
+		authorizationConfig: *config,
+	}, nil
 }
 
 // validOAuthURL permits local development without permitting credentials over remote plaintext HTTP.
@@ -153,7 +190,7 @@ func (p *OAuthCredentialProvider) Resolve(ctx context.Context, namespace string,
 	if connector.Namespace != "" && connector.Namespace != namespace {
 		return nil, agents.NewToolsetError(agents.ToolsetErrorAuth, errors.New("MCP server belongs to another namespace"))
 	}
-	key := server.credentialKey(connector.Name)
+	key := server.Key
 	if _, err := credentialKey(namespace, key); err != nil {
 		return nil, agents.NewToolsetError(agents.ToolsetErrorAuth, err)
 	}
@@ -165,10 +202,46 @@ func (p *OAuthCredentialProvider) Resolve(ctx context.Context, namespace string,
 		}
 		return nil, err
 	}
+	if server, err = p.withClient(ctx, namespace, server); err != nil {
+		if errors.Is(err, ErrCredentialNotFound) {
+			return nil, agents.NewToolsetError(agents.ToolsetErrorAuth, err)
+		}
+		return nil, err
+	}
 	return &Credential{
 		Principal:   namespace,
 		TokenSource: &persistedTokenSource{provider: p, namespace: namespace, key: key, config: server},
 	}, nil
+}
+
+// oauthClients is the credential store's OAuthClientStore, which servers with
+// discovered endpoints need.
+func (p *OAuthCredentialProvider) oauthClients() (OAuthClientStore, error) {
+	clients, ok := p.store.(OAuthClientStore)
+	if !ok {
+		return nil, errors.New("MCP OAuth with discovered endpoints needs a credential store that implements OAuthClientStore")
+	}
+	return clients, nil
+}
+
+// withClient completes a discovered server's snapshot with the client and
+// endpoints its grant was issued through, as the authorization stored them.
+func (p *OAuthCredentialProvider) withClient(ctx context.Context, namespace string, server oauthServerConfig) (oauthServerConfig, error) {
+	if !server.Discovered {
+		return server, nil
+	}
+	clients, err := p.oauthClients()
+	if err != nil {
+		return server, err
+	}
+	client, err := clients.LoadOAuthClient(ctx, namespace, server.Key)
+	if err != nil {
+		return server, err
+	}
+	server.OAuth.ClientID, server.OAuth.ClientSecret = client.ClientID, client.ClientSecret
+	server.OAuth.Endpoint = oauth2.Endpoint{AuthURL: client.AuthURL, TokenURL: client.TokenURL, AuthStyle: client.AuthStyle}
+	server.OAuth.Scopes = client.Scopes
+	return server, nil
 }
 
 // credentialLock serializes refreshes and authorization writes for one stored grant in this provider.
@@ -178,22 +251,27 @@ func (p *OAuthCredentialProvider) credentialLock(namespace, key string) *sync.Mu
 	return lock.(*sync.Mutex)
 }
 
+// httpClient applies a config's ownership policy to every OAuth request made for
+// it: discovery, registration, code exchange and token refresh.
+func (p *OAuthCredentialProvider) httpClient(config oauthServerConfig) *http.Client {
+	if config.Namespace != "" {
+		return &http.Client{Transport: publicRoundTripper{base: userHTTPTransport}, CheckRedirect: sameOriginRedirect}
+	}
+	return p.client
+}
+
 // tokenContext outlives individual run contexts because pooled MCP connections can outlive a run.
 func (p *OAuthCredentialProvider) tokenContext(parent context.Context, config oauthServerConfig) (context.Context, context.CancelFunc) {
-	// Apply the captured config's ownership policy to both code exchange and token refresh.
-	client := p.client
-	if config.Namespace != "" {
-		client = &http.Client{Transport: publicRoundTripper{base: userHTTPTransport}, CheckRedirect: sameOriginRedirect}
-	}
-	ctx := context.WithValue(parent, oauth2.HTTPClient, client)
+	ctx := context.WithValue(parent, oauth2.HTTPClient, p.httpClient(config))
 	return context.WithTimeout(ctx, p.timeout)
 }
 
 // persistedTokenSource reads the latest stored token on each request, including after reconnects.
 type persistedTokenSource struct {
-	provider       *OAuthCredentialProvider
-	namespace, key string
-	config         oauthServerConfig
+	provider  *OAuthCredentialProvider
+	namespace string
+	key       string
+	config    oauthServerConfig
 }
 
 // Token refreshes only expired tokens and saves any rotated refresh token before returning it.

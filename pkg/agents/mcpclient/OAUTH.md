@@ -5,8 +5,11 @@ MCP connection definitions and tokens have separate stores:
 - `MCPServerConfigStore` holds server endpoints and OAuth application settings.
 - `CredentialStore` holds tokens under **namespace + credential key**. The key,
   `OAuthCredentialKey(connector)`, binds the definition's owner (global or the
-  user's own), its server name, and the OAuth client ID and token URL. Treat it as
-  an opaque string; pass it to `CredentialStore.Delete` to disconnect an account.
+  user's own), its server name, and the OAuth client ID and token URL (for
+  discovered endpoints, the MCP endpoint instead). Treat it as an opaque string;
+  pass it to `CredentialStore.Delete` to disconnect an account. For servers whose
+  endpoints are discovered, the same store also keeps the OAuth client the grant
+  was issued to (`OAuthClientStore`, which `FileCredentialStore` implements).
 
 The client passes the current server configuration to the credential provider.
 The HTTP handler reads OAuth settings from the same config store by server name
@@ -69,7 +72,41 @@ exchanges the code, and persists refreshable credentials. Subsequent agent runs
 resolve those tokens automatically. Missing credentials become an authentication
 connector status before opening an MCP connection or using cached tools.
 
-Register the full callback URL in the OAuth application. The sample in
+Register the full callback URL in the OAuth application.
+
+## Discovery and dynamic client registration
+
+Most MCP servers publish their authorization server, and most of those accept
+client registration. For them, `RedirectURL` is the only OAuth setting a
+definition needs:
+
+```go
+Authorization: &mcpclient.OAuthConfig{
+    RedirectURL: "http://localhost:8070/api/agui/mcp/notes/callback",
+}
+```
+
+Connecting then runs the MCP Go SDK's authorization flow (`auth.AuthorizationCodeHandler`).
+From the server's answer to an unauthenticated request it finds the protected
+resource metadata (RFC 9728, falling back to the well-known URLs), the
+authorization server's metadata (RFC 8414), and registers a public client there
+(RFC 7591) with the callback as its redirect URI. It authorizes with PKCE, the
+`resource` indicator (RFC 8707) and the scopes the server asks for, checks the
+`iss` it returns (RFC 9207), and requests `offline_access` when offered.
+
+The registered client and the discovered endpoints are kept in the credential
+store beside the grant. Runs refresh through them, and connecting again reuses
+the registration; if the authorization server no longer recognizes it, the next
+connect registers again. Deleting the definition forgets both.
+
+Set `ClientID` (and `ClientSecret`) to use your own OAuth application with the
+discovered endpoints, and `Scopes` to override the ones the server asks for.
+Set `AuthURL` and `TokenURL` only for servers that publish no metadata, such as
+the Gmail example above. Those need a `ClientID`, and connect with an
+authorization code flow with PKCE against exactly those endpoints, since the
+SDK's flow always discovers them. A server with neither registration nor
+a configured client cannot be connected, and `/connect` says so before
+redirecting anywhere. The sample in
 `samples/new/main.go` reads `GMAIL_CLIENT_ID`, `GMAIL_CLIENT_SECRET`, and optionally
 `SAMPLE_NAMESPACE`; its default namespace is `default`.
 
@@ -92,7 +129,8 @@ the grant. OAuth URLs require HTTPS. Only developer-owned
 global definitions may use loopback HTTP URLs for local development.
 
 Namespace-owned definitions must use public addresses for the MCP endpoint and the
-token URL, the two URLs this process requests. The authorization and callback URLs
+token URL, the two URLs this process requests; discovered metadata, registration
+and token URLs are held to the same rule as they are requested. The authorization and callback URLs
 are browser navigations and follow the HTTPS-or-loopback rule, so a local callback
 works during development. Token exchange and refresh validate DNS results and
 dial vetted public IPs directly, bypassing environment proxies. Redirects must

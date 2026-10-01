@@ -26,6 +26,31 @@ type CredentialStore interface {
 	Delete(context.Context, string, string) error
 }
 
+// OAuthClient is the OAuth client and endpoints the MCP SDK's authorization flow
+// resolved for a server whose endpoints are discovered: the client the config
+// names, or one registered with the authorization server (RFC 7591). Refreshing
+// the grant needs them, and a later authorization reuses the registration.
+type OAuthClient struct {
+	ClientID     string           `json:"clientId"`
+	ClientSecret string           `json:"clientSecret,omitempty"`
+	AuthURL      string           `json:"authUrl"`
+	TokenURL     string           `json:"tokenUrl"`
+	AuthStyle    oauth2.AuthStyle `json:"authStyle,omitempty"`
+	Scopes       []string         `json:"scopes,omitempty"`
+}
+
+// OAuthClientStore is implemented by a CredentialStore that can also keep the
+// OAuth client a grant was issued to, under the grant's own namespace and key.
+// Servers whose OAuth endpoints are discovered need it; FileCredentialStore
+// implements it. LoadOAuthClient returns ErrCredentialNotFound when there is none.
+type OAuthClientStore interface {
+	LoadOAuthClient(ctx context.Context, namespace, key string) (*OAuthClient, error)
+	SaveOAuthClient(ctx context.Context, namespace, key string, client *OAuthClient) error
+	DeleteOAuthClient(ctx context.Context, namespace, key string) error
+}
+
+var _ OAuthClientStore = (*FileCredentialStore)(nil)
+
 // FileCredentialStore stores private plaintext token files with atomic replacement.
 // Use a private local directory; this is not an encrypted vault or a distributed refresh lock.
 type FileCredentialStore struct {
@@ -68,6 +93,66 @@ func credentialKey(namespace, server string) (string, error) {
 
 // Load returns the latest token without retaining credential values in a shared cache.
 func (s *FileCredentialStore) Load(ctx context.Context, namespace, server string) (*oauth2.Token, error) {
+	data, err := s.read(ctx, namespace, server, ".json")
+	if err != nil {
+		return nil, err
+	}
+	var token oauth2.Token
+	if json.Unmarshal(data, &token) != nil || token.AccessToken == "" {
+		return nil, errors.New("invalid MCP credential record")
+	}
+	return &token, ctx.Err()
+}
+
+// Save publishes a complete token record atomically, preserving the old record on failure.
+func (s *FileCredentialStore) Save(ctx context.Context, namespace, server string, token *oauth2.Token) error {
+	if token == nil || token.AccessToken == "" {
+		return errors.New("MCP credential requires an access token")
+	}
+	data, err := json.Marshal(token)
+	if err != nil {
+		return errors.New("cannot encode MCP credential")
+	}
+	return s.write(ctx, namespace, server, ".json", data)
+}
+
+// Delete forgets only the selected namespace/server credential; remote revocation is separate.
+func (s *FileCredentialStore) Delete(ctx context.Context, namespace, server string) error {
+	return s.remove(ctx, namespace, server, ".json")
+}
+
+// LoadOAuthClient implements OAuthClientStore.
+func (s *FileCredentialStore) LoadOAuthClient(ctx context.Context, namespace, server string) (*OAuthClient, error) {
+	data, err := s.read(ctx, namespace, server, ".client.json")
+	if err != nil {
+		return nil, err
+	}
+	var client OAuthClient
+	if json.Unmarshal(data, &client) != nil || client.ClientID == "" || client.TokenURL == "" {
+		return nil, errors.New("invalid MCP OAuth client record")
+	}
+	return &client, ctx.Err()
+}
+
+// SaveOAuthClient implements OAuthClientStore.
+func (s *FileCredentialStore) SaveOAuthClient(ctx context.Context, namespace, server string, client *OAuthClient) error {
+	if client == nil || client.ClientID == "" || client.TokenURL == "" {
+		return errors.New("MCP OAuth client requires a client ID and token URL")
+	}
+	data, err := json.Marshal(client)
+	if err != nil {
+		return errors.New("cannot encode MCP OAuth client")
+	}
+	return s.write(ctx, namespace, server, ".client.json", data)
+}
+
+// DeleteOAuthClient implements OAuthClientStore.
+func (s *FileCredentialStore) DeleteOAuthClient(ctx context.Context, namespace, server string) error {
+	return s.remove(ctx, namespace, server, ".client.json")
+}
+
+// read returns one record, bounded, without including its secret contents in errors.
+func (s *FileCredentialStore) read(ctx context.Context, namespace, server, suffix string) ([]byte, error) {
 	// Check cancellation and scope before touching any file.
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -76,7 +161,7 @@ func (s *FileCredentialStore) Load(ctx context.Context, namespace, server string
 	if err != nil {
 		return nil, err
 	}
-	file, err := s.root.Open(key + ".json")
+	file, err := s.root.Open(key + suffix)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, ErrCredentialNotFound
 	}
@@ -84,22 +169,19 @@ func (s *FileCredentialStore) Load(ctx context.Context, namespace, server string
 		return nil, err
 	}
 	defer file.Close()
-
-	// Bound malformed records and avoid including their secret contents in errors.
 	data, err := io.ReadAll(io.LimitReader(file, (1<<20)+1))
 	if err != nil {
 		return nil, err
 	}
-	var token oauth2.Token
-	if len(data) > 1<<20 || json.Unmarshal(data, &token) != nil || token.AccessToken == "" {
+	if len(data) > 1<<20 {
 		return nil, errors.New("invalid MCP credential record")
 	}
-	return &token, ctx.Err()
+	return data, nil
 }
 
-// Save publishes a complete token record atomically, preserving the old record on failure.
-func (s *FileCredentialStore) Save(ctx context.Context, namespace, server string, token *oauth2.Token) error {
-	// Validate before allocating a temporary file or replacing an existing credential.
+// write publishes a complete record atomically, preserving the old record on failure.
+func (s *FileCredentialStore) write(ctx context.Context, namespace, server, suffix string, data []byte) error {
+	// Validate before allocating a temporary file or replacing an existing record.
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -107,18 +189,11 @@ func (s *FileCredentialStore) Save(ctx context.Context, namespace, server string
 	if err != nil {
 		return err
 	}
-	if token == nil || token.AccessToken == "" {
-		return errors.New("MCP credential requires an access token")
-	}
-	data, err := json.Marshal(token)
-	if err != nil {
-		return errors.New("cannot encode MCP credential")
-	}
 	if len(data) > 1<<20 {
 		return errors.New("MCP credential record exceeds size limit")
 	}
 
-	// A separate private staging file prevents partial tokens from becoming visible to readers.
+	// A separate private staging file prevents partial records from becoming visible to readers.
 	temporary := key + "." + oauth2.GenerateVerifier() + ".tmp"
 	file, err := s.root.OpenFile(temporary, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if err != nil {
@@ -133,14 +208,14 @@ func (s *FileCredentialStore) Save(ctx context.Context, namespace, server string
 	if err := errors.Join(writeErr, closeErr, ctx.Err()); err != nil {
 		return err
 	}
-	if err := s.root.Rename(temporary, key+".json"); err != nil {
+	if err := s.root.Rename(temporary, key+suffix); err != nil {
 		return fmt.Errorf("publish MCP credential: %w", err)
 	}
 	return nil
 }
 
-// Delete forgets only the selected namespace/server credential; remote revocation is separate.
-func (s *FileCredentialStore) Delete(ctx context.Context, namespace, server string) error {
+// remove forgets one record; a missing one is already forgotten.
+func (s *FileCredentialStore) remove(ctx context.Context, namespace, server, suffix string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -148,7 +223,7 @@ func (s *FileCredentialStore) Delete(ctx context.Context, namespace, server stri
 	if err != nil {
 		return err
 	}
-	err = s.root.Remove(key + ".json")
+	err = s.root.Remove(key + suffix)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}

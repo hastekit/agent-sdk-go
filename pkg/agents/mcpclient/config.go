@@ -40,6 +40,12 @@ type ServerConfig struct {
 
 // OAuthConfig is the JSON representation of a client's trusted OAuth application settings.
 // Client secrets stay in application configuration, never in tool descriptors or run state.
+//
+// Only RedirectURL is required. Without AuthURL and TokenURL, the MCP authorization
+// flow discovers the server's authorization server from its metadata (RFC 9728 and
+// RFC 8414), and without a ClientID it also registers a client there (RFC 7591),
+// keeping the registration in the credential store. AuthURL and TokenURL pin the
+// endpoints instead, for servers that publish no metadata; they need a ClientID.
 type OAuthConfig struct {
 	ClientID       string            `json:"clientId"`
 	ClientSecret   string            `json:"clientSecret,omitempty"`
@@ -162,6 +168,11 @@ func containsTemplate(value any) bool {
 	return false
 }
 
+// discovered reports whether the endpoints come from the server's metadata rather than this config.
+func (c *OAuthConfig) discovered() bool {
+	return c.AuthURL == "" && c.TokenURL == ""
+}
+
 // authorizationConfig creates the exchange options for one server definition.
 func (c *OAuthConfig) authorizationConfig() *authorizationConfig {
 	if c == nil {
@@ -184,5 +195,6 @@ func (c *OAuthConfig) authorizationConfig() *authorizationConfig {
 	for _, key := range keys {
 		config.AuthCodeOptions = append(config.AuthCodeOptions, oauth2.SetAuthURLParam(key, c.AuthCodeParams[key]))
 	}
+	config.AuthCodeParams = c.AuthCodeParams
 	return config
 }

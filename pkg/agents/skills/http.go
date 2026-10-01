@@ -7,30 +7,58 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"slices"
 	"strconv"
+	"strings"
 )
 
-// NewHandler exposes GET/POST /skills and GET/PUT/DELETE /skills/{name}.
-// POST accepts multipart files (relative paths in Content-Disposition filename)
-// or a JSON Bundle. PUT accepts JSON and checks the route name. Both replace the
-// complete bundle. GET ?file=path returns a bundled file as an attachment.
-// The host must wrap management endpoints with authentication/authorization.
-func NewHandler(store Store, resolve func(*http.Request) (string, error)) http.Handler {
+// ErrReserved reports an upload whose name belongs to a developer's global skill.
+var ErrReserved = errors.New("skill name is reserved by a global skill")
+
+// HandlerOption configures trusted identity resolution and name reservation.
+type HandlerOption func(*handlerOptions)
+
+type handlerOptions struct {
+	namespace func(*http.Request) (string, error)
+	reserved  func(*http.Request) ([]string, error)
+}
+
+// WithNamespaceResolver supplies the authenticated subject whose skills the
+// routes manage. Never derive it from an untrusted query parameter or body.
+func WithNamespaceResolver(resolve func(*http.Request) (string, error)) HandlerOption {
+	return func(o *handlerOptions) { o.namespace = resolve }
+}
+
+// WithReservedNames rejects uploads that reuse a global skill's name, so a
+// user's skill never sits shadowed and unusable. Return the global names of
+// every agent the requester can use.
+func WithReservedNames(reserved func(*http.Request) ([]string, error)) HandlerOption {
+	return func(o *handlerOptions) { o.reserved = reserved }
+}
+
+// NewHandler exposes GET/POST /skills and GET/PUT/DELETE /skills/{name} for the
+// requester's own skills. POST accepts multipart files (relative paths in
+// Content-Disposition filename) or a JSON Bundle. PUT accepts JSON and checks
+// the route name. Both replace the complete bundle. GET ?file=path returns a
+// bundled file as an attachment. Without a namespace resolver requests fail
+// closed; global skills are never managed here. It mirrors mcpclient.NewHandler.
+func NewHandler(store Store, options ...HandlerOption) http.Handler {
+	settings := handlerOptions{}
+	for _, option := range options {
+		option(&settings)
+	}
 	mux := http.NewServeMux()
 	route := func(pattern string, fn func(http.ResponseWriter, *http.Request, string)) {
 		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Cache-Control", "no-store")
-			ns := "default"
-			var err error
-			if resolve != nil {
-				ns, err = resolve(r)
-				if err != nil {
-					http.Error(w, "namespace denied", http.StatusForbidden)
-					return
-				}
+			if settings.namespace == nil {
+				http.Error(w, "namespace denied", http.StatusForbidden)
+				return
 			}
-			if ns == "" {
-				ns = "default"
+			ns, err := settings.namespace(r)
+			if err != nil || strings.TrimSpace(ns) == "" {
+				http.Error(w, "namespace denied", http.StatusForbidden)
+				return
 			}
 			if store == nil {
 				http.Error(w, "skill store unavailable", http.StatusServiceUnavailable)
@@ -74,6 +102,17 @@ func NewHandler(store Store, resolve func(*http.Request) (string, error)) http.H
 		if name := r.PathValue("name"); name != "" && name != m.Name {
 			fail(w, fmt.Errorf("%w: route and skill name differ", ErrInvalid))
 			return
+		}
+		if settings.reserved != nil {
+			reserved, err := settings.reserved(r)
+			if err != nil {
+				fail(w, err)
+				return
+			}
+			if slices.Contains(reserved, m.Name) {
+				fail(w, ErrReserved)
+				return
+			}
 		}
 		m, err = store.Put(r.Context(), ns, b)
 		if err != nil {
@@ -203,6 +242,9 @@ func fail(w http.ResponseWriter, err error) {
 		message = err.Error()
 	case errors.Is(err, ErrTooLarge):
 		status = http.StatusRequestEntityTooLarge
+		message = err.Error()
+	case errors.Is(err, ErrReserved):
+		status = http.StatusConflict
 		message = err.Error()
 	}
 	http.Error(w, message, status)

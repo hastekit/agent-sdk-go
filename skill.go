@@ -9,15 +9,19 @@ import (
 // agents.Skill.
 type Skill = agents.Skill
 
-// SkillSet provides a runtime catalog and resolver for a group of skills.
-type SkillSet = agents.SkillSet
+// SkillClient lists an agent's global and namespace skills — see skills.Client.
+type SkillClient = agents.SkillClient
 type SkillSelection = agents.SkillSelection
 type ListedSkill = agents.ListedSkill
 
-// FilesystemSkillSet discovers skills from a folder at run time.
-type FilesystemSkillSet = skills.FilesystemSkillSet
+// SkillSource is a fixed set of developer-owned (global) skills.
+type SkillSource = skills.Source
 
-var NewFilesystemSkillSet = skills.NewFilesystemSkillSet
+// NewSkillClient reads users' own skills from a store; add globals with WithGlobalSkills.
+var NewSkillClient = skills.NewClient
 
-// NewFSSkillSet supports embed.FS and other io/fs implementations.
-var NewFSSkillSet = skills.NewFSSkillSet
+// NewDirSkillSource discovers global skills from a folder at run time.
+var NewDirSkillSource = skills.NewDirSource
+
+// NewFSSkillSource supports embed.FS and other io/fs implementations.
+var NewFSSkillSource = skills.NewFSSource

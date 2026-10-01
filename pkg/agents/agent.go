@@ -45,7 +45,8 @@ type Agent struct {
 	stickyHandoff        bool
 	singleTurn           bool
 	modelCallMiddlewares []ModelCallMiddleware
-	skillSets            []SkillSet
+	skillClient          SkillClient
+	clientTools          ClientToolOptions
 
 	// background waits on the tasks this agent's tools start, and is nil where
 	// nothing can wait — see BackgroundRunner and ErrBackgroundUnsupported.
@@ -71,8 +72,11 @@ type AgentOptions struct {
 	Tools    []Tool
 	Handoffs []*Handoff
 
-	// Skills are listed once per run; enabled skills share the read_skill tool.
-	Skills        []SkillSet
+	// SkillClient lists global and namespace skills once per run; enabled
+	// skills share the read_skill tool.
+	SkillClient SkillClient
+	// ClientTools configures how runs wait for tools the client runs itself.
+	ClientTools   ClientToolOptions
 	MCPClient     MCPClient
 	Runtime       Runtime
 	MaxLoops      *int
@@ -180,7 +184,8 @@ func NewAgent(opts *AgentOptions) *Agent {
 		history:              conversationHistory,
 		instruction:          instruction,
 		tools:                slices.Clone(opts.Tools),
-		skillSets:            slices.Clone(opts.Skills),
+		skillClient:          opts.SkillClient,
+		clientTools:          opts.ClientTools,
 		mcpClient:            opts.MCPClient,
 		llm:                  &WrappedLLM{opts.LLM},
 		parameters:           opts.Parameters,
@@ -298,9 +303,15 @@ func (e *Agent) Stop(ctx context.Context, streamID string) error {
 	return e.streamBroker.Stop(ctx, streamID)
 }
 
-// StreamBroker returns the broker the agent streams through, for callers
-// that need the run's channel directly — rejoining a stream in flight, or
-// folding a turn into a live run (see RunClaimBroker).
+// contextUsageChunk reports the run's current context token count.
+func (e *Agent) contextUsageChunk(runID string, tokens int) *responses.ResponseChunk {
+	return &responses.ResponseChunk{OfContextUsage: &responses.ChunkContextUsage[constants.ChunkTypeContextUsage]{
+		RunID:     runID,
+		AgentName: e.Name,
+		Tokens:    tokens,
+	}}
+}
+
 // StickyHandoff reports whether a new turn resumes in the specialist a prior
 // turn ended in, rather than re-entering this agent.
 //
@@ -317,6 +328,9 @@ func (e *Agent) SingleTurn() bool {
 	return e.singleTurn
 }
 
+// StreamBroker returns the broker the agent streams through, for callers
+// that need the run's channel directly — rejoining a stream in flight, or
+// folding a turn into a live run (see RunClaimBroker).
 func (e *Agent) StreamBroker() StreamBroker {
 	return e.streamBroker
 }
@@ -331,9 +345,12 @@ func (e *Agent) ToolExecutor() ToolExecutor {
 type AgentInput struct {
 	// GroupID groups new conversations within a namespace (for example a routine or project). Empty selects "default".
 	GroupID string `json:"group_id,omitempty"`
-	// Skills selects opt-in skills by name for this execution, including resumes.
+	// Skills disables user-owned skills by name for this execution, including resumes.
 	Skills SkillSelection `json:"skills,omitempty"`
 	MCP    MCPSelection   `json:"mcp,omitempty"`
+	// ClientTools are tools the client runs itself for this execution,
+	// including resumes. Server-side tools win name collisions.
+	ClientTools []ClientToolDefinition `json:"client_tools,omitempty"`
 	// RunID optionally identifies this execution. History generates one when omitted.
 	RunID         string          `json:"run_id,omitempty"`
 	Namespace     string          `json:"namespace"`
@@ -412,7 +429,14 @@ func (e *Agent) ExecuteLocal(ctx context.Context, in *AgentInput) (output *Agent
 	}
 
 	// Add the incoming message to the run
-	run.AddMessages(ctx, in.Message)
+	run.AddMessages(ctx, in.Message, history.AsInput())
+
+	// A turn made only of tool outputs that answer nothing — a client tool's
+	// result arriving after its run moved on — leaves the model nothing to
+	// respond to, so the run ends without calling it.
+	if run.OnlyStaleToolOutputs() {
+		run.RunState.TransitionToComplete()
+	}
 
 	runId := run.GetRunID()
 
@@ -522,6 +546,10 @@ func (e *Agent) ExecuteWithRun(ctx context.Context, in *AgentInput, run *history
 		return &AgentOutput{Status: agentstate.RunStatusError, RunID: run.GetRunID()}, err
 	}
 	tools = append(tools, mcpTools...)
+	tools, err = e.prepareClientTools(ctx, in, tools)
+	if err != nil {
+		return &AgentOutput{Status: agentstate.RunStatusError, RunID: run.GetRunID()}, err
+	}
 
 	// Create tool schemas for input payload
 	var toolDefs []responses.ToolUnion
@@ -787,6 +815,9 @@ func (e *Agent) ExecuteWithRun(ctx context.Context, in *AgentInput, run *history
 
 			// Track the LLM's usage
 			run.TrackUsage(resp.Usage)
+			if resp.Usage != nil {
+				publish(e.contextUsageChunk(runId, run.ContextTokens()))
+			}
 
 			// Convert output to input messages and add to history
 			inputMsgs := []responses.InputMessageUnion{}
@@ -897,6 +928,13 @@ func (e *Agent) ExecuteWithRun(ctx context.Context, in *AgentInput, run *history
 				} else {
 					// Regular tool — queue for parallel execution
 					tool := findTool(tools, toolCall.Name)
+					if tool == nil && run.RunState.Interrupts[toolCall.CallID].Mode == responses.InterruptModeClientTool {
+						// A client tool the run paused on, resumed by a request that
+						// does not define it again (a result sent after a reload, an
+						// approval answered elsewhere): the client's answer still
+						// reaches it.
+						tool = e.clientToolStandIn(toolCall.Name)
+					}
 					if tool == nil {
 						slog.ErrorContext(ctx, "tool not found", slog.String("tool_name", toolCall.Name))
 						toolResults[i] = toolResponse(toolCall, "Tool not found: "+toolCall.Name)

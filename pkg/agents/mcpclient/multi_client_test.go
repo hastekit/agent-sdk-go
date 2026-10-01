@@ -111,7 +111,7 @@ func TestClientGlobalPrecedenceSelectionAndExecution(t *testing.T) {
 	output, err = client.CallTool(t.Context(), tools[0].GetToolDescriptor(), call)
 	require.NoError(t, err)
 	require.Contains(t, *output.Output.OfString, "global")
-	statuses, tools, err = client.ListTools(t.Context(), "alice", nil, agents.MCPSelection{Enable: []string{"private"}, Disable: []string{"docs", "private"}})
+	statuses, tools, err = client.ListTools(t.Context(), "alice", nil, agents.MCPSelection{Disable: []string{"docs", "private"}})
 	require.NoError(t, err)
 	require.Len(t, tools, 2, "global tools remain enabled despite the disable selection")
 	require.Equal(t, []agents.ConnectorStatus{agents.ConnectedConnectorStatus("docs", 2)}, statuses)

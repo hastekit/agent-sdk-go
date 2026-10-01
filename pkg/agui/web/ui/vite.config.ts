@@ -11,9 +11,7 @@ import { resolve } from "node:path";
 //                       UI works whether served at "/" or behind a
 //                       sub-path.
 //   emptyOutDir: true → static/ is wiped and regenerated each build;
-//                       basic.html survives because it lives in
-//                       public/ and Vite copies public/* into the
-//                       output.
+//                       Vite copies public/* into the output.
 export default defineConfig({
   plugins: [react()],
   base: "./",
@@ -33,6 +31,9 @@ export default defineConfig({
       // showDevConsole is true; we never enable it. Stub it out.
       "@copilotkit/web-inspector": resolve(__dirname, "src/web-inspector-stub.ts"),
     },
+    // @hastekit/copilotkit is linked from the workspace and imports these as
+    // peers. One copy each: a second CopilotKit or React would split context.
+    dedupe: ["react", "react-dom", "@copilotkit/react-core", "@ag-ui/client", "@ag-ui/core", "rxjs"],
   },
   build: {
     outDir: resolve(__dirname, "../static"),
