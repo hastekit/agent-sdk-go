@@ -392,7 +392,9 @@ export class ChatController {
       // A thread left waiting on this client's tools — by a page that went
       // away before answering — is answered now rather than staying paused.
       if (page.run?.pendingToolCallIds?.length)
-        void this.answerClientTools(page.run.pendingToolCallIds).catch(() => {});
+        void this.answerClientTools(page.run.pendingToolCallIds).catch(
+          () => {},
+        );
     } catch (error) {
       if (generation !== this.generation || signal.aborted) return;
       this.update({ error: asError(error), loadingMessages: false });
@@ -718,7 +720,9 @@ export class ChatController {
     results: ToolResult[],
   ): Promise<void> {
     if (generation === this.generation) {
-      results = results.filter((r) => !this.resumedClientCalls.has(r.toolCallId));
+      results = results.filter(
+        (r) => !this.resumedClientCalls.has(r.toolCallId),
+      );
       if (!results.length) return;
       for (const r of results) this.resumedClientCalls.add(r.toolCallId);
     }

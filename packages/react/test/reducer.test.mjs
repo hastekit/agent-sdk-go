@@ -45,10 +45,21 @@ test("interrupts and compaction are exposed as renderable state", () => {
   // A success that leaves tool calls unanswered left them for the client,
   // whether or not the outcome names them; a plain success clears the run.
   reducer.apply({ type: "RUN_STARTED", runId: "r2" });
-  reducer.apply({ type: "TOOL_CALL_START", toolCallId: "c1", toolCallName: "x" });
-  reducer.apply({ type: "TOOL_CALL_START", toolCallId: "c2", toolCallName: "y" });
+  reducer.apply({
+    type: "TOOL_CALL_START",
+    toolCallId: "c1",
+    toolCallName: "x",
+  });
+  reducer.apply({
+    type: "TOOL_CALL_START",
+    toolCallId: "c2",
+    toolCallName: "y",
+  });
   reducer.apply({ type: "TOOL_CALL_RESULT", toolCallId: "c2", content: "ok" });
-  const derived = reducer.apply({ type: "RUN_FINISHED", outcome: { type: "success" } });
+  const derived = reducer.apply({
+    type: "RUN_FINISHED",
+    outcome: { type: "success" },
+  });
   assert.equal(derived.run.status, "paused");
   assert.deepEqual(derived.run.pendingToolCallIds, ["c1"]);
   const named = reducer.apply({

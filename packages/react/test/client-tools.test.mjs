@@ -117,7 +117,12 @@ test("replayed tool calls that were answered never run the handler", async () =>
     transport: transport({
       stream: async function* () {
         yield* toolCall;
-        yield { type: "TOOL_CALL_RESULT", messageId: "m", toolCallId: "c1", content: "earlier" };
+        yield {
+          type: "TOOL_CALL_RESULT",
+          messageId: "m",
+          toolCallId: "c1",
+          content: "earlier",
+        };
         yield { type: "RUN_FINISHED", outcome: { type: "success" } };
       },
     }),
@@ -150,7 +155,9 @@ test("a joined run left waiting on a client tool is answered once", async () => 
   await controller.connect();
   assert.equal(calls.length, 1);
   assert.deepEqual(
-    inputs.filter(Boolean).map((input) => input.messages.map((m) => [m.role, m.toolCallId])),
+    inputs
+      .filter(Boolean)
+      .map((input) => input.messages.map((m) => [m.role, m.toolCallId])),
     [[["tool", "c1"]]],
   );
 });
@@ -193,7 +200,11 @@ function slowTool(calls, done) {
 // Tool messages sent through the fire-and-forget path, by thread.
 function sentResults(sent) {
   return async (_agent, thread, input) => {
-    sent.push([thread, input.threadId, input.messages.map((m) => [m.role, m.toolCallId, m.content])]);
+    sent.push([
+      thread,
+      input.threadId,
+      input.messages.map((m) => [m.role, m.toolCallId, m.content]),
+    ]);
   };
 }
 
@@ -242,7 +253,10 @@ test("a mixed pause still gets the client tool's result", async () => {
         // The run waits on a person for another call; the client tool is left unanswered.
         yield {
           type: "RUN_FINISHED",
-          outcome: { type: "interrupt", interrupts: [{ id: "c2", reason: "tool_call", toolCallId: "c2" }] },
+          outcome: {
+            type: "interrupt",
+            interrupts: [{ id: "c2", reason: "tool_call", toolCallId: "c2" }],
+          },
         };
       },
     }),
@@ -265,7 +279,12 @@ test("a turn folded into another run does not re-run that run's tools", async ()
         // The POST joined a run another tab started; its replay follows.
         options.onFolded?.();
         yield* toolCall;
-        yield { type: "TOOL_CALL_RESULT", messageId: "m", toolCallId: "c1", content: "answered there" };
+        yield {
+          type: "TOOL_CALL_RESULT",
+          messageId: "m",
+          toolCallId: "c1",
+          content: "answered there",
+        };
         yield { type: "RUN_FINISHED", outcome: { type: "success" } };
       },
     }),
@@ -289,7 +308,10 @@ test("a result is sent to its own conversation after the user switched away", as
           // Also waiting on a person, so the turn ends without waiting on the tool.
           yield {
             type: "RUN_FINISHED",
-            outcome: { type: "interrupt", interrupts: [{ id: "c2", reason: "tool_call", toolCallId: "c2" }] },
+            outcome: {
+              type: "interrupt",
+              interrupts: [{ id: "c2", reason: "tool_call", toolCallId: "c2" }],
+            },
           };
         }
       },
@@ -318,10 +340,20 @@ test("opening a thread paused on a client tool answers it", async () => {
           {
             id: "a1",
             role: "assistant",
-            toolCalls: [{ id: "c1", type: "function", function: { name: "get_selection", arguments: '{"max":3}' } }],
+            toolCalls: [
+              {
+                id: "c1",
+                type: "function",
+                function: { name: "get_selection", arguments: '{"max":3}' },
+              },
+            ],
           },
         ],
-        run: { status: "paused", awaitingApproval: false, pendingToolCallIds: ["c1"] },
+        run: {
+          status: "paused",
+          awaitingApproval: false,
+          pendingToolCallIds: ["c1"],
+        },
         nextCursor: "",
         sessionId: "t",
       }),
@@ -333,7 +365,10 @@ test("opening a thread paused on a client tool answers it", async () => {
   });
   await controller.selectThread("t");
   await until(() => inputs.some(Boolean));
-  assert.deepEqual(calls.map((c) => c[1]), ["c1"]);
+  assert.deepEqual(
+    calls.map((c) => c[1]),
+    ["c1"],
+  );
   assert.deepEqual(
     inputs.find(Boolean).messages.map((m) => [m.role, m.toolCallId]),
     [["tool", "c1"]],
