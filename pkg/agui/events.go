@@ -543,16 +543,13 @@ const (
 	CustomNameSummarizationStarted   = "hastekit.summarization_started"
 	CustomNameSummarizationCompleted = "hastekit.summarization_completed"
 
-	// Context usage: how full the context window is, after each model call.
+	// Context usage: the context token count after each model call.
 	// The value is a ContextUsage.
 	CustomNameContextUsage = "hastekit.context_usage"
 )
 
-// ContextUsage is how full a thread's context window is: the tokens the next
-// prompt starts from, against the agent's configured window. Window is omitted
-// when unknown.
+// ContextUsage is the number of tokens the next prompt starts from.
 type ContextUsage struct {
 	Tokens    int    `json:"tokens"`
-	Window    int    `json:"window,omitempty"`
 	AgentName string `json:"agentName,omitempty"`
 }

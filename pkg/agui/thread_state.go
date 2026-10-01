@@ -53,9 +53,9 @@ type ThreadBackgroundTask struct {
 	StartedAt string `json:"startedAt,omitempty"`
 }
 
-// threadContextUsage reads how full the context window was when the thread's
-// last run ended, for a page that has no run to hear it from. Nil for a thread
-// with no measured model call. The limits are the agent's being asked.
+// threadContextUsage reads the context token count when the thread's last run
+// ended, for a page that has no run to hear it from. Nil for a thread with no
+// stored context usage.
 func threadContextUsage(rows []history.ConversationMessage, agent *agents.Agent) *ContextUsage {
 	if len(rows) == 0 {
 		return nil
@@ -68,7 +68,7 @@ func threadContextUsage(rows []history.ConversationMessage, agent *agents.Agent)
 	if tokens <= 0 {
 		return nil
 	}
-	return &ContextUsage{Tokens: tokens, Window: agent.ContextWindow(), AgentName: agent.Name}
+	return &ContextUsage{Tokens: tokens, AgentName: agent.Name}
 }
 
 // threadRunState reads the state of the last run in a transcript.

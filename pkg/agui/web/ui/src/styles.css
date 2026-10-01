@@ -763,7 +763,7 @@ body {
 .mcp-connect:hover { background: #414141; }
 @media (max-width: 640px) { .mcp-header-row { grid-template-columns: 1fr; } }
 
-/* How full the context window is, directly under the composer box, in the
+/* The current context token count, directly under the composer box, in the
    slot CopilotKit keeps for its disclaimer. The input overlay takes no
    pointer events; the meter takes them back for its tooltip. Mirrors the
    composer's width, right-aligned under the send button. */
@@ -783,30 +783,6 @@ body {
    its top padding so the two read as one footer. */
 .app .composer-disclaimer {
   padding-top: 4px;
-}
-.context-meter-bar {
-  width: 72px;
-  height: 4px;
-  border-radius: 2px;
-  background: var(--hk-raised);
-}
-.context-meter-fill {
-  height: 100%;
-  border-radius: inherit;
-  background: var(--hk-muted);
-  transition: width 0.3s ease;
-}
-.context-meter[data-level="warn"] .context-meter-fill {
-  background: var(--hk-warn);
-}
-.context-meter[data-level="warn"] .context-meter-label {
-  color: var(--hk-warn);
-}
-.context-meter[data-level="critical"] .context-meter-fill {
-  background: var(--destructive, #f7768e);
-}
-.context-meter[data-level="critical"] .context-meter-label {
-  color: var(--destructive, #f7768e);
 }
 /* The OAuth app a user brings for themselves, folded away by default: most
    servers register the app themselves. */

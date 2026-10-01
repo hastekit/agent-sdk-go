@@ -371,7 +371,6 @@ func (t *Translator) Translate(chunk *responses.ResponseChunk) []Event {
 	if event := chunk.OfContextUsage; event != nil {
 		return []Event{&CustomEvent{BaseEvent: baseNow(), Name: CustomNameContextUsage, Value: ContextUsage{
 			Tokens:    event.Tokens,
-			Window:    event.Window,
 			AgentName: event.AgentName,
 		}}}
 	}

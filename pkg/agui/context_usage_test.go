@@ -14,16 +14,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Each model call reports how full the context is, against the agent's window;
-// a page that loads the thread later reads
-// the same figure from the history endpoint.
+// Each model call reports the context token count; a page that loads the
+// thread later reads the same figure from the history endpoint.
 func TestContextUsageIsStreamedAndStored(t *testing.T) {
 	reply := assistantTextResponse("hi")
 	reply.Usage = &responses.Usage{InputTokens: 1200, OutputTokens: 34, TotalTokens: 1234}
 	agent := agents.NewAgent(&agents.AgentOptions{
-		Name:          "Helper",
-		History:       history.NewConversationManager(history.NewInMemoryConversationPersistence()),
-		ContextWindow: 200_000,
+		Name:    "Helper",
+		History: history.NewConversationManager(history.NewInMemoryConversationPersistence()),
 	}).WithLLM(&scriptedLLM{steps: []scriptedStep{{response: reply}}})
 
 	server := httptest.NewServer(NewHandler(registry{"Helper": agent}))
@@ -40,17 +38,16 @@ func TestContextUsageIsStreamedAndStored(t *testing.T) {
 		}
 	}
 	require.Len(t, usage, 1, "one model call, one report")
-	assert.Equal(t, map[string]any{"tokens": 1234.0, "window": 200_000.0, "agentName": "Helper"}, usage[0])
+	assert.Equal(t, map[string]any{"tokens": 1234.0, "agentName": "Helper"}, usage[0])
 
 	loaded := getThreadMessagesWithContext(t, server, "Helper", "thread-context")
 	require.NotNil(t, loaded.Context)
-	assert.Equal(t, ContextUsage{Tokens: 1234, Window: 200_000, AgentName: "Helper"}, *loaded.Context)
+	assert.Equal(t, ContextUsage{Tokens: 1234, AgentName: "Helper"}, *loaded.Context)
 }
 
-// A provider that reports no usage gives the run nothing to stream, and an
-// agent with no window configured reports none; the stored figure is then the
-// estimate of what the thread holds.
-func TestContextUsageWithoutMeasurementOrWindow(t *testing.T) {
+// A provider that reports no usage gives the run nothing to stream; the
+// stored figure is then the estimate of what the thread holds.
+func TestContextUsageWithoutMeasurement(t *testing.T) {
 	agent := agents.NewAgent(&agents.AgentOptions{
 		Name:    "Helper",
 		History: history.NewConversationManager(history.NewInMemoryConversationPersistence()),
@@ -68,13 +65,12 @@ func TestContextUsageWithoutMeasurementOrWindow(t *testing.T) {
 	loaded := getThreadMessagesWithContext(t, server, "Helper", "thread-unmeasured")
 	require.NotNil(t, loaded.Context)
 	assert.Positive(t, loaded.Context.Tokens)
-	assert.Zero(t, loaded.Context.Window)
 }
 
 // The chunk crosses the Redis broker and durable boundaries as JSON.
 func TestContextUsageChunkRoundTrips(t *testing.T) {
 	chunk := &responses.ResponseChunk{OfContextUsage: &responses.ChunkContextUsage[constants.ChunkTypeContextUsage]{
-		RunID: "run", AgentName: "Helper", Tokens: 42, Window: 1000,
+		RunID: "run", AgentName: "Helper", Tokens: 42,
 	}}
 	data, err := sonic.Marshal(chunk)
 	require.NoError(t, err)

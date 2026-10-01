@@ -46,13 +46,10 @@ export interface ThreadRunState {
 }
 
 /**
- * How full a thread's context window is: the tokens the next prompt starts
- * from, against the agent's configured window (`AgentConfig.ContextWindow`).
- * The window is absent when the server does not know it.
+ * A thread's current context size: the tokens the next prompt starts from.
  */
 export interface ContextUsage {
   tokens: number;
-  window?: number;
   agentName?: string;
 }
 
@@ -62,7 +59,7 @@ export interface ThreadPage {
   /** What the thread's last run left outstanding, or null when it is settled. */
   run: ThreadRunState | null;
   /**
-   * How full the context window was when the last run ended, or null for a
+   * The context token count when the last run ended, or null for a
    * thread with nothing in it yet. Runs report it live as `ContextUsage` events.
    */
   context: ContextUsage | null;
@@ -97,6 +94,6 @@ export const HastekitEvent = {
   BackgroundTaskCompleted: "hastekit.background_task_completed",
   SummarizationStarted: "hastekit.summarization_started",
   SummarizationCompleted: "hastekit.summarization_completed",
-  /** How full the context window is, after each model call. The value is a `ContextUsage`. */
+  /** The context token count after each model call. The value is a `ContextUsage`. */
   ContextUsage: "hastekit.context_usage",
 } as const;

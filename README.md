@@ -769,20 +769,12 @@ above the client tool timeout. The embedded UI ships one browser tool, `get_brow
 
 #### Context usage
 
-After each model call the run reports how full the context window is, as a
-`hastekit.context_usage` CUSTOM event: `{tokens, window, agentName}`. `tokens`
-is what the next prompt starts from (the call's measured prompt and reply). The
-SDK knows no model's window, so `window` comes from `AgentConfig.ContextWindow`
-and is omitted without it. The thread messages endpoint returns the
-last figure as `context`, for a page that has just loaded. The embedded UI
-shows it as a meter under the composer.
-
-```go
-hastekit.AgentConfig{
-    // Reported only; nothing is limited by it.
-    ContextWindow: 200_000,
-}
-```
+After each model call the run reports the current context size as a
+`hastekit.context_usage` CUSTOM event: `{tokens, agentName}`. `tokens`
+is what the next prompt starts from (the call's measured prompt and reply).
+The thread messages endpoint returns the last figure as `context`, for a page
+that has just loaded. The embedded UI shows the token count under the composer,
+for example `9.1k tokens in context`.
 
 #### CopilotKit
 

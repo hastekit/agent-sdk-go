@@ -16,7 +16,7 @@ type ResponseChunk struct {
 	OfSummarizationStarted   *ChunkSummarization[constants.ChunkTypeSummarizationStarted]   `json:",omitempty"`
 	OfSummarizationCompleted *ChunkSummarization[constants.ChunkTypeSummarizationCompleted] `json:",omitempty"`
 
-	// OfContextUsage reports how full the context window is, after each model call.
+	// OfContextUsage reports the context token count after each model call.
 	OfContextUsage *ChunkContextUsage[constants.ChunkTypeContextUsage] `json:",omitempty"`
 
 	// OfError is a terminal provider or transport failure. It survives broker
@@ -1050,15 +1050,13 @@ type ChunkResponseUsage struct {
 	TotalTokens int `json:"total_tokens"`
 }
 
-// ChunkContextUsage reports how full the run's context window is: the tokens
-// the next prompt starts from (the last call's measured prompt and reply),
-// against the agent's configured window. Window is zero when not known.
+// ChunkContextUsage reports the tokens the next prompt starts from
+// (the last call's measured prompt and reply).
 type ChunkContextUsage[T any] struct {
 	Type      T      `json:"type"`
 	RunID     string `json:"run_id"`
 	AgentName string `json:"agent_name"`
 	Tokens    int    `json:"tokens"`
-	Window    int    `json:"window,omitempty"`
 }
 
 // ChunkSummarization brackets a summarizer invocation. Compacted distinguishes

@@ -76,11 +76,7 @@ type AgentOptions struct {
 	// skills share the read_skill tool.
 	SkillClient SkillClient
 	// ClientTools configures how runs wait for tools the client runs itself.
-	ClientTools ClientToolOptions
-	// ContextWindow is the model's context window in tokens, for reporting
-	// how full it is (see ContextWindow). The SDK does not know any model's
-	// window, and nothing is limited by it; zero reports usage without one.
-	ContextWindow int
+	ClientTools   ClientToolOptions
 	MCPClient     MCPClient
 	Runtime       Runtime
 	MaxLoops      *int
@@ -307,32 +303,21 @@ func (e *Agent) Stop(ctx context.Context, streamID string) error {
 	return e.streamBroker.Stop(ctx, streamID)
 }
 
-// StreamBroker returns the broker the agent streams through, for callers
-// that need the run's channel directly — rejoining a stream in flight, or
-// folding a turn into a live run (see RunClaimBroker).
+// contextUsageChunk reports the run's current context token count.
+func (e *Agent) contextUsageChunk(runID string, tokens int) *responses.ResponseChunk {
+	return &responses.ResponseChunk{OfContextUsage: &responses.ChunkContextUsage[constants.ChunkTypeContextUsage]{
+		RunID:     runID,
+		AgentName: e.Name,
+		Tokens:    tokens,
+	}}
+}
+
 // StickyHandoff reports whether a new turn resumes in the specialist a prior
 // turn ended in, rather than re-entering this agent.
 //
 // Exported for the same reason StreamBroker and History are: a durable runtime
 // rebuilds the agent on the far side of a boundary, and something has to be
 // able to check that what it rebuilt is what was configured.
-// ContextWindow reports the context window the agent was configured with, or
-// zero when none was.
-func (e *Agent) ContextWindow() int {
-	return e.options.ContextWindow
-}
-
-// contextUsageChunk reports how full the run's context is, measured against
-// this agent's limits: after a handoff that is the specialist's model.
-func (e *Agent) contextUsageChunk(runID string, tokens int) *responses.ResponseChunk {
-	return &responses.ResponseChunk{OfContextUsage: &responses.ChunkContextUsage[constants.ChunkTypeContextUsage]{
-		RunID:     runID,
-		AgentName: e.Name,
-		Tokens:    tokens,
-		Window:    e.ContextWindow(),
-	}}
-}
-
 func (e *Agent) StickyHandoff() bool {
 	return e.stickyHandoff
 }
@@ -343,6 +328,9 @@ func (e *Agent) SingleTurn() bool {
 	return e.singleTurn
 }
 
+// StreamBroker returns the broker the agent streams through, for callers
+// that need the run's channel directly — rejoining a stream in flight, or
+// folding a turn into a live run (see RunClaimBroker).
 func (e *Agent) StreamBroker() StreamBroker {
 	return e.streamBroker
 }

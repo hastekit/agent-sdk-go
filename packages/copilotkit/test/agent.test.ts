@@ -368,7 +368,7 @@ describe("REST helpers", () => {
       return Response.json({
         messages: [user("u1")],
         run: { awaitingApproval: true },
-        context: { tokens: 1234, window: 200000 },
+        context: { tokens: 1234 },
         nextCursor: "older",
       });
     };
@@ -380,7 +380,7 @@ describe("REST helpers", () => {
       nextCursor: "older",
       sessionId: "thread",
       run: { awaitingApproval: true },
-      context: { tokens: 1234, window: 200000 },
+      context: { tokens: 1234 },
     });
   });
 

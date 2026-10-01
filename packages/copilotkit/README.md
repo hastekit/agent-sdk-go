@@ -83,9 +83,8 @@ agent.prependMessages(older.messages);
 ```
 
 `page.run` says what the thread's last run left outstanding: interrupts waiting
-on the user, and background tasks still working. `page.context` says how full
-the context window was when that run ended (`ContextUsage`: tokens, and the
-agent's window when the server knows it); runs report it
+on the user, and background tasks still working. `page.context` reports the
+context token count when that run ended (`ContextUsage`); runs report it
 live after each model call as `HastekitEvent.ContextUsage`.
 
 ## Interrupts
