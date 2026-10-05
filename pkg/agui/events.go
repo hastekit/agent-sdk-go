@@ -142,7 +142,53 @@ type RunFinishedEvent struct {
 	BaseEvent
 	ThreadID string `json:"threadId"`
 	RunID    string `json:"runId"`
-	Result   any    `json:"result,omitempty"`
+	// Outcome says how the run ended (AG-UI 1.0); absent means success.
+	Outcome *RunFinishedOutcome `json:"outcome,omitempty"`
+	Usage   []TokenUsage        `json:"usage,omitempty"`
+}
+
+// Run outcome types (AG-UI 1.0).
+const (
+	OutcomeSuccess   = "success"
+	OutcomeInterrupt = "interrupt"
+)
+
+// RunFinishedOutcome is how a run that did not fail ended. A success may leave
+// tool calls unanswered for the client (client tools), answered in the next
+// run's messages; an interrupt lists what the run is waiting on a person for,
+// answered by the next run's resume entries.
+type RunFinishedOutcome struct {
+	Type       string      `json:"type"`
+	Interrupts []Interrupt `json:"interrupts,omitempty"`
+}
+
+// Interrupt is one open pause (AG-UI 1.0). ID is the paused tool call's id, so
+// a resume entry's interruptId names the call it answers.
+type Interrupt struct {
+	ID             string         `json:"id"`
+	Reason         string         `json:"reason"`
+	Message        string         `json:"message,omitempty"`
+	ToolCallID     string         `json:"toolCallId,omitempty"`
+	ResponseSchema map[string]any `json:"responseSchema,omitempty"`
+	ExpiresAt      string         `json:"expiresAt,omitempty"`
+	Metadata       map[string]any `json:"metadata,omitempty"`
+}
+
+// Interrupt reasons (AG-UI 1.0).
+const (
+	InterruptReasonToolCall      = "tool_call"
+	InterruptReasonInputRequired = "input_required"
+)
+
+// TokenUsage is a run's token accounting (AG-UI 1.0).
+type TokenUsage struct {
+	Provider          string `json:"provider,omitempty"`
+	Model             string `json:"model,omitempty"`
+	InputTokens       int    `json:"inputTokens,omitempty"`
+	OutputTokens      int    `json:"outputTokens,omitempty"`
+	TotalTokens       int    `json:"totalTokens,omitempty"`
+	ReasoningTokens   int    `json:"reasoningTokens,omitempty"`
+	CachedInputTokens int    `json:"cachedInputTokens,omitempty"`
 }
 
 func (e *RunFinishedEvent) EventType() EventType { return EventRunFinished }
@@ -476,19 +522,11 @@ func (e *CustomEvent) Marshal() ([]byte, error) {
 	return json.Marshal(e)
 }
 
-// Custom event names. AG-UI 0.0.53 has no native INTERRUPT event
-// type; the de-facto standard (used by CopilotKit's useInterrupt
-// middleware and LangGraph's interrupt protocol) is a CUSTOM event named
-// "on_interrupt" carrying an application-defined value payload,
-// with the run terminated via RUN_FINISHED immediately after so the
-// onRunFinalized middleware fires. The resume contract uses
-// forwardedProps.command.resume on the next POST.
-//
-// Everything else stays under the "hastekit.*" namespace so AG-UI-
-// strict clients can ignore them without breaking on unknown
-// custom events.
+// Custom event names. They stay under the "hastekit.*" namespace so
+// AG-UI-strict clients can ignore them without breaking on unknown custom
+// events. Pauses are not custom events: they end the run with an AG-UI 1.0
+// interrupt outcome on RUN_FINISHED.
 const (
-	CustomNameInterrupt     = "on_interrupt"
 	CustomNameFileGenerated = "hastekit.file_generated"
 	CustomNameAnnotation    = "hastekit.annotation"
 	CustomNameStreamID      = "hastekit.stream_id"
@@ -504,4 +542,14 @@ const (
 const (
 	CustomNameSummarizationStarted   = "hastekit.summarization_started"
 	CustomNameSummarizationCompleted = "hastekit.summarization_completed"
+
+	// Context usage: the context token count after each model call.
+	// The value is a ContextUsage.
+	CustomNameContextUsage = "hastekit.context_usage"
 )
+
+// ContextUsage is the number of tokens the next prompt starts from.
+type ContextUsage struct {
+	Tokens    int    `json:"tokens"`
+	AgentName string `json:"agentName,omitempty"`
+}

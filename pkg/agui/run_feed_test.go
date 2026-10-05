@@ -41,11 +41,16 @@ func TestRunFeedReportsAConversationTheClientIsNotIn(t *testing.T) {
 
 	server := httptest.NewServer(NewHandler(registry{"Helper": agent}))
 	defer server.Close()
+	// Released before the server closes (defers run last-first), or a failure
+	// below would leave the run holding a connection that Close waits on.
+	defer close(gate.release)
 
-	// Watching the namespace, from now, while sitting in no conversation.
+	// Watching the namespace, from now, while sitting in no conversation. The
+	// cursor is taken first, so the run cannot start before the watch does.
+	now := getFeed(t, server.URL+"/agents/Helper/runs?wait=0")
 	watched := make(chan FeedResponse, 1)
 	go func() {
-		watched <- getFeed(t, server.URL+"/agents/Helper/runs?wait=20s")
+		watched <- getFeed(t, server.URL+"/agents/Helper/runs?wait=20s&cursor="+url.QueryEscape(now.Cursor))
 	}()
 
 	// Something happens in conversation A.
@@ -70,8 +75,6 @@ func TestRunFeedReportsAConversationTheClientIsNotIn(t *testing.T) {
 	assert.Equal(t, agents.StreamIDForThread("default", "conversation-a"), out.Events[0].StreamID,
 		"so a client can attach without deriving anything")
 	assert.NotEmpty(t, out.Cursor, "where to resume")
-
-	close(gate.release)
 }
 
 // A run reports both ends, so a sidebar badge can go up and come down again.

@@ -4,8 +4,11 @@ import type {
   ChatEvent,
   ChatOptions,
   ChatSnapshot,
+  ClientTool,
   ContentPart,
+  MCPServerConfig,
   Message,
+  ResumeEntry,
   RunInput,
 } from "./types.js";
 
@@ -18,9 +21,13 @@ function asError(value: unknown): Error {
 export class ChatController {
   private snapshot: ChatSnapshot = {
     skills: [],
-    skillSelection: { enable: [], disable: [] },
+    skillSelection: { disable: [] },
     loadingSkills: false,
     skillsError: null,
+    mcpServers: [],
+    mcpSelection: { disable: [] },
+    loadingMCPServers: false,
+    mcpServersError: null,
     threads: [],
     threadsSupported: true,
     loadingThreads: false,
@@ -47,7 +54,7 @@ export class ChatController {
   private streamId?: string;
   private selectionAbort = new AbortController();
   private skillsAbort?: AbortController;
-  private skillDefaults = new Map<string, boolean>();
+  private mcpAbort?: AbortController;
   private listAbort?: AbortController;
   private streamAbort?: AbortController;
   private feedAbort?: AbortController;
@@ -83,6 +90,7 @@ export class ChatController {
     this.mounted = true;
     void this.refreshThreads().catch(() => {});
     void this.refreshSkills().catch(() => {});
+    void this.refreshMCPServers().catch(() => {});
     // Restore the initial selection once, including effect replay in development mode.
     if (!this.initialized) {
       this.initialized = true;
@@ -100,13 +108,23 @@ export class ChatController {
       this.feedAbort?.abort();
       this.listAbort?.abort();
       this.skillsAbort?.abort();
+      this.mcpAbort?.abort();
       this.resetSelection();
     };
   };
 
+  // Client tool results for the selected conversation, by call id: a handler
+  // runs once per call, however many runs or rejoins see the call.
+  private clientToolResults = new Map<string, Promise<ToolResult>>();
+  // Calls whose results have already resumed the conversation. A call is
+  // resumed once: a run that pauses on it again is not answered in a loop.
+  private resumedClientCalls = new Set<string>();
+
   // Invalidate asynchronous work before replacing the visible conversation.
   private resetSelection(): number {
     this.generation++;
+    this.clientToolResults = new Map();
+    this.resumedClientCalls = new Set();
     this.selectionAbort.abort();
     this.selectionAbort = new AbortController();
     this.streamAbort?.abort();
@@ -159,30 +177,19 @@ export class ChatController {
     this.update({ loadingSkills: true, skillsError: null });
     try {
       const catalog =
-        (await this.options.transport.listSkills?.(
-          this.options.agent,
-          abort.signal,
-        )) ?? [];
+        (await this.options.transport.listSkills?.(abort.signal)) ?? [];
       if (abort.signal.aborted) return;
 
-      // Retain choices only for skills that remain available and optional.
-      this.skillDefaults = new Map(
-        catalog.map((skill) => [skill.name, skill.enabled]),
-      );
-      const optional = new Set(
-        catalog.filter((skill) => !skill.required).map((skill) => skill.name),
-      );
-      const selection = this.snapshot.skillSelection;
+      // Retain choices only for skills that still exist.
+      const available = new Set(catalog.map((skill) => skill.name));
       const skillSelection = {
-        enable: selection.enable.filter((name) => optional.has(name)),
-        disable: selection.disable.filter((name) => optional.has(name)),
+        disable: this.snapshot.skillSelection.disable.filter((name) =>
+          available.has(name),
+        ),
       };
       const skills = catalog.map((skill) => ({
         ...skill,
-        enabled:
-          !!skill.required ||
-          (!skillSelection.disable.includes(skill.name) &&
-            (skill.enabled || skillSelection.enable.includes(skill.name))),
+        enabled: !skillSelection.disable.includes(skill.name),
       }));
       this.update({ skills, skillSelection });
     } catch (error) {
@@ -195,40 +202,128 @@ export class ChatController {
     }
   };
 
-  // Apply composer choices to subsequent runs while preserving required skills.
+  // Apply composer choices to subsequent runs. Agents' global skills are not
+  // listed here and are always on.
   setSkillEnabled = (name: string, enabled: boolean): void => {
     const skill = this.snapshot.skills.find((item) => item.name === name);
     if (!skill) throw new Error(`Unknown skill: ${name}`);
-    if (skill.required && !enabled)
-      throw new Error(`Skill is required: ${name}`);
 
-    // Store only deviations from the catalog defaults.
-    const enable = this.snapshot.skillSelection.enable.filter(
-      (item) => item !== name,
-    );
+    // Every skill starts enabled, so the selection only records disabled ones.
     const disable = this.snapshot.skillSelection.disable.filter(
       (item) => item !== name,
     );
-    if (!skill.required && enabled !== this.skillDefaults.get(name))
-      (enabled ? enable : disable).push(name);
+    if (!enabled) disable.push(name);
     this.update({
-      skillSelection: { enable, disable },
+      skillSelection: { disable },
       skills: this.snapshot.skills.map((item) =>
         item.name === name ? { ...item, enabled } : item,
       ),
     });
   };
 
-  // Restore the server defaults without changing the selected conversation.
+  // Turn every skill back on without changing the selected conversation.
   resetSkills = (): void => {
     this.update({
-      skillSelection: { enable: [], disable: [] },
+      skillSelection: { disable: [] },
       skills: this.snapshot.skills.map((skill) => ({
         ...skill,
-        enabled: !!skill.required || !!this.skillDefaults.get(skill.name),
+        enabled: true,
       })),
     });
   };
+
+  // Refresh MCP servers independently of chat errors and discard stale responses.
+  refreshMCPServers = async (): Promise<void> => {
+    this.mcpAbort?.abort();
+    const abort = new AbortController();
+    this.mcpAbort = abort;
+    this.update({ loadingMCPServers: true, mcpServersError: null });
+    try {
+      const listed =
+        (await this.options.transport.mcp?.list(abort.signal)) ?? [];
+      if (abort.signal.aborted) return;
+
+      // Only the user's own servers can be turned off; drop choices for the rest.
+      const optional = new Set(
+        listed
+          .filter((server) => !!server.namespace)
+          .map((server) => server.name),
+      );
+      const mcpSelection = {
+        disable: this.snapshot.mcpSelection.disable.filter((name) =>
+          optional.has(name),
+        ),
+      };
+      const mcpServers = listed.map((server) => ({
+        ...server,
+        enabled:
+          !optional.has(server.name) ||
+          !mcpSelection.disable.includes(server.name),
+      }));
+      this.update({ mcpServers, mcpSelection });
+    } catch (error) {
+      if (!abort.signal.aborted) {
+        this.update({ mcpServersError: asError(error) });
+        throw error;
+      }
+    } finally {
+      if (!abort.signal.aborted) this.update({ loadingMCPServers: false });
+    }
+  };
+
+  // Apply composer choices to subsequent runs; global servers cannot be turned off.
+  setMCPServerEnabled = (name: string, enabled: boolean): void => {
+    const server = this.snapshot.mcpServers.find((item) => item.name === name);
+    if (!server) throw new Error(`Unknown MCP server: ${name}`);
+    if (!server.namespace && !enabled)
+      throw new Error(`MCP server is global and always enabled: ${name}`);
+    const disable = this.snapshot.mcpSelection.disable.filter(
+      (item) => item !== name,
+    );
+    if (!enabled) disable.push(name);
+    this.update({
+      mcpSelection: { disable },
+      mcpServers: this.snapshot.mcpServers.map((item) =>
+        item.name === name ? { ...item, enabled } : item,
+      ),
+    });
+  };
+
+  // Turn every MCP server back on without changing the selected conversation.
+  resetMCPServers = (): void => {
+    this.update({
+      mcpSelection: { disable: [] },
+      mcpServers: this.snapshot.mcpServers.map((server) => ({
+        ...server,
+        enabled: true,
+      })),
+    });
+  };
+
+  // Add or replace one of the user's servers, then reload the list.
+  saveMCPServer = async (
+    name: string,
+    config: MCPServerConfig,
+  ): Promise<void> => {
+    if (!this.options.transport.mcp)
+      throw new Error("MCP server management is not supported");
+    await this.options.transport.mcp.save(name, config);
+    await this.refreshMCPServers();
+  };
+
+  // Remove one of the user's servers and its OAuth grant, then reload the list.
+  removeMCPServer = async (name: string): Promise<void> => {
+    if (!this.options.transport.mcp)
+      throw new Error("MCP server management is not supported");
+    await this.options.transport.mcp.remove(name);
+    await this.refreshMCPServers();
+  };
+
+  // URLs for OAuth servers: open connectUrl in a new tab; register callbackUrl with the provider.
+  mcpConnectUrl = (name: string): string | undefined =>
+    this.options.transport.mcp?.connectUrl(name);
+  mcpCallbackUrl = (name: string): string | undefined =>
+    this.options.transport.mcp?.callbackUrl(name);
 
   // Allocate a local draft; the backend creates its persisted conversation on send.
   newThread = (): string => {
@@ -294,6 +389,12 @@ export class ChatController {
         loadingMessages: false,
       });
       void this.connect().catch(() => {});
+      // A thread left waiting on this client's tools — by a page that went
+      // away before answering — is answered now rather than staying paused.
+      if (page.run?.pendingToolCallIds?.length)
+        void this.answerClientTools(page.run.pendingToolCallIds).catch(
+          () => {},
+        );
     } catch (error) {
       if (generation !== this.generation || signal.aborted) return;
       this.update({ error: asError(error), loadingMessages: false });
@@ -342,18 +443,23 @@ export class ChatController {
       runId: this.id(),
       messages,
       state: this.snapshot.state,
-      tools: [],
+      tools: (this.options.clientTools ?? []).map((tool) => ({
+        name: tool.name,
+        description: tool.description ?? "",
+        parameters: tool.parameters ?? { type: "object", properties: {} },
+      })),
       context: this.options.context ?? [],
       forwardedProps: {
         ...this.options.forwardedProps,
-        ...(this.snapshot.skillSelection.enable.length ||
-        this.snapshot.skillSelection.disable.length
+        ...(this.snapshot.skillSelection.disable.length
           ? {
               skills: {
-                enable: [...this.snapshot.skillSelection.enable],
                 disable: [...this.snapshot.skillSelection.disable],
               },
             }
+          : {}),
+        ...(this.snapshot.mcpSelection.disable.length
+          ? { mcp: { disable: [...this.snapshot.mcpSelection.disable] } }
           : {}),
         ...forwardedProps,
       },
@@ -387,20 +493,19 @@ export class ChatController {
     await this.consume(this.input(messages, forwardedProps));
   };
 
-  // Resume an approval without adding a synthetic user message to the transcript.
-  resume = async (
-    decisions: { toolCallId: string; approved: boolean; content?: unknown }[],
-  ): Promise<void> => {
+  // Answer the run's open interrupts (AG-UI 1.0 resume entries) without adding a
+  // synthetic user message to the transcript. Answer every open interrupt at once.
+  resume = async (entries: ResumeEntry[]): Promise<void> => {
     if (!this.snapshot.threadId)
       throw new Error("Select a conversation before resuming");
     if (this.streamAbort || this.snapshot.loadingMessages)
       throw new Error(
         "Wait for the current stream or history load before resuming",
       );
-    if (!decisions.length)
-      throw new Error("At least one approval decision is required");
+    if (!entries.length)
+      throw new Error("At least one interrupt answer is required");
     this.update({ run: null });
-    await this.consume(this.input([], { command: { resume: { decisions } } }));
+    await this.consume({ ...this.input([]), resume: entries });
   };
 
   // Attach once to the selected conversation's current stream.
@@ -470,6 +575,20 @@ export class ChatController {
     this.streamId = undefined;
     const reducer = new EventReducer();
 
+    // A run this controller started runs its tools as their calls stream in,
+    // and sends each result at once: a run waiting for it takes it and carries
+    // on. A run it joined — or one its turn folded into — may be replaying
+    // calls already answered, so it only answers, when it ends, calls to this
+    // client's tools still left unanswered.
+    const clientTools = this.options.clientTools?.length
+      ? new ClientToolRun(
+          Boolean(input),
+          (toolCallId, name, args) =>
+            this.clientToolResult(thread, toolCallId, name, args),
+          (result) => this.sendToolResults(thread, [result]),
+        )
+      : undefined;
+
     // Wait for publication when the feed has already announced a running thread.
     const waitForRun = !input && this.snapshot.activeThreadIds.includes(thread);
     let sawEvent = false;
@@ -494,11 +613,13 @@ export class ChatController {
           onStatus: (connection) => {
             if (current()) this.update({ connection });
           },
+          onFolded: () => clientTools?.joined(),
         },
       );
       for await (const event of events) {
         if (!current()) return;
         sawEvent = true;
+        clientTools?.observe(event);
         this.applyEvent(reducer, event);
       }
       endedNormally = true;
@@ -558,6 +679,124 @@ export class ChatController {
         }
       }
     }
+
+    // A run paused only on this client's tools resumes with their results. If
+    // a result sent early already resumed it, the thread is running and this
+    // turn joins that run instead of starting another.
+    const pausedOn = endedNormally ? clientTools?.pausedOn() : undefined;
+    if (!pausedOn?.length) return;
+    await this.resumeWith(thread, generation, await Promise.all(pausedOn));
+  }
+
+  // Answers client tool calls the conversation is paused on, from the calls in
+  // its history. A handler runs once per call (see clientToolResults).
+  private async answerClientTools(toolCallIds: string[]): Promise<void> {
+    const thread = this.snapshot.threadId;
+    if (!thread || !this.options.clientTools?.length) return;
+    const generation = this.generation;
+    const wanted = new Set(toolCallIds);
+    const pending: Promise<ToolResult>[] = [];
+    for (const message of this.snapshot.messages) {
+      for (const call of message.toolCalls ?? []) {
+        if (!wanted.has(call.id)) continue;
+        const result = this.clientToolResult(
+          thread,
+          call.id,
+          call.function.name,
+          call.function.arguments,
+        );
+        if (result) pending.push(result);
+      }
+    }
+    if (!pending.length) return;
+    await this.resumeWith(thread, generation, await Promise.all(pending));
+  }
+
+  // Resumes a conversation with its tool results: as a run followed here when
+  // nothing else is streaming, otherwise sent for the run that is to take them.
+  private async resumeWith(
+    thread: string,
+    generation: number,
+    results: ToolResult[],
+  ): Promise<void> {
+    if (generation === this.generation) {
+      results = results.filter(
+        (r) => !this.resumedClientCalls.has(r.toolCallId),
+      );
+      if (!results.length) return;
+      for (const r of results) this.resumedClientCalls.add(r.toolCallId);
+    }
+    if (generation !== this.generation) {
+      // The user moved on; the paused conversation still gets its answer.
+      this.sendToolResults(thread, results);
+      return;
+    }
+    if (this.streamAbort) {
+      this.sendToolResults(thread, results);
+      return;
+    }
+    await this.consume(this.toolResultsInput(thread, results));
+  }
+
+  // Runs this client's tool for a call once, or returns undefined when the tool
+  // is not one of its own. Handlers see the conversation's signal, so leaving
+  // the conversation can cancel their work; its results are still sent.
+  private clientToolResult(
+    threadId: string,
+    toolCallId: string,
+    name: string,
+    argsText: string,
+  ): Promise<ToolResult> | undefined {
+    const cached = this.clientToolResults.get(toolCallId);
+    if (cached) return cached;
+    const tool = this.options.clientTools?.find((t) => t.name === name);
+    if (!tool) return undefined;
+    let args: unknown = {};
+    try {
+      args = JSON.parse(argsText || "{}");
+    } catch {
+      // Malformed arguments still reach the handler as an empty object.
+    }
+    const signal = this.selectionAbort.signal;
+    // A failing tool still answers, so the model can react instead of the run hanging.
+    const result = Promise.resolve()
+      .then(() => tool.handler(args, { toolCallId, threadId, signal }))
+      .then(
+        toolResultContent,
+        (error) =>
+          `Error: ${error instanceof Error ? error.message : String(error)}`,
+      )
+      .then((content) => ({ toolCallId, content }));
+    this.clientToolResults.set(toolCallId, result);
+    return result;
+  }
+
+  // Sends tool results as a turn without following the run it may start. Not
+  // tied to any stream: a result is worth delivering after the page moved on.
+  private sendToolResults(thread: string, results: ToolResult[]): void {
+    void this.options.transport
+      .sendToolResults?.(
+        this.options.agent,
+        thread,
+        this.toolResultsInput(thread, results),
+      )
+      .catch(() => {});
+  }
+
+  // A turn answering this client's tools on a conversation: their results as
+  // tool messages.
+  private toolResultsInput(thread: string, results: ToolResult[]): RunInput {
+    const toolMessages: Message[] = results.map((result) => ({
+      id: this.id(),
+      role: "tool",
+      toolCallId: result.toolCallId,
+      content: result.content,
+    }));
+    const history =
+      this.options.fullHistory && this.snapshot.threadId === thread
+        ? this.snapshot.messages
+        : [];
+    return { ...this.input([...history, ...toolMessages]), threadId: thread };
   }
 
   // Apply protocol state before notifying application observers.
@@ -625,5 +864,105 @@ export class ChatController {
         }
       }
     })();
+  }
+}
+
+// Results are text for the model; structured values travel as JSON.
+function toolResultContent(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (value === undefined) return "";
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+type ToolResult = { toolCallId: string; content: string };
+
+// ClientToolRun follows one stream's tool calls for this client's tools.
+class ClientToolRun {
+  private readonly names = new Map<string, string>();
+  private readonly args = new Map<string, string>();
+  private readonly results = new Map<string, Promise<ToolResult>>();
+  private readonly answered = new Set<string>();
+  private pending?: string[];
+
+  constructor(
+    // Whether calls run as they stream in: only in a run this client started.
+    private eager: boolean,
+    private readonly runTool: (
+      toolCallId: string,
+      name: string,
+      args: string,
+    ) => Promise<ToolResult> | undefined,
+    private readonly send: (result: ToolResult) => void,
+  ) {}
+
+  // The stream turned out to be another run's (the turn folded into it): its
+  // calls may be replays of calls already answered.
+  joined(): void {
+    this.eager = false;
+  }
+
+  observe(event: ChatEvent): void {
+    const e = event as ChatEvent & Record<string, any>;
+    switch (e.type) {
+      case "TOOL_CALL_START":
+        this.names.set(e.toolCallId, e.toolCallName);
+        break;
+      case "TOOL_CALL_ARGS":
+        this.args.set(
+          e.toolCallId,
+          (this.args.get(e.toolCallId) ?? "") + (e.delta ?? ""),
+        );
+        break;
+      case "TOOL_CALL_END": {
+        if (!this.eager) break;
+        // Sent as soon as it is ready, whatever the run is doing by then: a run
+        // waiting for it takes it, and a paused one resumes with it.
+        const result = this.run(e.toolCallId);
+        void result?.then(this.send);
+        break;
+      }
+      case "TOOL_CALL_RESULT":
+        this.answered.add(e.toolCallId);
+        break;
+      case "RUN_FINISHED": {
+        // AG-UI 1.0: a successful run left its unanswered calls for the client.
+        // The outcome may name them; otherwise they are the calls with no result.
+        const outcome = e.outcome as
+          { type?: string; pendingToolCallIds?: string[] } | undefined;
+        if (outcome && outcome.type !== "success") break;
+        this.pending = outcome?.pendingToolCallIds?.length
+          ? outcome.pendingToolCallIds
+          : [...this.names.keys()].filter((id) => !this.answered.has(id));
+        break;
+      }
+    }
+  }
+
+  private run(toolCallId: string): Promise<ToolResult> | undefined {
+    const name = this.names.get(toolCallId);
+    if (!name) return undefined;
+    let result = this.results.get(toolCallId);
+    if (!result) {
+      result = this.runTool(toolCallId, name, this.args.get(toolCallId) ?? "");
+      if (result) this.results.set(toolCallId, result);
+    }
+    return result;
+  }
+
+  // The results a finished run left waiting on, when every call is this
+  // client's: calls a joined run left are run now.
+  pausedOn(): Promise<ToolResult>[] | undefined {
+    if (!this.pending?.length) return undefined;
+    const results: Promise<ToolResult>[] = [];
+    for (const id of this.pending) {
+      const result = this.answered.has(id) ? undefined : this.run(id);
+      if (!result) return undefined;
+      results.push(result);
+    }
+    return results;
   }
 }

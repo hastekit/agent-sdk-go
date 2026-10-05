@@ -10,9 +10,9 @@ import (
 	restate "github.com/restatedev/sdk-go"
 )
 
-// RestateStreamBroker is the workflow-side StreamBroker proxy. IsStopped
-// and DrainMessages are wrapped in restate.Run so the broker reads the
-// loop makes at iteration boundaries are durable across replays. The
+// RestateStreamBroker is the workflow-side StreamBroker proxy. IsStopped,
+// DrainMessages and WaitToolResult are wrapped in restate.Run so the broker
+// reads the loop and its client tools make are durable across replays. The
 // remaining methods are pass-through to the wrapped broker — they are
 // either called from outside the workflow (Subscribe/Stop/Enqueue/IsActive),
 // or their durability is owned by the corresponding proxy (e.g. the LLM
@@ -95,6 +95,22 @@ func (b *RestateStreamBroker) DrainMessages(ctx context.Context, channel string)
 	return restate.Run(b.restateCtx, func(ctx restate.RunContext) ([]messages.Message, error) {
 		return b.wrappedBroker.DrainMessages(ctx, channel)
 	}, restate.WithName("DrainMessages"))
+}
+
+// toolResultWait carries WaitToolResult's outcome through the journal.
+type toolResultWait struct {
+	Result string `json:"result,omitempty"`
+	Found  bool   `json:"found,omitempty"`
+}
+
+// WaitToolResult waits in a journaled step, so a replay reuses the recorded
+// result. Configure the Restate invocation timeouts above the client tool timeout.
+func (b *RestateStreamBroker) WaitToolResult(_ context.Context, channel, callID string, timeout time.Duration) (string, bool, error) {
+	wait, err := restate.Run(b.restateCtx, func(ctx restate.RunContext) (toolResultWait, error) {
+		result, found, err := b.wrappedBroker.WaitToolResult(ctx, channel, callID, timeout)
+		return toolResultWait{Result: result, Found: found}, err
+	}, restate.WithName("WaitToolResult"))
+	return wait.Result, wait.Found, err
 }
 
 // StartHeartbeat delegates live invocation ownership without adding any Restate journal steps.

@@ -39,8 +39,14 @@ type AgentConfig struct {
 	Parameters    responses.Parameters
 	StickyHandoff bool
 
-	// Skills list runtime catalogs and resolve enabled skills through read_skill.
-	Skills []agents.SkillSet
+	// SkillClient lists the agent's global skills plus the namespace's own, and
+	// serves enabled ones through read_skill. See skills.NewClient.
+	SkillClient agents.SkillClient
+
+	// ClientTools configures tools the client runs itself (AG-UI frontend
+	// tools): how long a call waits for the client's result before the run
+	// pauses on it. The zero value waits agents.DefaultClientToolTimeout.
+	ClientTools agents.ClientToolOptions
 
 	// Middlewares wrap model/tool calls, history loads/saves and prompt
 	// retrieval. Embed agents.NoopMiddleware and override selected methods.
@@ -60,7 +66,8 @@ func (ac *AgentConfig) toAgentOptions() *agents.AgentOptions {
 		Instruction:   ac.Instruction,
 		Parameters:    ac.Parameters,
 		StickyHandoff: ac.StickyHandoff,
-		Skills:        ac.Skills,
+		SkillClient:   ac.SkillClient,
+		ClientTools:   ac.ClientTools,
 		Middlewares:   ac.Middlewares,
 	}
 }
@@ -94,9 +101,6 @@ func buildAgent(cfg *AgentConfig, opts ...AgentOption) (*Agent, *agents.AgentOpt
 	}
 	if strings.TrimSpace(options.Name) == "" {
 		return nil, nil, fmt.Errorf("agent name is required")
-	}
-	if err := agents.ValidateSkillSets(options.Skills); err != nil {
-		return nil, nil, err
 	}
 	if options.LLM == nil {
 		return nil, nil, fmt.Errorf("agent model is required")

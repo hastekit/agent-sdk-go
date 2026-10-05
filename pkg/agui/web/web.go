@@ -20,15 +20,12 @@
 // cannot be loaded from a public ESM CDN — its dependency graph breaks
 // esm.sh/jsDelivr — so it is bundled; to keep the embedded weight down
 // (~3MB rather than ~17MB) the build swaps CopilotKit's heavy markdown
-// renderer (Shiki + Mermaid + Cytoscape) for a lightweight one. A
-// zero-dependency vanilla UI that needs no framework at all is embedded
-// at /basic.html as an offline fallback and talks to the same endpoints.
+// renderer (Shiki + Mermaid + Cytoscape) for a lightweight one.
 //
 // Handler returns the same surface as an http.Handler for mounting
 // into an existing server:
 //
 //	GET  /                            → embedded CopilotKit chat UI
-//	GET  /basic.html                  → offline (no-CDN) fallback UI
 //	GET  /api/agui/a2a/ → A2A agent directory
 //	GET  /api/agui/a2a/{agent}/.well-known/agent-card.json → A2A discovery card
 //	POST /api/agui/a2a/{agent} → A2A 1.0 JSON-RPC (including SSE)
@@ -102,8 +99,8 @@ func Handler(registry agui.Registry, opts ...agui.Option) http.Handler {
 }
 
 // Serve runs the embedded AG-UI chat client on addr, blocking like
-// http.ListenAndServe. Use agui.WithSkillStore with the same store used by
-// skills.NewSkillSet to enable skill management in the UI.
+// http.ListenAndServe. Use agui.WithSkillStore with the same store passed to
+// skills.NewClient to enable skill management in the UI.
 // Use agui.WithRoutines(service, scheduler) to enable routines APIs and UI.
 // The application remains responsible for running and stopping the scheduler.
 func Serve(addr string, registry agui.Registry, opts ...agui.Option) error {

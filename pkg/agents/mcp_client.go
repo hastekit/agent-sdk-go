@@ -7,10 +7,9 @@ import (
 
 // MCPSelection selects servers and their original, unprefixed tool names for a run.
 // Global servers are always enabled. Namespace servers are enabled unless disabled.
-// Disable wins over Enable for namespace servers; unknown names are ignored across handoffs.
+// Unknown names are ignored across handoffs. It mirrors SkillSelection.
 // Selection cannot expose tools excluded by the server's configured ToolFilter.
 type MCPSelection struct {
-	Enable  []string                    `json:"enable,omitempty"`
 	Disable []string                    `json:"disable,omitempty"`
 	Tools   map[string]MCPToolSelection `json:"tools,omitempty"`
 }
@@ -37,7 +36,7 @@ type MCPListing struct {
 
 // Clone isolates mutable selection when a continuation outlives the current run.
 func (s MCPSelection) Clone() MCPSelection {
-	copy := MCPSelection{Enable: slices.Clone(s.Enable), Disable: slices.Clone(s.Disable)}
+	copy := MCPSelection{Disable: slices.Clone(s.Disable)}
 	if s.Tools != nil {
 		copy.Tools = make(map[string]MCPToolSelection, len(s.Tools))
 		for name, selection := range s.Tools {

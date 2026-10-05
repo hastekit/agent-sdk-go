@@ -69,7 +69,6 @@ statuses, tools, err := client.ListTools(ctx, namespace, runContext)
 
 // The optional selection narrows availability for this run.
 statuses, tools, err = client.ListTools(ctx, namespace, runContext, agents.MCPSelection{
-    Enable:  []string{"notes"},
     Disable: []string{"archive"},
     Tools: map[string]agents.MCPToolSelection{
         "notes": {Include: []string{"search"}, Exclude: []string{"delete"}},
@@ -80,8 +79,7 @@ statuses, tools, err = client.ListTools(ctx, namespace, runContext, agents.MCPSe
 Agents pass `AgentInput.MCP` automatically. AG-UI accepts the same selection in
 `forwardedProps.mcp`. Global servers are always enabled and cannot be disabled.
 Namespace-owned servers are enabled by default, including newly added servers,
-unless their names appear in Disable. Disable wins over Enable for namespace
-servers; an explicit Enable is unnecessary for other servers. Tool selection narrows the configured filter; it cannot restore
+unless their names appear in Disable, the same rule as skills. Tool selection narrows the configured filter; it cannot restore
 a tool excluded by `ServerConfig.ToolFilter`. Names are the original server tool
 names before prefixes. An empty Include selects all tools and Exclude wins.
 

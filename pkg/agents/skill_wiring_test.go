@@ -6,10 +6,10 @@ import (
 	"testing"
 )
 
-func testSkillSet(required bool) SkillSet {
-	return stubSkillSet{Name: "builtin", List: func(context.Context, string, map[string]any) ([]Skill, error) {
-		return []Skill{{Name: "pdf", Description: "Fill and read PDF forms.", Resources: []string{"references/forms.md"}, Required: required, DefaultEnabled: true}}, nil
-	}, Resolve: func(_ context.Context, _ string, _ map[string]any, name, file string) (string, error) {
+func testSkillClient() SkillClient {
+	return stubSkillClient{List: func(context.Context, string, map[string]any) ([]Skill, error) {
+		return []Skill{{Name: "pdf", Description: "Fill and read PDF forms.", Resources: []string{"references/forms.md"}, Global: true}}, nil
+	}, Read: func(_ context.Context, _ string, _ map[string]any, name, file string) (string, error) {
 		if file != "" {
 			return "field syntax\n", nil
 		}
@@ -18,7 +18,7 @@ func testSkillSet(required bool) SkillSet {
 }
 
 func TestAgentBuildsOneSkillReaderPerRun(t *testing.T) {
-	agent := NewAgent(&AgentOptions{Name: "skilled", Skills: []SkillSet{testSkillSet(false)}})
+	agent := NewAgent(&AgentOptions{Name: "skilled", SkillClient: testSkillClient()})
 	tools, skills, hint, err := agent.prepareSkills(context.Background(), &AgentInput{}, agent.tools)
 	if err != nil {
 		t.Fatal(err)

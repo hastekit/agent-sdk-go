@@ -10,6 +10,14 @@ import (
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
 )
 
+// withCall adds a call to the model's reply, so a tool result can answer it.
+func withCall(reply Message, callID string) Message {
+	reply.Messages = append(reply.Messages, responses.InputMessageUnion{
+		OfFunctionCall: &responses.FunctionCallMessage{CallID: callID, Name: "lookup", Arguments: "{}"},
+	})
+	return reply
+}
+
 func toolResult(callID, output string) Message {
 	return messages.New("agent", []responses.InputMessageUnion{{
 		OfFunctionCallOutput: &responses.FunctionCallOutputMessage{
@@ -104,7 +112,7 @@ func TestPendingEstimateReplacedByMeasurement(t *testing.T) {
 	}
 
 	// Appending that reply must not count it a second time.
-	run.AddMessages(ctx, assistantTurn(strings.Repeat("z", 3000)), AlreadyMeasured())
+	run.AddMessages(ctx, withCall(assistantTurn(strings.Repeat("z", 3000)), "call-1"), AlreadyMeasured())
 	if got := run.contextTokens(); got != 12800 {
 		t.Fatalf("contextTokens() = %d after appending the reply, want 12800 — it was already counted", got)
 	}
@@ -150,7 +158,7 @@ func TestPendingEstimateSurvivesTurnBoundary(t *testing.T) {
 
 	// The reply is appended after the measurement, exactly as the agent loop
 	// does it. It is already inside the reported total, so it adds no estimate.
-	run1.AddMessages(ctx, assistantTurn(strings.Repeat("y", 2000)), AlreadyMeasured())
+	run1.AddMessages(ctx, withCall(assistantTurn(strings.Repeat("y", 2000)), "call-1"), AlreadyMeasured())
 	if got := run1.RunState.PendingContextTokens; got != 0 {
 		t.Fatalf("PendingContextTokens = %d, want 0 — the reply was already measured", got)
 	}

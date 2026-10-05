@@ -99,7 +99,11 @@ export async function* resumableStream(
           throw new StreamUnavailableError(
             "The run stream is no longer available. Reloading history is required.",
           );
-        if (options.body !== undefined) continue; // Turn folded into an existing run.
+        if (options.body !== undefined) {
+          // Turn folded into an existing run, which is followed instead.
+          options.onFolded?.();
+          continue;
+        }
         return;
       }
 

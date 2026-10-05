@@ -59,10 +59,10 @@ func TestThreadMessagesReportsAPendingApproval(t *testing.T) {
 	assert.Equal(t, "paused", loaded.Run.Status)
 	assert.True(t, loaded.Run.AwaitingApproval)
 	require.Len(t, loaded.Run.Interrupts, 1)
-	assert.Equal(t, "call_1", loaded.Run.Interrupts[0]["toolCallId"])
-	assert.Equal(t, "delete_user", loaded.Run.Interrupts[0]["toolCallName"],
-		"the same shape the live on_interrupt event carries, so one card draws both")
-	require.Len(t, loaded.Run.PendingToolCalls, 1)
+	assert.Equal(t, "call_1", loaded.Run.Interrupts[0].ID)
+	assert.Equal(t, InterruptReasonToolCall, loaded.Run.Interrupts[0].Reason)
+	assert.Equal(t, "delete_user", loaded.Run.Interrupts[0].Metadata["toolName"],
+		"the same shape RUN_FINISHED's interrupt outcome carries, so one prompt draws both")
 }
 
 // A thread whose last run finished has nothing outstanding, and says so by

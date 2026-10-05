@@ -14,16 +14,16 @@ import (
 	"go.temporal.io/sdk/converter"
 )
 
-func skillSource(t *testing.T) agents.SkillSet {
+func skillSource(t *testing.T) *skills.Client {
 	t.Helper()
 
-	registry, err := skills.NewFSSkillSet("builtin", fstest.MapFS{
+	source, err := skills.NewFSSource(fstest.MapFS{
 		"skills/changelog/SKILL.md": &fstest.MapFile{Data: []byte(
 			"---\nname: changelog\ndescription: Write a release changelog entry.\n---\n\nGroup by Added and Fixed.\n")},
 	})
 	require.NoError(t, err)
 
-	return registry
+	return skills.NewClient(nil).WithGlobalSkills(source)
 }
 
 // The agent adds the tool that reads its skills itself, so it never appears in
@@ -31,15 +31,15 @@ func skillSource(t *testing.T) agents.SkillSet {
 // workflow's first read_skill call fails on an unknown activity type.
 func TestGetActivities_RegistersTheSkillReaderTool(t *testing.T) {
 	options := &agents.AgentOptions{
-		Name:    "Release_Agent",
-		Skills:  []agents.SkillSet{skillSource(t)},
-		History: history.NewConversationManager(history.NewInMemoryConversationPersistence()),
+		Name:        "Release_Agent",
+		SkillClient: skillSource(t),
+		History:     history.NewConversationManager(history.NewInMemoryConversationPersistence()),
 	}
 
 	activities := temporal_runtime.NewTemporalAgent(nil, options, nil).GetActivities()
 
-	assert.Contains(t, activities, "Release_Agent_SkillSet_builtin_ListSkills")
-	assert.Contains(t, activities, "Release_Agent_SkillSet_builtin_ReadSkill")
+	assert.Contains(t, activities, "Release_Agent_Skills_ListSkills")
+	assert.Contains(t, activities, "Release_Agent_Skills_ReadSkill")
 }
 
 func TestGetActivities_RegistersNothingExtraWithoutSkills(t *testing.T) {
@@ -51,6 +51,7 @@ func TestGetActivities_RegistersNothingExtraWithoutSkills(t *testing.T) {
 	activities := temporal_runtime.NewTemporalAgent(nil, options, nil).GetActivities()
 
 	assert.NotContains(t, activities, "Plain_Agent_read_skill_ExecuteToolActivity")
+	assert.NotContains(t, activities, "Plain_Agent_Skills_ListSkills")
 }
 
 // The workflow builds the prompt's Dependencies and the activity renders them

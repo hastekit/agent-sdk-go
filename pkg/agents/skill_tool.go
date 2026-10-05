@@ -90,7 +90,8 @@ func withResourceIndex(skill Skill, content string) string {
 
 type resolvedSkillTool struct {
 	*BaseTool
-	bindings   map[string]skillBinding
+	client     SkillClient
+	skills     map[string]Skill
 	namespace  string
 	runContext map[string]any
 }
@@ -100,43 +101,43 @@ func (t *resolvedSkillTool) Execute(ctx context.Context, call *ToolCall) (*ToolC
 	if err := sonic.Unmarshal([]byte(call.Arguments), &in); err != nil {
 		return nil, err
 	}
-	binding, ok := t.bindings[in.Name]
+	skill, ok := t.skills[in.Name]
 	if !ok {
 		return nil, fmt.Errorf("skill %q is not enabled for this run", in.Name)
 	}
-	if in.File != "" && (!fs.ValidPath(in.File) || strings.Contains(in.File, "\\") || (in.File != SkillFileName && !slices.Contains(binding.skill.Resources, in.File))) {
+	if in.File != "" && (!fs.ValidPath(in.File) || strings.Contains(in.File, "\\") || (in.File != SkillFileName && !slices.Contains(skill.Resources, in.File))) {
 		return nil, fmt.Errorf("skill %q has no allowed file %q", in.Name, in.File)
 	}
 	var content string
 	var err error
-	if executor, ok := binding.set.(SkillReadExecutor); ok {
-		content, err = executor.ResolveSkillCall(ctx, t.namespace, t.runContext, binding.originalName, in.File, call)
+	if executor, ok := t.client.(SkillReadExecutor); ok {
+		content, err = executor.ReadSkillCall(ctx, t.namespace, t.runContext, in.Name, in.File, call)
 	} else {
-		content, err = binding.set.ResolveSkill(ctx, t.namespace, t.runContext, binding.originalName, in.File)
+		content, err = t.client.ReadSkill(ctx, t.namespace, t.runContext, in.Name, in.File)
 	}
 	if err != nil {
 		return nil, err
 	}
 	if in.File == "" {
-		content = withResourceIndex(binding.skill, content)
+		content = withResourceIndex(skill, content)
 	}
 	return skillResponse(call, content), nil
 }
 
 // SkillReadExecutor is implemented by durable runtime proxies to carry the tool
 // call to their execution boundary for tracing, stop handling, and middleware.
-// Application SkillSets need only implement ResolveSkill.
+// Application SkillClients need only implement ReadSkill.
 type SkillReadExecutor interface {
-	ResolveSkillCall(context.Context, string, map[string]any, string, string, *ToolCall) (string, error)
+	ReadSkillCall(ctx context.Context, namespace string, runContext map[string]any, name, file string, call *ToolCall) (string, error)
 }
 
-// ResolveSkillWithMiddleware runs a resolver inside a durable execution step.
+// ReadSkillWithMiddleware runs a read inside a durable execution step.
 // Local tools already receive this wrapping from their ToolExecutor.
-func ResolveSkillWithMiddleware(ctx context.Context, set SkillSet, namespace string, rc map[string]any, name, file string, call *ToolCall, middlewares []ToolCallMiddleware) (string, error) {
+func ReadSkillWithMiddleware(ctx context.Context, client SkillClient, namespace string, rc map[string]any, name, file string, call *ToolCall, middlewares []ToolCallMiddleware) (string, error) {
 	descriptor := dynamicSkillDescriptor()
 	resp, err := ExecuteWithTrace(ctx, nil, call, func(ctx context.Context, call *ToolCall) (*ToolCallResponse, error) {
 		return ExecuteToolCallWithMiddleware(ctx, middlewares, SerializeTool(descriptor, call), call, func(ctx context.Context, call *ToolCall) (*ToolCallResponse, error) {
-			content, err := set.ResolveSkill(ctx, namespace, rc, name, file)
+			content, err := client.ReadSkill(ctx, namespace, rc, name, file)
 			if err != nil {
 				return nil, err
 			}
@@ -150,20 +151,4 @@ func ResolveSkillWithMiddleware(ctx context.Context, set SkillSet, namespace str
 		return "", fmt.Errorf("skill reader middleware returned no text")
 	}
 	return *resp.Output.OfString, nil
-}
-
-// ValidateSkillSets checks static names without listing remote content. Call it
-// before registering configurations with a durable runtime.
-func ValidateSkillSets(sets []SkillSet) error {
-	seen := map[string]bool{}
-	for _, set := range sets {
-		if set == nil || !validSkillPart(set.GetName()) {
-			return fmt.Errorf("skill set must have a nonempty name without slashes")
-		}
-		if seen[set.GetName()] {
-			return fmt.Errorf("duplicate skill set %q", set.GetName())
-		}
-		seen[set.GetName()] = true
-	}
-	return nil
 }

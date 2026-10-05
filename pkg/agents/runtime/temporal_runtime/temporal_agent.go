@@ -46,6 +46,7 @@ func (a *TemporalAgentV2) GetActivities() map[string]interface{} {
 	temporalStreamBroker := NewTemporalStreamBroker(a.broker)
 	activities[a.options.Name+"_IsStoppedActivity"] = temporalStreamBroker.IsStopped
 	activities[a.options.Name+"_DrainMessagesActivity"] = temporalStreamBroker.DrainMessages
+	activities[a.options.Name+"_WaitToolResultActivity"] = temporalStreamBroker.WaitToolResult
 
 	if a.options.History.Summarizer != nil {
 		temporalSummarizer := NewTemporalConversationSummarizer(a.options.History.Summarizer)
@@ -82,12 +83,11 @@ func (a *TemporalAgentV2) GetActivities() map[string]interface{} {
 		activities[prefix+"_ExecuteMCPToolActivity"] = temporalMCP.ExecuteTool
 	}
 
-	for _, set := range a.options.Skills {
-		prefix := a.options.Name + "_SkillSet_" + set.GetName()
-		activities[prefix+"_ListSkills"] = set.ListSkills
-		activities[prefix+"_ResolveSkill"] = set.ResolveSkill
-		reader := &temporalSkillReader{set: set, broker: a.broker, middlewares: append([]agents.ToolCallMiddleware{agents.StopMiddleware{Watcher: agents.StopWatcherFrom(a.broker)}}, agents.ToolCallMiddlewaresOf(a.options.Middlewares)...)}
-		activities[prefix+"_ReadSkill"] = reader.Read
+	if a.options.SkillClient != nil {
+		temporalSkills := NewTemporalSkillClient(a.options.SkillClient, a.broker, agents.ToolCallMiddlewaresOf(a.options.Middlewares)...)
+		prefix := a.options.Name + "_Skills"
+		activities[prefix+"_ListSkills"] = temporalSkills.ListSkills
+		activities[prefix+"_ReadSkill"] = temporalSkills.ReadSkill
 	}
 	return activities
 }
@@ -173,9 +173,9 @@ func (a *TemporalAgentV2) proxyAgent(ctx workflow.Context, built map[string]*age
 		mcpClient = &temporalMCPClientProxy{ctx: ctx, prefix: a.options.Name + "_MCP"}
 	}
 
-	var skillSets []agents.SkillSet
-	for _, set := range a.options.Skills {
-		skillSets = append(skillSets, &temporalSkillSet{ctx: ctx, name: set.GetName(), prefix: a.options.Name + "_SkillSet_" + set.GetName()})
+	var skillClient agents.SkillClient
+	if a.options.SkillClient != nil {
+		skillClient = &temporalSkillClientProxy{ctx: ctx, prefix: a.options.Name + "_Skills"}
 	}
 	opts := &agents.AgentOptions{
 		Name:       a.options.Name,
@@ -192,8 +192,9 @@ func (a *TemporalAgentV2) proxyAgent(ctx workflow.Context, built map[string]*age
 		History:      conversationHistory,
 		Instruction:  promptProxy,
 		Tools:        toolProxies,
-		Skills:       skillSets,
+		SkillClient:  skillClient,
 		MCPClient:    mcpClient,
+		ClientTools:  a.options.ClientTools,
 		ToolExecutor: NewTemporalToolExecutor(ctx),
 		StreamBroker: NewTemporalStreamBrokerProxy(ctx, a.options.Name, a.broker),
 		DurableStep:  NewTemporalDurableStep(ctx),

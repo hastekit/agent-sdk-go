@@ -24,12 +24,55 @@ type RunAgentInput struct {
 	Tools          []InputTool    `json:"tools,omitempty"`
 	Context        []InputContext `json:"context,omitempty"`
 	ForwardedProps any            `json:"forwardedProps,omitempty"`
+	// Resume answers the interrupts that ended the run this one continues (AG-UI 1.0).
+	Resume []ResumeEntry `json:"resume,omitempty"`
 }
 
-// InputTool is a client-defined frontend action. We accept the shape
-// for spec compliance but don't dispatch client-side tools in v1 —
-// the agent's configured server-side tools take precedence. Future
-// work: register these as ephemeral tools for the run.
+// Resume entry statuses (AG-UI 1.0).
+const (
+	ResumeResolved  = "resolved"
+	ResumeCancelled = "cancelled"
+)
+
+// ResumeEntry answers one interrupt. InterruptID is the paused tool call's id.
+// A resolved approval's payload is {"approved": bool}; a form's payload is the
+// filled form; a URL elicitation needs no payload. Cancelled declines.
+type ResumeEntry struct {
+	InterruptID string          `json:"interruptId"`
+	Status      string          `json:"status"`
+	Payload     json.RawMessage `json:"payload,omitempty"`
+	Metadata    map[string]any  `json:"metadata,omitempty"`
+}
+
+// decision maps a resume entry onto the approve/reject resolution the agent loop takes.
+func (e ResumeEntry) decision() ApprovalDecision {
+	d := ApprovalDecision{ToolCallID: e.InterruptID}
+	if e.Status != ResumeResolved {
+		return d
+	}
+	d.Approved = true
+	var verdict struct {
+		Approved *bool `json:"approved"`
+	}
+	var fields map[string]json.RawMessage
+	if len(e.Payload) == 0 || string(e.Payload) == "null" {
+		return d
+	}
+	if json.Unmarshal(e.Payload, &fields) == nil && json.Unmarshal(e.Payload, &verdict) == nil && verdict.Approved != nil {
+		d.Approved = *verdict.Approved
+		if len(fields) == 1 {
+			// A bare verdict carries no data for the tool.
+			return d
+		}
+	}
+	d.Content = e.Payload
+	return d
+}
+
+// InputTool is a client-defined frontend action. It becomes a client tool
+// for the run (see agents.ClientToolDefinition): the model can call it, and
+// the client runs it and returns the result. Server-side tools win name
+// collisions.
 type InputTool struct {
 	Name        string         `json:"name"`
 	Description string         `json:"description"`
@@ -50,10 +93,10 @@ type InputContext struct {
 // invocation on it. Returns a structured error so the handler can
 // surface clean 400s.
 //
-// Validation rule: at least one of messages[] or approvals must be
-// non-empty. An approval-only POST is the canonical HITL resume
-// shape — the client received a paused run, the user clicked
-// approve/reject, and we POST back nothing but the decisions.
+// Validation rule: at least one of messages[] or resume[] must be
+// non-empty. A resume-only POST is the canonical HITL resume shape —
+// the client received an interrupted run, the user answered, and we
+// POST back nothing but the answers.
 func (in *RunAgentInput) Validate() error {
 	if in == nil {
 		return errors.New("agui: nil input")
@@ -61,9 +104,13 @@ func (in *RunAgentInput) Validate() error {
 	if in.ThreadID == "" {
 		return errors.New("agui: threadId is required")
 	}
-	approvals := in.ExtractApprovals()
-	if len(in.Messages) == 0 && len(approvals) == 0 {
-		return errors.New("agui: at least one of messages or forwardedProps.command.resume is required")
+	for i, entry := range in.Resume {
+		if entry.InterruptID == "" || (entry.Status != ResumeResolved && entry.Status != ResumeCancelled) {
+			return fmt.Errorf("agui: resume[%d] needs an interruptId and a status of resolved or cancelled", i)
+		}
+	}
+	if len(in.Messages) == 0 && len(in.Resume) == 0 {
+		return errors.New("agui: at least one of messages or resume is required")
 	}
 	for i, m := range in.Messages {
 		if m.Role == "" {
@@ -77,161 +124,31 @@ func (in *RunAgentInput) Validate() error {
 	return err
 }
 
-// ApprovalDecision is one entry in forwardedProps.command.resume —
-// the AG-UI-side expression of a human-in-the-loop decision for a
-// paused tool call. We split the protocol-side shape (a forwardedProps
-// extension) from the SDK-side shape (FunctionCallInterruptResolutionMessage
-// with action verbs) so the wire contract stays AG-UI-native while the
-// agent loop sees the form it already understands.
-//
-// Content carries the answer to a data-carrying interrupt — the fields of a
-// submitted form elicitation, matching the requestedSchema the pause
-// advertised. It rides through to InterruptResolution.Content, which the
-// agent loop hands to the resuming tool via ToolCall.ResumeMessages. Plain
-// approvals leave it empty.
+// ApprovalDecision is a resume entry as the agent loop takes it: approve or
+// reject one paused tool call. Content carries the answer to a data-carrying
+// interrupt — the fields of a submitted form elicitation, matching the
+// requestedSchema the pause advertised. It rides through to
+// InterruptResolution.Content, which the agent loop hands to the resuming
+// tool via ToolCall.ResumeMessages. Plain approvals leave it empty.
 type ApprovalDecision struct {
-	ToolCallID string          `json:"toolCallId"`
-	Approved   bool            `json:"approved"`
-	Content    json.RawMessage `json:"content,omitempty"`
+	ToolCallID string
+	Approved   bool
+	Content    json.RawMessage
 }
 
-// UnmarshalJSON resolves what "approved" means across the shapes clients
-// actually send, because the zero value of a bool is a rejection and
-// silently discarding a submitted form is the worst possible default.
-//
-// Precedence:
-//
-//  1. An explicit "action" verb wins. Both this SDK's approve/reject and
-//     MCP's elicitation verbs (accept/decline/cancel) are accepted, so a
-//     frontend can forward an MCP-shaped answer unchanged.
-//  2. An explicit "approved" boolean.
-//  3. Otherwise, a decision carrying content is a submission, and therefore
-//     an approval. A form arriving with no verdict field means the user
-//     filled it in and pressed submit.
-//  4. Otherwise, a rejection.
-func (d *ApprovalDecision) UnmarshalJSON(b []byte) error {
-	var raw struct {
-		ToolCallID string          `json:"toolCallId"`
-		Approved   *bool           `json:"approved"`
-		Action     string          `json:"action"`
-		Content    json.RawMessage `json:"content"`
-	}
-	if err := json.Unmarshal(b, &raw); err != nil {
-		return err
-	}
-
-	d.ToolCallID = raw.ToolCallID
-	d.Content = nil
-	// A literal null is not content. Treat it as absent so it cannot flip a
-	// missing verdict into an approval below.
-	if len(raw.Content) > 0 && string(raw.Content) != "null" {
-		d.Content = raw.Content
-	}
-
-	switch strings.ToLower(strings.TrimSpace(raw.Action)) {
-	case "approve", "accept":
-		d.Approved = true
-	case "reject", "decline", "cancel":
-		d.Approved = false
-	default:
-		switch {
-		case raw.Approved != nil:
-			d.Approved = *raw.Approved
-		case len(d.Content) > 0:
-			d.Approved = true
-		default:
-			d.Approved = false
-		}
-	}
-	return nil
-}
-
-// ExtractApprovals returns the parsed approval decisions from
-// forwardedProps, accepting both the CopilotKit-canonical
-// "command.resume" shape and a flat hastekitApprovals alias.
-//
-// Canonical (matches CopilotKit useInterrupt's resolve payload):
-//
-//	{
-//	  "forwardedProps": {
-//	    "command": {
-//	      "resume": {
-//	        "decisions": [
-//	          { "toolCallId": "call_xyz", "approved": true }
-//	        ]
-//	      },
-//	      "interruptEvent": { ... }   // optional — useInterrupt echoes
-//	                                  // the original event value here;
-//	                                  // we ignore it (server has the
-//	                                  // saved RunState already).
-//	    }
-//	  }
-//	}
-//
-// Alias (simpler clients):
-//
-//	{ "forwardedProps": { "hastekitApprovals": [ {…} ] } }
-//
-// Returns an empty slice (not an error) for any malformed shape —
-// approvals are a hint, not a load-bearing contract.
+// ExtractApprovals returns the decisions carried by the run's AG-UI 1.0
+// resume entries, one per answered interrupt.
 func (in *RunAgentInput) ExtractApprovals() []ApprovalDecision {
-	if in == nil {
+	if in == nil || len(in.Resume) == 0 {
 		return nil
 	}
-	fp, ok := in.ForwardedProps.(map[string]any)
-	if !ok {
-		return nil
-	}
-	if raw := lookupCanonicalResume(fp); raw != nil {
-		return decodeDecisions(raw)
-	}
-	if raw, ok := fp["hastekitApprovals"]; ok && raw != nil {
-		return decodeDecisions(raw)
-	}
-	return nil
-}
-
-// lookupCanonicalResume drills into forwardedProps.command.resume
-// and returns the .decisions array (or the raw .resume value when
-// it's already an array — some clients flatten the structure).
-func lookupCanonicalResume(fp map[string]any) any {
-	command, ok := fp["command"].(map[string]any)
-	if !ok {
-		return nil
-	}
-	resume := command["resume"]
-	if resume == nil {
-		return nil
-	}
-	if m, ok := resume.(map[string]any); ok {
-		if decisions, ok := m["decisions"]; ok {
-			return decisions
+	decisions := make([]ApprovalDecision, 0, len(in.Resume))
+	for _, entry := range in.Resume {
+		if entry.InterruptID != "" {
+			decisions = append(decisions, entry.decision())
 		}
 	}
-	// Already an array — accept the bare form too.
-	if _, ok := resume.([]any); ok {
-		return resume
-	}
-	return nil
-}
-
-func decodeDecisions(raw any) []ApprovalDecision {
-	buf, err := json.Marshal(raw)
-	if err != nil {
-		return nil
-	}
-	var out []ApprovalDecision
-	if err := json.Unmarshal(buf, &out); err != nil {
-		return nil
-	}
-	cleaned := out[:0]
-	for _, d := range out {
-		if d.ToolCallID == "" {
-			continue
-		}
-		cleaned = append(cleaned, d)
-	}
-	return cleaned
+	return decisions
 }
 
 // ApprovalsToMessage builds the SDK-shaped interrupt resolution message
@@ -282,7 +199,19 @@ func contentFor(action string, content json.RawMessage) json.RawMessage {
 //
 // Handlers use this by default; WithFullHistory switches them to
 // ToSDKMessages for agents configured without persistence.
+//
+// @hastekit/copilotkit mirrors this rule (newTurnOf in
+// packages/copilotkit/src/agent.ts) to send only the new turn; change both.
 func (in *RunAgentInput) NewTurnSDKMessages() []responses.InputMessageUnion {
+	// A client that just ran its own tools posts their results as trailing
+	// tool messages (CopilotKit's follow-up run). Those results are the turn.
+	if n := len(in.Messages); n > 0 && in.Messages[n-1].Role == RoleTool {
+		start := n
+		for start > 0 && in.Messages[start-1].Role == RoleTool {
+			start--
+		}
+		return in.toSDKMessages(in.Messages[start:])
+	}
 	start := len(in.Messages)
 	for start > 0 {
 		switch in.Messages[start-1].Role {
@@ -307,7 +236,7 @@ func (in *RunAgentInput) NewTurnSDKMessages() []responses.InputMessageUnion {
 // Unknown roles are dropped with no error — strict-mode would be a
 // poor default given the spec lets clients invent custom roles.
 //
-// If approval decisions are present in forwardedProps, a single
+// If the run carries resume entries, a single
 // FunctionCallInterruptResolutionMessage is prepended so the agent's
 // next iteration drains it via ProcessIncomingMessages and
 // transitions out of StepAwaitApproval. Resolutions always go first
@@ -327,7 +256,17 @@ func (in *RunAgentInput) toSDKMessages(msgs []Message) []responses.InputMessageU
 			OfFunctionCallInterruptResolution: approval,
 		})
 	}
+	// A resumed call's result comes from the agent running it. Some clients
+	// (CopilotKit) also add a tool message echoing the resume payload; it is
+	// not the tool's output, so it is dropped rather than stored beside it.
+	resumed := map[string]bool{}
+	for _, d := range approvals {
+		resumed[d.ToolCallID] = true
+	}
 	for _, m := range msgs {
+		if m.Role == RoleTool && resumed[m.ToolCallID] {
+			continue
+		}
 		switch m.Role {
 		case RoleUser, RoleSystem, RoleDeveloper:
 			out = append(out, responses.InputMessageUnion{
@@ -388,6 +327,9 @@ func (in *RunAgentInput) toSDKMessages(msgs []Message) []responses.InputMessageU
 // An empty id mints a fresh one; an already-prefixed id passes
 // through; anything else is prefixed so the client's id stays
 // correlatable.
+//
+// @hastekit/copilotkit mirrors this rule (serverIdOf in
+// packages/copilotkit/src/agent.ts) to recognise its own echoed turns.
 func normalizeMessageID(id string) string {
 	switch {
 	case id == "":
@@ -441,4 +383,16 @@ func (in *RunAgentInput) MCPSelection() (agents.MCPSelection, error) {
 		return selection, fmt.Errorf("agui: invalid forwardedProps.mcp: %w", err)
 	}
 	return selection, nil
+}
+
+// ClientTools converts the run's frontend tools into client tool definitions.
+func (in *RunAgentInput) ClientTools() []agents.ClientToolDefinition {
+	if len(in.Tools) == 0 {
+		return nil
+	}
+	out := make([]agents.ClientToolDefinition, 0, len(in.Tools))
+	for _, tool := range in.Tools {
+		out = append(out, agents.ClientToolDefinition{Name: tool.Name, Description: tool.Description, Parameters: tool.Parameters})
+	}
+	return out
 }

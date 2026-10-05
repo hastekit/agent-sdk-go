@@ -1,6 +1,7 @@
 package agui
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -19,43 +20,28 @@ func TestValidate(t *testing.T) {
 		Messages: []Message{{Role: RoleUser, Content: "hi"}},
 	}).Validate())
 
-	// Approval-only POST (the HITL resume shape) is valid without messages.
+	// A resume-only POST (the HITL resume shape) is valid without messages.
 	assert.NoError(t, (&RunAgentInput{
 		ThreadID: "t",
-		ForwardedProps: map[string]any{
-			"command": map[string]any{
-				"resume": map[string]any{
-					"decisions": []any{map[string]any{"toolCallId": "call_1", "approved": true}},
-				},
-			},
-		},
+		Resume:   []ResumeEntry{{InterruptID: "call_1", Status: ResumeResolved, Payload: json.RawMessage(`{"approved":true}`)}},
 	}).Validate())
 }
 
 func TestExtractApprovals(t *testing.T) {
-	canonical := &RunAgentInput{ForwardedProps: map[string]any{
-		"command": map[string]any{
-			"resume": map[string]any{
-				"decisions": []any{
-					map[string]any{"toolCallId": "call_1", "approved": true},
-					map[string]any{"toolCallId": "call_2", "approved": false},
-					map[string]any{"approved": true}, // missing id — dropped
-				},
-			},
-		},
+	in := &RunAgentInput{Resume: []ResumeEntry{
+		{InterruptID: "call_1", Status: ResumeResolved, Payload: json.RawMessage(`{"approved":true}`)},
+		{InterruptID: "call_2", Status: ResumeResolved, Payload: json.RawMessage(`{"approved":false}`)},
+		{Status: ResumeResolved}, // missing id — dropped
 	}}
-	decisions := canonical.ExtractApprovals()
+	decisions := in.ExtractApprovals()
 	require.Len(t, decisions, 2)
 	assert.Equal(t, ApprovalDecision{ToolCallID: "call_1", Approved: true}, decisions[0])
 	assert.Equal(t, ApprovalDecision{ToolCallID: "call_2", Approved: false}, decisions[1])
 
-	alias := &RunAgentInput{ForwardedProps: map[string]any{
-		"hastekitApprovals": []any{map[string]any{"toolCallId": "call_3", "approved": true}},
-	}}
-	require.Len(t, alias.ExtractApprovals(), 1)
-
 	assert.Empty(t, (&RunAgentInput{}).ExtractApprovals())
-	assert.Empty(t, (&RunAgentInput{ForwardedProps: "garbage"}).ExtractApprovals())
+	assert.Empty(t, (&RunAgentInput{ForwardedProps: map[string]any{
+		"hastekitApprovals": []any{map[string]any{"toolCallId": "call_3", "approved": true}},
+	}}).ExtractApprovals(), "answers come only from resume entries")
 }
 
 func TestNewTurnSDKMessagesExtractsTrailingTurn(t *testing.T) {
@@ -97,13 +83,7 @@ func TestNewTurnSDKMessagesApprovalOnly(t *testing.T) {
 			{Role: RoleUser, Content: "old"},
 			{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: "call_1", Type: "function"}}},
 		},
-		ForwardedProps: map[string]any{
-			"command": map[string]any{
-				"resume": map[string]any{
-					"decisions": []any{map[string]any{"toolCallId": "call_1", "approved": true}},
-				},
-			},
-		},
+		Resume: []ResumeEntry{{InterruptID: "call_1", Status: ResumeResolved, Payload: json.RawMessage(`{"approved":true}`)}},
 	}
 
 	out := in.NewTurnSDKMessages()
@@ -167,22 +147,14 @@ func TestToSDKMessagesFullConversion(t *testing.T) {
 	assert.Equal(t, "result", *out[3].OfFunctionCallOutput.Output.OfString)
 }
 
-// A form elicitation is resolved by submitting content. Clients that send the
-// answer without an explicit verdict must not have it read as a rejection —
-// that would discard what the user typed and resume the tool with nothing.
-func TestFormSubmissionWithoutVerdictIsAnApproval(t *testing.T) {
-	in := &RunAgentInput{ForwardedProps: map[string]any{
-		"command": map[string]any{
-			"resume": map[string]any{
-				"decisions": []any{
-					map[string]any{
-						"toolCallId": "call_1",
-						"content":    map[string]any{"passport_no": "X1234567"},
-					},
-				},
-			},
-		},
-	}}
+// A form elicitation is resolved by submitting its fields. A payload with no
+// verdict must not be read as a rejection — that would discard what the user
+// typed and resume the tool with nothing.
+func TestFormSubmissionIsAnApproval(t *testing.T) {
+	in := &RunAgentInput{Resume: []ResumeEntry{{
+		InterruptID: "call_1", Status: ResumeResolved,
+		Payload: json.RawMessage(`{"passport_no":"X1234567"}`),
+	}}}
 
 	decisions := in.ExtractApprovals()
 	require.Len(t, decisions, 1)
@@ -196,71 +168,27 @@ func TestFormSubmissionWithoutVerdictIsAnApproval(t *testing.T) {
 	assert.JSONEq(t, `{"passport_no":"X1234567"}`, string(msg.Resolutions[0].Content))
 }
 
-// MCP states elicitation outcomes as accept/decline/cancel. Accepting those
-// verbs lets a frontend forward an MCP-shaped answer unchanged.
-func TestDecisionAcceptsMCPActionVerbs(t *testing.T) {
-	for _, tc := range []struct {
-		action string
-		want   bool
-	}{
-		{"accept", true},
-		{"approve", true},
-		{"decline", false},
-		{"cancel", false},
-		{"reject", false},
-	} {
-		in := &RunAgentInput{ForwardedProps: map[string]any{
-			"hastekitApprovals": []any{map[string]any{
-				"toolCallId": "call_1",
-				"action":     tc.action,
-				"content":    map[string]any{"answer": "yes"},
-			}},
-		}}
-		decisions := in.ExtractApprovals()
-		require.Len(t, decisions, 1, tc.action)
-		assert.Equal(t, tc.want, decisions[0].Approved, "action %q", tc.action)
+// An explicit verdict always wins over the content heuristic, and a declined
+// or cancelled interrupt must not deliver content the user chose not to submit.
+func TestRejectedDecisionDropsContent(t *testing.T) {
+	in := &RunAgentInput{Resume: []ResumeEntry{
+		{InterruptID: "call_1", Status: ResumeResolved, Payload: json.RawMessage(`{"approved":false,"passport_no":"X1234567"}`)},
+		{InterruptID: "call_2", Status: ResumeCancelled, Payload: json.RawMessage(`{"passport_no":"X1234567"}`)},
+	}}
+
+	decisions := in.ExtractApprovals()
+	require.Len(t, decisions, 2)
+	msg, ok := ApprovalsToMessage(decisions)
+	require.True(t, ok)
+	for _, resolution := range msg.Resolutions {
+		assert.Equal(t, responses.InterruptActionReject, resolution.Action, resolution.CallID)
+		assert.Empty(t, resolution.Content, resolution.CallID)
 	}
 }
 
-// An explicit verdict always wins over the content heuristic, and a declined
-// interrupt must not deliver content the user chose not to submit.
-func TestRejectedDecisionDropsContent(t *testing.T) {
-	in := &RunAgentInput{ForwardedProps: map[string]any{
-		"hastekitApprovals": []any{map[string]any{
-			"toolCallId": "call_1",
-			"approved":   false,
-			"content":    map[string]any{"passport_no": "X1234567"},
-		}},
-	}}
-
-	decisions := in.ExtractApprovals()
-	require.Len(t, decisions, 1)
-	assert.False(t, decisions[0].Approved)
-
-	msg, ok := ApprovalsToMessage(decisions)
-	require.True(t, ok)
-	assert.Equal(t, responses.InterruptActionReject, msg.Resolutions[0].Action)
-	assert.Empty(t, msg.Resolutions[0].Content)
-}
-
-// A null content field is absent, not a submission, so it cannot promote a
-// decision with no verdict into an approval.
-func TestNullContentIsNotASubmission(t *testing.T) {
-	in := &RunAgentInput{ForwardedProps: map[string]any{
-		"hastekitApprovals": []any{map[string]any{
-			"toolCallId": "call_1",
-			"content":    nil,
-		}},
-	}}
-	decisions := in.ExtractApprovals()
-	require.Len(t, decisions, 1)
-	assert.False(t, decisions[0].Approved)
-	assert.Empty(t, decisions[0].Content)
-}
-
-// The embedded UI trims the run body down to the new turn instead of
-// re-posting the whole thread on every message (StoppableHttpAgent.requestInit,
-// mirroring NewTurnSDKMessages in ui/src/stoppable-agent.ts). That is only
+// HastekitAgent (packages/copilotkit) trims the run body down to the new turn
+// instead of re-posting the whole thread on every message (newTurnOf,
+// mirroring NewTurnSDKMessages). That is only
 // safe because the rule is idempotent: reapplying it to an already-trimmed
 // list has to select the same messages, or the client and server would
 // disagree about what the turn is.

@@ -15,11 +15,12 @@ import (
 
 // WorkflowInput is the input structure for the Restate workflow.
 type WorkflowInput struct {
-	GroupID   string `json:"group_id,omitempty"`
-	MCP       agents.MCPSelection
-	Skills    agents.SkillSelection
-	RunID     string
-	AgentName string `json:"agent_name"`
+	GroupID     string `json:"group_id,omitempty"`
+	MCP         agents.MCPSelection
+	Skills      agents.SkillSelection
+	ClientTools []agents.ClientToolDefinition
+	RunID       string
+	AgentName   string `json:"agent_name"`
 
 	Namespace     string
 	ThreadID      string
@@ -78,6 +79,7 @@ func (r *RestateRuntime) Run(ctx context.Context, agent *agents.Agent, in *agent
 		RunContext:        in.RunContext,
 		Skills:            in.Skills,
 		MCP:               in.MCP,
+		ClientTools:       in.ClientTools,
 		StreamID:          streamID,
 		ProviderConfigKey: gateway.ProviderConfigKeyFromContext(ctx),
 	}

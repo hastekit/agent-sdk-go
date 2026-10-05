@@ -323,8 +323,11 @@ type ResponseChunkToNativeResponseChunkConverter struct {
 	currentBlock     *Part
 	outputItemActive bool
 	outputItemID     string
-	outputIndex      int
-	contentIndex     int
+	// callID is the open function call's ID, as announced on output_item.added:
+	// the call keeps it through output_item.done and the completed response.
+	callID       string
+	outputIndex  int
+	contentIndex int
 
 	// For detecting content type transitions
 	previousPart *Part
@@ -586,8 +589,8 @@ func (c *ResponseChunkToNativeResponseChunkConverter) handleFunctionCallPart(par
 
 	// Emit start events if this is a new output item
 	if !c.outputItemActive {
-		callID := uuid.NewString() + "_" + part.FunctionCall.Name
-		out = append(out, c.buildOutputItemAddedFunctionCall(callID, part.FunctionCall.Name, argsStr, part.ThoughtSignature))
+		c.callID = uuid.NewString() + "_" + part.FunctionCall.Name
+		out = append(out, c.buildOutputItemAddedFunctionCall(c.callID, part.FunctionCall.Name, argsStr, part.ThoughtSignature))
 	}
 
 	// Emit delta
@@ -603,7 +606,9 @@ func (c *ResponseChunkToNativeResponseChunkConverter) completeFunctionCallPart()
 		args = "{}"
 	}
 
-	callID := uuid.NewString()
+	// The ID the call was streamed with: a client has already drawn it, and
+	// the tool's result is reported against the ID in the completed response.
+	callID := c.callID
 	fnName := c.currentBlock.FunctionCall.Name
 
 	// Store completed output for final response

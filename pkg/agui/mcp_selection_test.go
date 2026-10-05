@@ -7,14 +7,13 @@ import (
 )
 
 func TestMCPSelectionInput(t *testing.T) {
-	// AG-UI forwards server enablement and original tool-name filters without deriving identity from them.
+	// AG-UI forwards disabled servers and original tool-name filters without deriving identity from them.
 	input := RunAgentInput{ForwardedProps: map[string]any{"mcp": map[string]any{
-		"enable": []string{"mail"}, "disable": []string{"calendar"},
-		"tools": map[string]any{"mail": map[string]any{"include": []string{"read"}, "exclude": []string{"send"}}},
+		"disable": []string{"calendar"},
+		"tools":   map[string]any{"mail": map[string]any{"include": []string{"read"}, "exclude": []string{"send"}}},
 	}}}
 	selection, err := input.MCPSelection()
 	require.NoError(t, err)
-	require.Equal(t, []string{"mail"}, selection.Enable)
 	require.Equal(t, []string{"calendar"}, selection.Disable)
 	require.Equal(t, []string{"read"}, selection.Tools["mail"].Include)
 	require.Equal(t, []string{"send"}, selection.Tools["mail"].Exclude)

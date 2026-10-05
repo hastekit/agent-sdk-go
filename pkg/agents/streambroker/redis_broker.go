@@ -200,6 +200,13 @@ func (b *RedisStreamBroker) liveKey(channel string) string {
 	return b.prefix + "live:" + channel
 }
 
+// closingKey marks a live run that has published its end: its state is saved
+// and only the release of its claim is left. Set with the claim's TTL as a
+// crash backstop; Close and the next claim clear it.
+func (b *RedisStreamBroker) closingKey(channel string) string {
+	return b.prefix + "closing:" + channel
+}
+
 // Publish appends a chunk and initializes expiry only when creating the stream.
 func (b *RedisStreamBroker) Publish(ctx context.Context, channel string, chunk *responses.ResponseChunk) error {
 	started := time.Now()
@@ -207,6 +214,15 @@ func (b *RedisStreamBroker) Publish(ctx context.Context, channel string, chunk *
 	if err != nil {
 		b.observe(ctx, "publish", channel, started, 0, err)
 		return fmt.Errorf("failed to serialize chunk: %w", err)
+	}
+
+	// Marked before anyone can see the end, so a turn sent in answer to it
+	// waits for the channel rather than joining a run that is finishing.
+	if isRunEnd(chunk) {
+		if err := b.client.Set(ctx, b.closingKey(channel), "1", b.activeTTL).Err(); err != nil {
+			b.observe(ctx, "publish", channel, started, 0, err)
+			return fmt.Errorf("failed to mark run closing: %w", err)
+		}
 	}
 
 	// Atomic initialization avoids a crash leaving the first chunk without an expiry.
@@ -381,7 +397,7 @@ func (b *RedisStreamBroker) Close(ctx context.Context, channel string) error {
 		pipe.XAdd(ctx, &redis.XAddArgs{Stream: key, MaxLen: b.maxLen, Approx: true,
 			Values: map[string]any{"type": streamEndType, "payload": "{}"}})
 		pipe.PExpire(ctx, key, b.replayTTL)
-		pipe.Del(ctx, b.liveKey(channel))
+		pipe.Del(ctx, b.liveKey(channel), b.closingKey(channel))
 		return nil
 	})
 	b.observe(ctx, "close", channel, started, 0, err)
@@ -439,43 +455,113 @@ func (b *RedisStreamBroker) WatchStop(ctx context.Context, channel string) (<-ch
 	return out, cancel
 }
 
+// enqueueOrClaim decides a turn's route in one step, so it cannot race the
+// run's end: it claims an idle channel (1), reports a finishing run (2), or
+// joins the live run (0) — tool outputs to their calls' result keys, first
+// output wins, and the rest to the run's queue.
+//
+// KEYS: live, closing, queue, then one result key per output.
+// ARGV: claim TTL ms, result TTL ms, queued count, the queued messages, then
+// per output its value and notify channel, then whether to join even a
+// finishing run ("1").
+var enqueueOrClaim = redis.NewScript(`
+local queued = tonumber(ARGV[3])
+local outputs = #KEYS - 3
+local force = ARGV[4 + queued + 2 * outputs] == "1"
+if redis.call("EXISTS", KEYS[1]) == 0 then
+  redis.call("SET", KEYS[1], "1", "PX", ARGV[1])
+  return 1
+end
+if not force and redis.call("EXISTS", KEYS[2]) == 1 then
+  return 2
+end
+for i = 1, queued do
+  redis.call("RPUSH", KEYS[3], ARGV[3 + i])
+end
+if queued > 0 then
+  redis.call("PEXPIRE", KEYS[3], ARGV[1])
+end
+for i = 1, outputs do
+  local value = ARGV[3 + queued + 2 * i - 1]
+  if redis.call("SET", KEYS[3 + i], value, "NX", "PX", ARGV[2]) then
+    redis.call("PUBLISH", ARGV[3 + queued + 2 * i], "1")
+  end
+end
+return 0
+`)
+
+// closingPoll is how often a turn waiting on a finishing run checks for its release.
+const closingPoll = 50 * time.Millisecond
+
 // EnqueueOrStart implements RunClaimBroker. The claim is an atomic SETNX
 // on liveKey: the winner resets the reused channel and starts a fresh run;
-// everyone else appends to the run's queue.
+// everyone else joins the run in flight. A run that has published its end is
+// waited out, so a turn sent in answer to that end starts the next run.
 func (b *RedisStreamBroker) EnqueueOrStart(ctx context.Context, channel string, msgs []messages.Message) (bool, error) {
-	claimed, err := b.client.SetNX(ctx, b.liveKey(channel), "1", b.activeTTL).Result()
-	if err != nil {
-		return false, fmt.Errorf("failed to claim run: %w", err)
+	outputs, rest := splitToolOutputs(msgs)
+	keys := []string{b.liveKey(channel), b.closingKey(channel), b.queueKey(channel)}
+	// The claim path ignores these; a fresh run takes msgs as its input.
+	args := []any{b.activeTTL.Milliseconds(), toolResultTTL.Milliseconds(), len(rest)}
+	for _, m := range rest {
+		data, err := sonic.Marshal(m)
+		if err != nil {
+			return false, fmt.Errorf("failed to serialize message: %w", err)
+		}
+		args = append(args, data)
+	}
+	for _, out := range outputs {
+		keys = append(keys, b.toolResultKey(channel, out.callID))
+		args = append(args, out.content, b.toolResultNotifyChannel(channel, out.callID))
 	}
 
-	if !claimed {
-		key := b.queueKey(channel)
-		pipe := b.client.TxPipeline()
-		for _, m := range msgs {
-			data, err := sonic.Marshal(m)
-			if err != nil {
-				return false, fmt.Errorf("failed to serialize message: %w", err)
+	deadline := time.Now().Add(closingWait)
+	for {
+		force := "0"
+		if !time.Now().Before(deadline) {
+			force = "1"
+		}
+		route, err := enqueueOrClaim.Run(ctx, b.client, keys, append(args, force)...).Int()
+		if err != nil {
+			return false, fmt.Errorf("failed to route turn: %w", err)
+		}
+		switch route {
+		case 0:
+			return false, nil
+		case 1:
+			// Clear the previous turn before the agent starts publishing or emitting heartbeats.
+			if err := b.client.Del(ctx, b.streamKey(channel), b.queueKey(channel), b.stopKey(channel), b.closingKey(channel)).Err(); err != nil {
+				return false, fmt.Errorf("failed to reset stream: %w", err)
 			}
-			pipe.RPush(ctx, key, data)
+			return true, nil
 		}
-		pipe.Expire(ctx, key, b.activeTTL)
-		if _, err := pipe.Exec(ctx); err != nil {
-			return false, fmt.Errorf("failed to enqueue message: %w", err)
+		timer := time.NewTimer(closingPoll)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return false, ctx.Err()
+		case <-timer.C:
 		}
-		return false, nil
 	}
-
-	// Clear the previous turn before the agent starts publishing or emitting heartbeats.
-	if err := b.client.Del(ctx, b.streamKey(channel), b.queueKey(channel), b.stopKey(channel)).Err(); err != nil {
-		return false, fmt.Errorf("failed to reset stream: %w", err)
-	}
-	return true, nil
 }
 
 // EnqueueMessage appends a JSON-encoded message to the channel's queue
 // list. The list TTL is refreshed on each push.
 func (b *RedisStreamBroker) EnqueueMessage(ctx context.Context, channel string, msg messages.Message) error {
-	data, err := sonic.Marshal(msg)
+	outputs, rest := splitToolOutputs([]messages.Message{msg})
+	for _, out := range outputs {
+		stored, err := b.client.SetNX(ctx, b.toolResultKey(channel, out.callID), out.content, toolResultTTL).Result()
+		if err != nil {
+			return fmt.Errorf("failed to store tool output: %w", err)
+		}
+		// The output is stored, so a missed notification only delays the waiter's next check.
+		if stored {
+			_ = b.client.Publish(ctx, b.toolResultNotifyChannel(channel, out.callID), "1").Err()
+		}
+	}
+	if len(rest) == 0 {
+		return nil
+	}
+	data, err := sonic.Marshal(rest[0])
 	if err != nil {
 		return fmt.Errorf("failed to serialize message: %w", err)
 	}

@@ -698,6 +698,14 @@ func (m *ChunkTypeSummarizationStarted) UnmarshalJSON(buf []byte) error {
 	return unmarshalConstantString(m, buf)
 }
 
+type ChunkTypeContextUsage string
+
+func (m *ChunkTypeContextUsage) Value() string               { return "context.usage" }
+func (m ChunkTypeContextUsage) MarshalJSON() ([]byte, error) { return sonic.Marshal(m.Value()) }
+func (m *ChunkTypeContextUsage) UnmarshalJSON(buf []byte) error {
+	return unmarshalConstantString(m, buf)
+}
+
 type ChunkTypeSummarizationCompleted string
 
 func (m *ChunkTypeSummarizationCompleted) Value() string { return "summarization.completed" }

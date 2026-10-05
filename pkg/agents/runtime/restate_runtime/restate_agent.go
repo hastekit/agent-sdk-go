@@ -54,6 +54,7 @@ func (w *AgentWorkflow) Run(restateCtx restate.WorkflowContext, input *WorkflowI
 		RunContext:    input.RunContext,
 		Skills:        input.Skills,
 		MCP:           input.MCP,
+		ClientTools:   input.ClientTools,
 		StreamID:      streamID,
 	})
 }
@@ -108,9 +109,9 @@ func (w *AgentWorkflow) proxyAgent(
 		mcpClient = NewRestateMCPClient(restateCtx, agentOptions.MCPClient, w.broker, agents.ToolCallMiddlewaresOf(agentOptions.Middlewares)...)
 	}
 
-	var skillSets []agents.SkillSet
-	for _, set := range agentOptions.Skills {
-		skillSets = append(skillSets, NewRestateSkillSet(restateCtx, set, w.broker, agents.ToolCallMiddlewaresOf(agentOptions.Middlewares)...))
+	var skillClient agents.SkillClient
+	if agentOptions.SkillClient != nil {
+		skillClient = NewRestateSkillClient(restateCtx, agentOptions.SkillClient, w.broker, agents.ToolCallMiddlewaresOf(agentOptions.Middlewares)...)
 	}
 	// Keep durable broker operations separate from non-durable heartbeat delivery.
 	opts := &agents.AgentOptions{
@@ -128,8 +129,9 @@ func (w *AgentWorkflow) proxyAgent(
 		Instruction:  promptProxy,
 		History:      conversationHistory,
 		Tools:        restateTools,
-		Skills:       skillSets,
+		SkillClient:  skillClient,
 		MCPClient:    mcpClient,
+		ClientTools:  agentOptions.ClientTools,
 		ToolExecutor: NewRestateToolExecutor(restateCtx),
 		StreamBroker: NewRestateStreamBroker(restateCtx, w.broker),
 		DurableStep:  NewRestateDurableStep(restateCtx),

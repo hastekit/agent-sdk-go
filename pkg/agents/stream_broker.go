@@ -89,9 +89,17 @@ type StreamBroker interface {
 	// EnqueueMessage pushes an input message onto the channel's queue.
 	// The agent loop drains this queue at iteration boundaries — same
 	// cadence as IsStopped — and folds queued messages into the current
-	// run. Generic so future callers can deliver user messages, tool
-	// outputs, etc., without a new transport.
+	// run. The message's tool outputs are kept for their calls instead,
+	// where WaitToolResult reads them.
 	EnqueueMessage(ctx context.Context, channel string, msg history.Message) error
+
+	// WaitToolResult returns the output a client sent for callID into the
+	// run on channel (as a tool message, through EnqueueMessage or
+	// RunClaimBroker.EnqueueOrStart), waiting up to timeout for it. found is
+	// false when nothing arrived in time; a zero timeout only takes an output
+	// already there. The first output for a call wins, and it stays stored,
+	// so a retried activity or step reads the same answer.
+	WaitToolResult(ctx context.Context, channel, callID string, timeout time.Duration) (result string, found bool, err error)
 
 	// DrainMessages atomically returns and clears all queued messages
 	// for the channel. Empty slice if nothing queued.
@@ -134,7 +142,11 @@ type StopWatcher interface {
 type RunClaimBroker interface {
 	// EnqueueOrStart atomically routes a turn for streamID:
 	//   - if a run is already live on the channel, it appends msgs to the
-	//     run's queue and returns started=false;
+	//     run's queue (tool outputs as EnqueueMessage keeps them) and
+	//     returns started=false;
+	//   - if that run has already published its end, it waits (bounded) for
+	//     the run to release the channel, so a turn sent in answer to the
+	//     end starts the next run instead of joining one that is finishing;
 	//   - otherwise it claims the channel, resets any stale transcript /
 	//     queue / stop state, and returns started=true — the caller then
 	//     Subscribes and runs with msgs as the run's input.

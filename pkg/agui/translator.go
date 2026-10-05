@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/hastekit/agent-sdk-go/pkg/agents/attachments"
@@ -52,6 +53,11 @@ type Translator struct {
 	openToolCallsByItemID map[string]string
 	toolCallNamesByID     map[string]string
 
+	// toolCallArgs follows each open call's arguments, keyed by item_id:
+	// what the deltas streamed, and the whole arguments a provider states on
+	// item_added or at the end. See flushToolCallArgs.
+	toolCallArgs map[string]*toolCallArgs
+
 	// Open reasoning block — empty when none is open. We bracket
 	// reasoning text deltas with REASONING_MESSAGE_* and the whole
 	// reasoning item with REASONING_START/_END.
@@ -74,6 +80,13 @@ type Translator struct {
 	emittedImageIDs map[string]bool
 }
 
+// toolCallArgs is what the client has been sent of one call's arguments, and
+// the whole arguments as the provider last stated them.
+type toolCallArgs struct {
+	streamed string
+	whole    string
+}
+
 // NewTranslator returns a fresh translator for one run.
 func NewTranslator(threadID, runID string) *Translator {
 	return &Translator{
@@ -81,6 +94,7 @@ func NewTranslator(threadID, runID string) *Translator {
 		runID:                 runID,
 		openToolCallsByItemID: map[string]string{},
 		toolCallNamesByID:     map[string]string{},
+		toolCallArgs:          map[string]*toolCallArgs{},
 		openSteps:             map[string]bool{},
 		emittedImageIDs:       map[string]bool{},
 	}
@@ -177,120 +191,47 @@ func (t *Translator) Translate(chunk *responses.ResponseChunk) []Event {
 		return nil
 
 	case chunk.OfRunPaused != nil:
-		// Run paused for human-in-the-loop approval. The agent loop
-		// has already exited at this point — the resume path is a fresh
-		// AG-UI POST carrying forwardedProps.command.resume, which loads
-		// the paused RunState from history and transitions on the new
-		// FunctionCallInterruptResolutionMessage. So from AG-UI's
-		// perspective this run is over (RUN_FINISHED), but the thread
-		// isn't (the client renders an approval UI and POSTs the
-		// decisions back to continue).
+		// The agent loop has exited and the paused RunState is saved, so from
+		// AG-UI's perspective this run is over; the thread continues on the
+		// next POST. How it ended decides what that POST carries (AG-UI 1.0):
 		//
-		// Emission order matters for AG-UI clients that drive UI
-		// off events in arrival order:
-		//   1. Close any open text/tool/reasoning items so the
-		//      message log invariant holds.
-		//   2. STATE_SNAPSHOT first — useCoAgent state-driven UIs
-		//      see the awaitingApproval flag and pending calls
-		//      before the custom approval event arrives.
-		//   3. CUSTOM on_interrupt with the pending call list + a
-		//      response-shape hint, so a frontend adapter doesn't
-		//      need to read code to wire the resume.
-		//   4. RUN_FINISHED last with result.status=paused so
-		//      clients that track run state see the transition.
+		//   - Pauses a person must answer (approvals, form and URL
+		//     elicitations) end with an interrupt outcome, answered by the
+		//     next run's resume entries.
+		//   - A pause only on client tools is a successful run that leaves the
+		//     calls unanswered, answered by tool messages on the next run. The
+		//     outcome does not name them (pendingToolCallIds): clients before
+		//     AG-UI 1.0, including every CopilotKit release to date, reject the
+		//     field, and a 1.0 client takes the calls with no result instead.
+		//     A mixed pause reports the interrupt; its client tool calls stay
+		//     unanswered in the stream for the client to answer alongside.
+		//
 		interrupts := chunk.OfRunPaused.RunState.PendingInterrupts
-		pending := projectPendingToolCalls(approvalCalls(interrupts))
-		projected := projectInterrupts(interrupts)
+		human := withoutClientTools(interrupts)
+		outcome := &RunFinishedOutcome{Type: OutcomeSuccess}
 		out := t.closeOpenItems()
-		out = append(out,
-			&StateSnapshotEvent{
-				BaseEvent: baseNow(),
-				Snapshot: map[string]any{
-					"status": "paused",
-					// awaitingApproval reports whether an approve/reject
-					// decision is outstanding, not merely that the run is
-					// paused: a run paused only on an elicitation needs data
-					// or a visited URL, not a verdict. A client that gates an
-					// approval prompt on this flag would otherwise render an
-					// empty prompt for a form pause.
-					"awaitingApproval": len(pending) > 0,
-					"pendingToolCalls": pending,
-					// interrupts carries every pending pause with its mode and
-					// payload. pendingToolCalls stays approval-only so clients
-					// written against it keep working.
-					"interrupts": projected,
-					"threadId":   t.threadID,
-					"runId":      t.runID,
-				},
-			},
-			&CustomEvent{
-				BaseEvent: baseNow(),
-				// "on_interrupt" is CopilotKit's useInterrupt event
-				// name and the de-facto AG-UI convention; LangGraph
-				// follows it too. The middleware only fires after the
-				// matching RUN_FINISHED (onRunFinalized), so the
-				// emission order below (event → RUN_FINISHED) is
-				// load-bearing.
-				Name: CustomNameInterrupt,
-				Value: map[string]any{
-					// "kind" disambiguates our interrupt subtype for
-					// frontends that handle multiple agent types under
-					// the same useInterrupt middleware. It stays "tool_approval"
-					// whenever every pause is an approval, so existing
-					// clients are unaffected by elicitation support.
-					"kind":             interruptKind(interrupts),
-					"runId":            t.runID,
-					"threadId":         t.threadID,
-					"pendingToolCalls": pending,
-					"interrupts":       projected,
-					// Self-describing resume contract.
-					// CopilotKit's useInterrupt resolves to whatever
-					// shape the application chooses; we expect an
-					// array of decisions matching interrupts.
-					"resume": map[string]any{
-						"method":     "POST",
-						"forwardKey": "command.resume",
-						"shape": map[string]any{
-							"decisions": []map[string]string{{
-								"toolCallId": "string (matches interrupts[].toolCallId)",
-								"approved":   "boolean",
-								"content": "object — the answer for a data-carrying interrupt: " +
-									"form fields matching interrupts[].requestedSchema. Omit for " +
-									"plain approvals and for url mode.",
-							}},
-						},
-					},
-				},
-			},
-			&RunFinishedEvent{
-				BaseEvent: baseNow(),
-				ThreadID:  t.threadID,
-				RunID:     t.runID,
-				Result: map[string]any{
-					"status": "paused",
-					"usage":  chunk.OfRunPaused.RunState.Usage,
-				},
-			},
-		)
-		return out
+		if len(human) > 0 {
+			outcome = &RunFinishedOutcome{Type: OutcomeInterrupt, Interrupts: standardInterrupts(human)}
+		}
+		return append(out, &RunFinishedEvent{
+			BaseEvent: baseNow(),
+			ThreadID:  t.threadID,
+			RunID:     t.runID,
+			Outcome:   outcome,
+			Usage:     tokenUsage(chunk.OfRunPaused.RunState.Usage),
+		})
 
 	case chunk.OfRunFailed != nil:
 		return t.Error(fmt.Errorf("%s", chunk.OfRunFailed.RunState.Error), "agent_error")
 
 	case chunk.OfRunCompleted != nil:
-		out := t.closeOpenItems()
-		out = append(out,
-			&RunFinishedEvent{
-				BaseEvent: baseNow(),
-				ThreadID:  t.threadID,
-				RunID:     t.runID,
-				Result: map[string]any{
-					"status": "completed",
-					"usage":  chunk.OfRunCompleted.RunState.Usage,
-				},
-			},
-		)
-		return out
+		return append(t.closeOpenItems(), &RunFinishedEvent{
+			BaseEvent: baseNow(),
+			ThreadID:  t.threadID,
+			RunID:     t.runID,
+			Outcome:   &RunFinishedOutcome{Type: OutcomeSuccess},
+			Usage:     tokenUsage(chunk.OfRunCompleted.RunState.Usage),
+		})
 	}
 
 	// ── Response lifecycle ───────────────────────────────────────
@@ -304,7 +245,10 @@ func (t *Translator) Translate(chunk *responses.ResponseChunk) []Event {
 		return nil
 
 	case chunk.OfResponseCompleted != nil:
-		var out []Event
+		// A finished response has no more argument deltas, so any call a
+		// provider left open is complete. Ending it now lets a client run its
+		// own tool before the server starts waiting for the result.
+		out := t.closeToolCalls()
 		for _, item := range chunk.OfResponseCompleted.Response.Output {
 			if image := item.OfImageGenerationCall; image != nil {
 				out = append(out, t.handleOutputItemDone(responses.ChunkOutputItemData{
@@ -389,6 +333,9 @@ func (t *Translator) Translate(chunk *responses.ResponseChunk) []Event {
 			// Defensive — the agent loop should always emit item_added first.
 			return nil
 		}
+		if args := t.toolCallArgs[chunk.OfFunctionCallArgumentsDelta.ItemId]; args != nil {
+			args.streamed += chunk.OfFunctionCallArgumentsDelta.Delta
+		}
 		return []Event{&ToolCallArgsEvent{
 			BaseEvent:  baseNow(),
 			ToolCallID: callID,
@@ -396,7 +343,10 @@ func (t *Translator) Translate(chunk *responses.ResponseChunk) []Event {
 		}}
 	}
 	if chunk.OfFunctionCallArgumentsDone != nil {
-		// Closed on item_done.
+		// Closed on item_done, which sends whatever the deltas left out.
+		if args := t.toolCallArgs[chunk.OfFunctionCallArgumentsDone.ItemId]; args != nil && chunk.OfFunctionCallArgumentsDone.Arguments != "" {
+			args.whole = chunk.OfFunctionCallArgumentsDone.Arguments
+		}
 		return nil
 	}
 
@@ -417,6 +367,12 @@ func (t *Translator) Translate(chunk *responses.ResponseChunk) []Event {
 	}
 	if event := chunk.OfSummarizationCompleted; event != nil {
 		return []Event{&CustomEvent{BaseEvent: baseNow(), Name: CustomNameSummarizationCompleted, Value: map[string]any{"runId": event.RunID, "agentName": event.AgentName, "compacted": event.Compacted, "failed": event.Failed}}}
+	}
+	if event := chunk.OfContextUsage; event != nil {
+		return []Event{&CustomEvent{BaseEvent: baseNow(), Name: CustomNameContextUsage, Value: ContextUsage{
+			Tokens:    event.Tokens,
+			AgentName: event.AgentName,
+		}}}
 	}
 
 	if chunk.OfBackgroundTaskStarted != nil {
@@ -640,24 +596,22 @@ func (t *Translator) handleOutputItemAdded(item responses.ChunkOutputItemData) [
 		}
 		t.openToolCallsByItemID[item.Id] = callID
 		t.toolCallNamesByID[callID] = name
-		out := []Event{&ToolCallStartEvent{
+		// Arguments on item_added are not sent yet: providers put a
+		// placeholder there ("{}" before Anthropic streams the input) or
+		// the whole arguments they go on to stream anyway (Gemini), and
+		// either, followed by the deltas, is not one JSON document. They
+		// stand in for the whole arguments until the provider states them.
+		args := &toolCallArgs{}
+		if item.Arguments != nil {
+			args.whole = *item.Arguments
+		}
+		t.toolCallArgs[item.Id] = args
+		return []Event{&ToolCallStartEvent{
 			BaseEvent:       baseNow(),
 			ToolCallID:      callID,
 			ToolCallName:    name,
 			ParentMessageID: t.openTextMessageID,
 		}}
-		// Some chunks ship the full arguments on item_added when the
-		// model didn't stream them (cached responses). Emit them as a
-		// single ARGS event so CopilotKit's incremental renderer
-		// still receives delta data.
-		if item.Arguments != nil && *item.Arguments != "" {
-			out = append(out, &ToolCallArgsEvent{
-				BaseEvent:  baseNow(),
-				ToolCallID: callID,
-				Delta:      *item.Arguments,
-			})
-		}
-		return out
 
 	case "reasoning":
 		out := []Event{}
@@ -702,10 +656,14 @@ func (t *Translator) handleOutputItemDone(item responses.ChunkOutputItemData) []
 			return nil
 		}
 		delete(t.openToolCallsByItemID, item.Id)
-		return []Event{&ToolCallEndEvent{
+		if args := t.toolCallArgs[item.Id]; args != nil && item.Arguments != nil && *item.Arguments != "" {
+			args.whole = *item.Arguments
+		}
+		out := t.flushToolCallArgs(item.Id, callID)
+		return append(out, &ToolCallEndEvent{
 			BaseEvent:  baseNow(),
 			ToolCallID: callID,
-		}}
+		})
 
 	case "reasoning":
 		if t.openReasoningItemID != item.Id {
@@ -790,7 +748,7 @@ func (t *Translator) Finish() []Event {
 		BaseEvent: baseNow(),
 		ThreadID:  t.threadID,
 		RunID:     t.runID,
-		Result:    map[string]any{"status": "completed"},
+		Outcome:   &RunFinishedOutcome{Type: OutcomeSuccess},
 	})
 	return out
 }
@@ -803,6 +761,45 @@ func (t *Translator) Finish() []Event {
 //
 // Order matters: messages → tools → reasoning → steps. Steps wrap
 // finer-grained items in the spec, so they close last.
+// closeToolCalls ends every tool call still streaming, in a stable order.
+func (t *Translator) closeToolCalls() []Event {
+	itemIDs := make([]string, 0, len(t.openToolCallsByItemID))
+	for itemID := range t.openToolCallsByItemID {
+		itemIDs = append(itemIDs, itemID)
+	}
+	sort.Strings(itemIDs)
+	out := make([]Event, 0, len(itemIDs))
+	for _, itemID := range itemIDs {
+		callID := t.openToolCallsByItemID[itemID]
+		out = append(out, t.flushToolCallArgs(itemID, callID)...)
+		out = append(out, &ToolCallEndEvent{
+			BaseEvent:  baseNow(),
+			ToolCallID: callID,
+		})
+		delete(t.openToolCallsByItemID, itemID)
+	}
+	return out
+}
+
+// flushToolCallArgs sends, as a call ends, whatever of its whole arguments
+// the deltas did not: all of them for a call that streamed none (a cached
+// response, or a provider that states them only at the end), the rest for one
+// cut short. What the client holds is then the whole arguments, once. Deltas
+// that do not lead up to the whole arguments are left as streamed; appending
+// to them could not make one document.
+func (t *Translator) flushToolCallArgs(itemID, callID string) []Event {
+	args := t.toolCallArgs[itemID]
+	delete(t.toolCallArgs, itemID)
+	if args == nil || len(args.whole) <= len(args.streamed) || !strings.HasPrefix(args.whole, args.streamed) {
+		return nil
+	}
+	return []Event{&ToolCallArgsEvent{
+		BaseEvent:  baseNow(),
+		ToolCallID: callID,
+		Delta:      args.whole[len(args.streamed):],
+	}}
+}
+
 func (t *Translator) closeOpenItems() []Event {
 	out := []Event{}
 	if t.openTextMessageID != "" {
@@ -812,19 +809,7 @@ func (t *Translator) closeOpenItems() []Event {
 		})
 		t.openTextMessageID = ""
 	}
-	itemIDs := make([]string, 0, len(t.openToolCallsByItemID))
-	for itemID := range t.openToolCallsByItemID {
-		itemIDs = append(itemIDs, itemID)
-	}
-	sort.Strings(itemIDs)
-	for _, itemID := range itemIDs {
-		callID := t.openToolCallsByItemID[itemID]
-		out = append(out, &ToolCallEndEvent{
-			BaseEvent:  baseNow(),
-			ToolCallID: callID,
-		})
-		delete(t.openToolCallsByItemID, itemID)
-	}
+	out = append(out, t.closeToolCalls()...)
 	out = append(out, t.closeReasoning()...)
 	// Snapshot step names first so we can iterate safely while
 	// stepFinish deletes from the map.
@@ -856,30 +841,8 @@ func derefString(p *string, fallback string) string {
 	return *p
 }
 
-// projectPendingToolCalls converts the SDK's FunctionCallMessage
-// shape (snake_case JSON tags) into a camelCase projection so the
-// AG-UI client receives a consistent casing across STATE_SNAPSHOT
-// and CUSTOM events. We could let json.Marshal do its native thing
-// on FunctionCallMessage, but that leaks the SDK's wire choice into
-// AG-UI consumers and the namespace mismatch (camelCase wrapper +
-// snake_case payload) is exactly the kind of detail that breaks
-// CopilotKit's TypeScript types.
-func projectPendingToolCalls(calls []responses.FunctionCallMessage) []map[string]any {
-	out := make([]map[string]any, 0, len(calls))
-	for _, c := range calls {
-		out = append(out, map[string]any{
-			"toolCallId":   c.CallID,
-			"toolCallName": c.Name,
-			"arguments":    c.Arguments,
-		})
-	}
-	return out
-}
-
 // approvalCalls pulls the function calls from the approval-mode interrupts
-// of a paused run — the subset the pendingToolCalls field carries, which is
-// approve/reject decisions only. Every mode, including these, also appears in
-// the richer projectInterrupts list.
+// of a paused run: the ones a person approves or rejects.
 func approvalCalls(interrupts []responses.Interrupt) []responses.FunctionCallMessage {
 	out := make([]responses.FunctionCallMessage, 0, len(interrupts))
 	for _, it := range interrupts {
@@ -890,43 +853,75 @@ func approvalCalls(interrupts []responses.Interrupt) []responses.FunctionCallMes
 	return out
 }
 
-// projectInterrupts converts every pending interrupt into the camelCase shape
-// AG-UI consumers receive, carrying the mode and its payload so a client can
-// render the right thing: an approve/reject prompt, a form built from the
-// requested JSON schema, or a link to visit.
-//
-// An interrupt may carry several elicitations. The first supplies the
-// top-level message/schema/url — the common case is exactly one, and a client
-// that handles more reads the full elicitations list.
-func projectInterrupts(interrupts []responses.Interrupt) []map[string]any {
-	out := make([]map[string]any, 0, len(interrupts))
+// withoutClientTools drops client-tool pauses, which the client resolves by running the tool.
+func withoutClientTools(interrupts []responses.Interrupt) []responses.Interrupt {
+	var out []responses.Interrupt
+	for _, it := range interrupts {
+		if it.Mode != responses.InterruptModeClientTool {
+			out = append(out, it)
+		}
+	}
+	return out
+}
+
+// clientToolCallIDs names the client tool calls a pause leaves for the client, in order.
+func clientToolCallIDs(interrupts []responses.Interrupt) []string {
+	var ids []string
+	for _, it := range interrupts {
+		if it.Mode == responses.InterruptModeClientTool {
+			ids = append(ids, it.FunctionCallMessage.CallID)
+		}
+	}
+	return ids
+}
+
+// approvalSchema is the response an approval interrupt expects.
+var approvalSchema = map[string]any{
+	"type":       "object",
+	"properties": map[string]any{"approved": map[string]any{"type": "boolean"}},
+	"required":   []string{"approved"},
+}
+
+// standardInterrupts converts pauses a person answers into AG-UI 1.0 interrupts.
+// An approval is bound to its tool call; an elicitation asks for input, with a
+// form's requested schema as the response schema and a URL in metadata. The
+// metadata carries the tool call and our mode so a client can render the
+// prompt without the transcript.
+func standardInterrupts(interrupts []responses.Interrupt) []Interrupt {
+	out := make([]Interrupt, 0, len(interrupts))
 	for _, it := range interrupts {
 		mode := it.Mode
 		if mode == "" {
 			mode = responses.InterruptModeApproval
 		}
-		entry := map[string]any{
-			"toolCallId":   it.FunctionCallMessage.CallID,
-			"toolCallName": it.FunctionCallMessage.Name,
-			"arguments":    it.FunctionCallMessage.Arguments,
-			"mode":         string(mode),
+		call := it.FunctionCallMessage
+		entry := Interrupt{
+			ID:         call.CallID,
+			ToolCallID: call.CallID,
+			Metadata:   map[string]any{"mode": string(mode), "toolName": call.Name, "arguments": call.Arguments},
 		}
 		if it.IsNested {
-			entry["isNested"] = true
+			entry.Metadata["isNested"] = true
+		}
+		switch mode {
+		case responses.InterruptModeApproval:
+			entry.Reason = InterruptReasonToolCall
+			entry.Message = fmt.Sprintf("Allow %s to run?", call.Name)
+			entry.ResponseSchema = approvalSchema
+		default:
+			entry.Reason = InterruptReasonInputRequired
 		}
 		if len(it.Elicitations) > 0 {
 			first := it.Elicitations[0]
-			if first.Message != "" {
-				entry["message"] = first.Message
-			}
-			if first.RequestedSchema != nil {
-				entry["requestedSchema"] = first.RequestedSchema
+			entry.Message = first.Message
+			if schema := jsonObject(first.RequestedSchema); schema != nil {
+				entry.ResponseSchema = schema
 			}
 			if first.URL != "" {
-				entry["url"] = first.URL
+				entry.Metadata["url"] = first.URL
 			}
 			if len(it.Elicitations) > 1 {
-				entry["elicitations"] = it.Elicitations
+				entry.Metadata["elicitations"] = it.Elicitations
 			}
 		}
 		out = append(out, entry)
@@ -934,24 +929,32 @@ func projectInterrupts(interrupts []responses.Interrupt) []map[string]any {
 	return out
 }
 
-// interruptKind labels the pause for frontends that switch on it. It stays
-// "tool_approval" when every interrupt is an approval so clients written
-// before elicitation support keep matching on the value they know.
-func interruptKind(interrupts []responses.Interrupt) string {
-	var approvals, elicitations int
-	for _, it := range interrupts {
-		if it.Mode == "" || it.Mode == responses.InterruptModeApproval {
-			approvals++
-			continue
-		}
-		elicitations++
+// jsonObject re-reads a value as a JSON object, or returns nil if it is not one.
+func jsonObject(value any) map[string]any {
+	if value == nil {
+		return nil
 	}
-	switch {
-	case elicitations == 0:
-		return "tool_approval"
-	case approvals == 0:
-		return "elicitation"
-	default:
-		return "mixed"
+	data, err := json.Marshal(value)
+	if err != nil {
+		return nil
 	}
+	var out map[string]any
+	if json.Unmarshal(data, &out) != nil {
+		return nil
+	}
+	return out
+}
+
+// tokenUsage reports a run's usage in the AG-UI 1.0 shape, or nothing when unknown.
+func tokenUsage(u responses.Usage) []TokenUsage {
+	if u.InputTokens == 0 && u.OutputTokens == 0 && u.TotalTokens == 0 {
+		return nil
+	}
+	return []TokenUsage{{
+		InputTokens:       u.InputTokens,
+		OutputTokens:      u.OutputTokens,
+		TotalTokens:       u.TotalTokens,
+		ReasoningTokens:   u.OutputTokensDetails.ReasoningTokens,
+		CachedInputTokens: u.InputTokensDetails.CachedTokens,
+	}}
 }
