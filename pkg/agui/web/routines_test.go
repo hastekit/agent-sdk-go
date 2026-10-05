@@ -92,8 +92,7 @@ func TestRoutineConversationHistoryAcrossAgents(t *testing.T) {
 	save := func(ns, run, previous, thread, routineID, agent string) {
 		t.Helper()
 		require.NoError(t, persistence.SaveMessages(ctx, ns,
-
-			routineID, run, previous, thread, "", nil, map[string]any{
+			routineID, "", false, run, previous, thread, "", nil, map[string]any{
 				history.RunContextMetaKey: map[string]any{history.RoutineIDContextKey: routineID, history.RoutineAgentContextKey: agent},
 			}))
 	}

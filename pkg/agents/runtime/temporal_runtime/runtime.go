@@ -30,9 +30,13 @@ func (r *TemporalRuntime) Run(ctx context.Context, agent *agents.Agent, in *agen
 		in.StreamID = uuid.NewString()
 	}
 
+	// The workflow is keyed by the run, not the stream: the stream id is the
+	// thread's channel and the same for every turn on it, and a workflow id
+	// belongs to one execution. The run claim on the stream already keeps one
+	// run per thread in flight.
 	run, err := r.client.ExecuteWorkflow(ctx, client.StartWorkflowOptions{
 		TaskQueue: "AgentWorkflowTaskQueue",
-		ID:        in.StreamID,
+		ID:        agents.ExecutionID(in),
 	}, agent.Name+"_AgentWorkflow", in)
 	if err != nil {
 		return nil, err

@@ -46,7 +46,9 @@ type Agent struct {
 	singleTurn           bool
 	modelCallMiddlewares []ModelCallMiddleware
 	skillClient          SkillClient
+	subAgentClient       SubAgentClient
 	clientTools          ClientToolOptions
+	description          string
 
 	// background waits on the tasks this agent's tools start, and is nil where
 	// nothing can wait — see BackgroundRunner and ErrBackgroundUnsupported.
@@ -66,7 +68,12 @@ type AgentOptions struct {
 	Instruction SystemPromptProvider
 	Parameters  responses.Parameters
 
-	Name     string
+	Name string
+
+	// Description is what the agent is for, in a sentence or two. It is what
+	// an agent that can hand it work (see SubAgents) is told about it.
+	Description string
+
 	LLM      llm.Provider
 	Output   map[string]any
 	Tools    []Tool
@@ -110,6 +117,15 @@ type AgentOptions struct {
 	// Note this is not the same as MaxLoops=1, which still executes the first
 	// round of tools and then fails the run with "exceeded maximum loops".
 	SingleTurn bool
+
+	// SubAgents is the agents this one may hand work to, and gives it the
+	// call_sub_agent tool (CallSubAgentTool) to do so, waiting for the answer
+	// or not as the model chooses per call. Each run lists them for the prompt.
+	// See subagents.NewClient for a client backed by an agent registry, which
+	// can also let the agent hand work to copies of itself. NewAgent adds the
+	// tool to Tools as well, so a durable runtime registering these options
+	// finds it.
+	SubAgents SubAgentClient
 }
 
 func NewAgent(opts *AgentOptions) *Agent {
@@ -165,7 +181,7 @@ func NewAgent(opts *AgentOptions) *Agent {
 	modelMiddlewares := ModelCallMiddlewaresOf(opts.Middlewares)
 	if opts.DurableStep == nil {
 		// Durable adapters install stop middleware inside the provider step.
-		modelMiddlewares = append([]ModelCallMiddleware{StopMiddleware{Watcher: StopWatcherFrom(streamBroker)}}, modelMiddlewares...)
+		modelMiddlewares = append([]ModelCallMiddleware{StopMiddleware{Watcher: StopWatcherFrom(streamBroker)}, TimestampMiddleware{}}, modelMiddlewares...)
 	}
 
 	conversationHistory := opts.History
@@ -185,6 +201,8 @@ func NewAgent(opts *AgentOptions) *Agent {
 		instruction:          instruction,
 		tools:                slices.Clone(opts.Tools),
 		skillClient:          opts.SkillClient,
+		subAgentClient:       opts.SubAgents,
+		description:          opts.Description,
 		clientTools:          opts.ClientTools,
 		mcpClient:            opts.MCPClient,
 		llm:                  &WrappedLLM{opts.LLM},
@@ -212,6 +230,16 @@ func NewAgent(opts *AgentOptions) *Agent {
 		agent.background = newBackgroundSupervisor(agent)
 	}
 
+	// The tool calls on behalf of this agent — a copy of itself is this
+	// agent — so it is made here, once the agent exists, and recorded on the
+	// options too, which is where a durable runtime looks for the tools it
+	// registers.
+	if opts.SubAgents != nil && !slices.ContainsFunc(opts.Tools, func(tool Tool) bool { return functionName(tool) == CallSubAgentToolName }) {
+		callSubagentTool := newCallSubAgentTool(agent, opts.SubAgents)
+		agent.tools = append(agent.tools, callSubagentTool)
+		opts.Tools = append(opts.Tools, callSubagentTool)
+	}
+
 	return agent
 }
 
@@ -222,6 +250,17 @@ func NewAgent(opts *AgentOptions) *Agent {
 func (e *Agent) WithLLM(wrappedLLM LLM) *Agent {
 	clone := *e
 	clone.llm = wrappedLLM
+	// A copy calls its sub-agents as itself: a copy of itself it hands work
+	// to is a copy of the copy, with its model, not of the agent it was
+	// copied from.
+	clone.tools = slices.Clone(e.tools)
+	for i, tool := range clone.tools {
+		if call, ok := tool.(*CallSubAgentTool); ok && call.agent == e {
+			rebound := *call
+			rebound.agent = &clone
+			clone.tools[i] = &rebound
+		}
+	}
 
 	// The one field a wholesale copy gets wrong: the in-process supervisor
 	// points back at the agent it delivers through, and left alone that stays
@@ -345,6 +384,12 @@ func (e *Agent) ToolExecutor() ToolExecutor {
 type AgentInput struct {
 	// GroupID groups new conversations within a namespace (for example a routine or project). Empty selects "default".
 	GroupID string `json:"group_id,omitempty"`
+	// ParentThreadID records the thread that started a new conversation. Empty
+	// marks a user-started conversation; restored threads keep their own.
+	ParentThreadID string `json:"parent_thread_id,omitempty"`
+	// Hidden marks a new conversation as internal (a sub-agent's, say) so listing
+	// UIs can skip it. Restored threads keep their own.
+	Hidden bool `json:"hidden,omitempty"`
 	// Skills disables user-owned skills by name for this execution, including resumes.
 	Skills SkillSelection `json:"skills,omitempty"`
 	MCP    MCPSelection   `json:"mcp,omitempty"`
@@ -423,7 +468,7 @@ func (e *Agent) ExecuteLocal(ctx context.Context, in *AgentInput) (output *Agent
 		defer e.streamBroker.StartHeartbeat(ctx, in.StreamID)()
 	}
 
-	run, err := history.NewRun(ctx, e.history, in.Namespace, in.ThreadID, in.PreviousRunID, history.WithGroupID(in.GroupID), history.WithRunContext(in.RunContext), history.WithRunID(in.RunID), history.WithDefaultConversationID(in.SessionID))
+	run, err := history.NewRun(ctx, e.history, in.Namespace, in.ThreadID, in.PreviousRunID, history.WithGroupID(in.GroupID), history.WithParentThreadID(in.ParentThreadID), history.WithHidden(in.Hidden), history.WithRunContext(in.RunContext), history.WithRunID(in.RunID), history.WithDefaultConversationID(in.SessionID))
 	if err != nil {
 		return &AgentOutput{Status: agentstate.RunStatusError, RunID: ""}, err
 	}
@@ -546,6 +591,10 @@ func (e *Agent) ExecuteWithRun(ctx context.Context, in *AgentInput, run *history
 		return &AgentOutput{Status: agentstate.RunStatusError, RunID: run.GetRunID()}, err
 	}
 	tools = append(tools, mcpTools...)
+	tools, subAgents, err := e.prepareSubAgents(ctx, in, tools)
+	if err != nil {
+		return &AgentOutput{Status: agentstate.RunStatusError, RunID: run.GetRunID()}, err
+	}
 	tools, err = e.prepareClientTools(ctx, in, tools)
 	if err != nil {
 		return &AgentOutput{Status: agentstate.RunStatusError, RunID: run.GetRunID()}, err
@@ -614,6 +663,7 @@ func (e *Agent) ExecuteWithRun(ctx context.Context, in *AgentInput, run *history
 			Skills:        skills,
 			SkillHint:     skillHint,
 			Connectors:    connectors,
+			SubAgents:     subAgents,
 		})
 		if err != nil {
 			return &AgentOutput{Status: agentstate.RunStatusError, RunID: runId}, err
@@ -833,8 +883,16 @@ func (e *Agent) ExecuteWithRun(ctx context.Context, in *AgentInput, run *history
 			// AlreadyMeasured: TrackUsage above counted this reply against the
 			// context window as part of the call's reported total, so
 			// estimating it here would count it twice.
-			run.AddMessages(ctx, messages.NewWithID(messageIDs.Next(), e.Name, inputMsgs),
-				history.AlreadyMeasured())
+			reply := messages.NewWithID(messageIDs.Next(), e.Name, inputMsgs)
+			// When the model call returned, as stamped inside its step. It is
+			// a display nicety: a reply without a readable one is still the
+			// model's answer, and joins the run at the run clock's time.
+			if at, ok, stampErr := resp.CreatedAt(); stampErr != nil {
+				slog.WarnContext(ctx, "unreadable created_at on a model reply", slog.Any("error", stampErr))
+			} else if ok {
+				reply.CreatedAt = at
+			}
+			run.AddMessages(ctx, reply, history.AlreadyMeasured())
 			finalOutput = append(finalOutput, inputMsgs...)
 
 			// Extract tool calls
@@ -982,6 +1040,7 @@ func (e *Agent) ExecuteWithRun(ctx context.Context, in *AgentInput, run *history
 							Namespace:           in.Namespace,
 							SessionID:           in.SessionID,
 							ThreadID:            in.ThreadID,
+							GroupID:             in.ThreadID, // threads this call starts are grouped under the calling thread
 							StreamID:            in.StreamID,
 							RunContext:          in.RunContext,
 							State:               maps.Clone(run.State),
@@ -1082,8 +1141,15 @@ func (e *Agent) ExecuteWithRun(ctx context.Context, in *AgentInput, run *history
 					{OfFunctionCallOutput: toolResult.FunctionCallOutputMessage},
 				}
 
-				run.AddMessages(ctx, messages.NewWithID(
-					messageIDs.Next(), in.Message.SenderID, toolResultMsg))
+				resultBundle := messages.NewWithID(messageIDs.Next(), in.Message.SenderID, toolResultMsg)
+				// When the tool call returned, as stamped inside its step; like
+				// a reply's, an unreadable one does not cost the result.
+				if at, ok, stampErr := toolResult.CreatedAt(); stampErr != nil {
+					slog.WarnContext(ctx, "unreadable created_at on a tool result", slog.Any("error", stampErr))
+				} else if ok {
+					resultBundle.CreatedAt = at
+				}
+				run.AddMessages(ctx, resultBundle)
 				finalOutput = append(finalOutput, toolResultMsg...)
 			}
 

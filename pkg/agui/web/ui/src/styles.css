@@ -788,3 +788,13 @@ body {
    servers register the app themselves. */
 .routine-form .mcp-oauth-app { display: grid; gap: 10px; padding-left: 12px; border-left: 1px solid var(--hk-line); }
 .routine-form .mcp-oauth-app > summary { cursor: pointer; color: var(--hk-muted); }
+
+/* When a message was sent: in the message toolbar. */
+.message-time { font-size: 11px; color: var(--hk-faint); white-space: nowrap; font-variant-numeric: tabular-nums; padding: 0 4px; align-self: center; }
+/* Times show only on hover (or keyboard focus) of what they belong to. They
+   keep their space while hidden, so nothing shifts when they appear. */
+.message-time { visibility: hidden; }
+:is(.copilotKitMessage, .hk-tool):is(:hover, :focus-within) .message-time { visibility: visible; }
+
+/* When a tool call's result came back, beside its status. */
+.hk-tool .message-time { margin-left: 6px; }

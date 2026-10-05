@@ -19,6 +19,7 @@ func TestProxyAgent_CarriesTheAgentsOwnOptions(t *testing.T) {
 	options := &agents.AgentOptions{
 		Name:          "Root",
 		History:       history.NewConversationManager(history.NewInMemoryConversationPersistence()),
+		Description:   "Triages.",
 		StickyHandoff: true,
 		SingleTurn:    true,
 	}
@@ -33,6 +34,7 @@ func TestProxyAgent_CarriesTheAgentsOwnOptions(t *testing.T) {
 	assert.True(t, proxy.StickyHandoff(), "a turn must still resume in the specialist it ended in")
 	assert.True(t, proxy.SingleTurn())
 	assert.Equal(t, "Root", proxy.Name)
+	assert.Equal(t, "Triages.", proxy.Description(), "a caller that can hand it work is told what it is for")
 }
 
 // An edge added after construction has to reach the workflow rebuild — the

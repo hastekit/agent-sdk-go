@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/constants"
 	"github.com/hastekit/agent-sdk-go/pkg/genai"
 	"go.opentelemetry.io/otel/attribute"
 )
@@ -121,18 +122,31 @@ func (e *Agent) runExecution(ctx context.Context, in *AgentInput) (*AgentOutput,
 
 // Text concatenates assistant output text in order, excluding reasoning and tool
 // messages. It is safe for nil, empty and multimodal results.
+//
+// An output that came back from a durable runtime has crossed it as JSON, and
+// an assistant message decodes from that as an easy input message rather than
+// an output message; it is read either way.
 func (o *AgentOutput) Text() string {
 	if o == nil {
 		return ""
 	}
 	var b strings.Builder
 	for _, message := range o.Output {
-		if message.OfOutputMessage == nil || message.OfOutputMessage.Content == nil {
-			continue
-		}
-		for _, content := range *message.OfOutputMessage.Content {
-			if content.OfOutputText != nil {
-				b.WriteString(content.OfOutputText.Text)
+		switch {
+		case message.OfOutputMessage != nil && message.OfOutputMessage.Content != nil:
+			for _, content := range *message.OfOutputMessage.Content {
+				if content.OfOutputText != nil {
+					b.WriteString(content.OfOutputText.Text)
+				}
+			}
+		case message.OfEasyInput != nil && message.OfEasyInput.Role == constants.RoleAssistant:
+			if message.OfEasyInput.Content.OfString != nil {
+				b.WriteString(*message.OfEasyInput.Content.OfString)
+			}
+			for _, content := range message.OfEasyInput.Content.OfInputMessageList {
+				if content.OfOutputText != nil {
+					b.WriteString(content.OfOutputText.Text)
+				}
 			}
 		}
 	}

@@ -7,7 +7,6 @@ import (
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm"
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
-	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 )
@@ -38,20 +37,27 @@ func NewTemporalLLM(wrappedLLM llm.Provider, broker agents.StreamBroker, middlew
 // NewStreamingResponsesActivity is where the model is really called, so it is
 // also where a stop has to reach it: cancelling from the workflow would end the
 // wait and leave the provider streaming tokens nobody wants. The stream channel
-// is the workflow execution id, the same one the loop stops on and the same one
-// chunks are published to.
+// is the one the call carries — the run's: the one the loop stops on, and the
+// one clients subscribe to for chunks. A call with no stream publishes nothing
+// and has no stop to watch, as in a local run.
 //
 // It is also where the middlewares' WrapModelCall runs: the request has crossed
 // into the activity in the shape history keeps it, with the call it belongs
 // to, and whatever the wraps hand the provider — the bytes behind an attachment file_id —
 // is sent from here and journaled nowhere.
 func (l *TemporalLLM) NewStreamingResponsesActivity(ctx context.Context, in *responses.Request, call *agents.ModelCall) (*responses.Response, error) {
-	streamID := activity.GetInfo(ctx).WorkflowExecution.ID
+	var streamID string
+	if call != nil {
+		streamID = call.StreamID
+	}
 
-	middlewares := append([]agents.ModelCallMiddleware{agents.StopMiddleware{Watcher: agents.StopWatcherFrom(l.broker), StreamID: streamID}}, l.middlewares...)
+	middlewares := append([]agents.ModelCallMiddleware{agents.StopMiddleware{Watcher: agents.StopWatcherFrom(l.broker)}, agents.TimestampMiddleware{}}, l.middlewares...)
 
 	resp, err := agents.ExecuteModelCallWithMiddleware(ctx, middlewares, call, in, func(ctx context.Context, call *agents.ModelCall, in *responses.Request) (*responses.Response, error) {
 		return agents.InvokeModelCall(ctx, l.wrappedLLM, call, in, func(chunk *responses.ResponseChunk) {
+			if streamID == "" {
+				return
+			}
 			if err := l.broker.Publish(ctx, streamID, chunk); err != nil {
 				slog.ErrorContext(ctx, "Failed to publish chunk to stream broker", "error", err)
 			}

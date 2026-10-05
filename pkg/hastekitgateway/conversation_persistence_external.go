@@ -146,6 +146,8 @@ func (p *ExternalConversationPersistence) LoadTranscript(ctx context.Context, na
 
 type AddMessageRequest struct {
 	GroupID        string            `json:"group_id,omitempty"`
+	ParentThreadID string            `json:"parent_thread_id,omitempty"`
+	Hidden         bool              `json:"hidden"`
 	ProjectID      uuid.UUID         `json:"project_id"`
 	Namespace      string            `json:"namespace"`
 	RunID          string            `json:"run_id"`
@@ -157,7 +159,7 @@ type AddMessageRequest struct {
 }
 
 // SaveMessages implements core.ChatHistory
-func (p *ExternalConversationPersistence) SaveMessages(ctx context.Context, namespace, groupID, runId, previousRunId, threadId string, conversationId string, messages []history.Message, meta map[string]any) error {
+func (p *ExternalConversationPersistence) SaveMessages(ctx context.Context, namespace, groupID, parentThreadID string, hidden bool, runId, previousRunId, threadId string, conversationId string, messages []history.Message, meta map[string]any) error {
 	ctx, span := tracer.Start(ctx, "ExternalConversationPersistence.SaveMessages")
 	defer span.End()
 
@@ -174,6 +176,8 @@ func (p *ExternalConversationPersistence) SaveMessages(ctx context.Context, name
 
 	payload := AddMessageRequest{
 		GroupID:        history.NormalizeGroupID(groupID),
+		ParentThreadID: parentThreadID,
+		Hidden:         hidden,
 		Namespace:      namespace,
 		RunID:          runId,
 		ThreadID:       threadId,

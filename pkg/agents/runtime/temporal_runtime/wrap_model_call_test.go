@@ -179,7 +179,7 @@ func TestTemporalLLMActivityReturnsOnlyGeneratedImageReference(t *testing.T) {
 	var suite testsuite.WorkflowTestSuite
 	env := suite.NewTestActivityEnvironment()
 	env.RegisterActivity(fn)
-	value, err := env.ExecuteActivity(fn, &responses.Request{}, &agents.ModelCall{ThreadID: "thread", SessionID: "thread", AgentName: "image-agent", Namespace: "tenant"})
+	value, err := env.ExecuteActivity(fn, &responses.Request{}, &agents.ModelCall{ThreadID: "thread", SessionID: "thread", AgentName: "image-agent", Namespace: "tenant", StreamID: "thread-stream"})
 	require.NoError(t, err)
 	var got responses.Response
 	require.NoError(t, value.Get(&got))

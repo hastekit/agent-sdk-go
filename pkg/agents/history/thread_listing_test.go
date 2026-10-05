@@ -11,7 +11,7 @@ import (
 
 func saveTurn(t *testing.T, p ConversationPersistenceAdapter, namespace, runID, prevID, threadID string) {
 	t.Helper()
-	err := p.SaveMessages(context.Background(), namespace, "default", runID, prevID, threadID, "", []Message{messages.New("user", nil)}, nil)
+	err := p.SaveMessages(context.Background(), namespace, "default", "", false, runID, prevID, threadID, "", []Message{messages.New("user", nil)}, nil)
 	require.NoError(t, err)
 }
 
@@ -68,7 +68,9 @@ func TestRoutineAttributionSurvivesFollowupsAndRestart(t *testing.T) {
 	ctx := context.Background()
 	require.NoError(t, p.SaveMessages(ctx, "tenant",
 
-		"routine-1", "run-1", "", "scheduled", "", nil, map[string]any{
+		"routine-1", "", false,
+
+		"run-1", "", "scheduled", "", nil, map[string]any{
 			RunContextMetaKey: map[string]any{RoutineAgentContextKey: "assistant"},
 		}))
 	saveTurn(t, p, "tenant", "followup", "run-1", "scheduled")

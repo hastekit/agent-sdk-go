@@ -14,8 +14,13 @@ const (
 )
 
 // ThreadInfo summarizes a stored thread for listing UIs.
+//
+// ParentThreadID is empty for user-started threads and the spawning thread for
+// agent-started ones. Hidden marks internal threads that listing UIs may skip.
 type ThreadInfo struct {
 	GroupID        string    `json:"group_id,omitempty"`
+	ParentThreadID string    `json:"parent_thread_id"`
+	Hidden         bool      `json:"hidden"`
 	AgentName      string    `json:"agent_name,omitempty"`
 	ThreadID       string    `json:"thread_id"`
 	ConversationID string    `json:"conversation_id"`
@@ -48,6 +53,8 @@ func (p *InMemoryConversationPersistence) ListThreads(ctx context.Context, names
 
 		info := ThreadInfo{
 			GroupID:        t.GroupID,
+			ParentThreadID: t.ParentThreadID,
+			Hidden:         t.Hidden,
 			ThreadID:       t.ThreadID,
 			ConversationID: t.ConversationID,
 			Namespace:      t.Namespace,

@@ -94,6 +94,7 @@ func DefaultResolvers() []PromptResolverFn {
 		ResolveHandoffs,
 		ResolveDeferredTools,
 		ResolveConnectors,
+		ResolveSubAgents,
 		ResolveTemplate,
 	}
 }
@@ -269,6 +270,36 @@ func ResolveConnectors(prompt string, deps *agents.Dependencies) (string, error)
 		p.WriteString("</connector>")
 	}
 	p.WriteString("</mcp-connectors>")
+	p.WriteString("\n---\n")
+
+	return prompt + p.String(), nil
+}
+
+// ResolveSubAgents appends the agents this one can hand work to through
+// call_sub_agent, as the run's SubAgentClient listed them.
+func ResolveSubAgents(prompt string, deps *agents.Dependencies) (string, error) {
+	if len(deps.SubAgents) == 0 {
+		return prompt, nil
+	}
+
+	var p strings.Builder
+
+	p.WriteString("\n\n" + "## Sub-agents\n\n")
+	p.WriteString("Sub-agents work on a task you hand them in a thread of their own, without seeing this conversation. Use the `call_sub_agent` tool with the exact name listed: sync mode waits for the answer, async mode lets you carry on while they work, and their answer arrives on its own. Pass the thread ID a call returned to follow up with the same sub-agent.\n")
+	p.WriteString("<available_sub_agents>")
+	for _, agent := range deps.SubAgents {
+		p.WriteString("<sub_agent>")
+		p.WriteString(fmt.Sprintf("<name>%s</name>", agent.Name))
+		description := agent.Description
+		if agent.Self {
+			description = strings.TrimSpace("A copy of yourself, with your instructions and tools, to work on a self-contained task in parallel. " + description)
+		}
+		if description != "" {
+			p.WriteString(fmt.Sprintf("<description>%s</description>", description))
+		}
+		p.WriteString("</sub_agent>")
+	}
+	p.WriteString("</available_sub_agents>")
 	p.WriteString("\n---\n")
 
 	return prompt + p.String(), nil

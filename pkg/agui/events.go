@@ -473,6 +473,11 @@ type Message struct {
 	// role="reasoning" message, per the AG-UI reasoning message shape.
 	// Empty (and omitted) on every other role.
 	EncryptedValue string `json:"encryptedValue,omitempty"`
+	// Metadata is AG-UI's free-form message metadata. Hydrated messages carry
+	// senderId (who sent the stored bundle, when known), and user, assistant
+	// and tool messages carry createdAt: RFC 3339, or null when the stored
+	// message has no time.
+	Metadata map[string]any `json:"metadata,omitempty"`
 }
 
 // ToolCall is the function-call shape embedded inside an assistant

@@ -15,12 +15,14 @@ import (
 
 // WorkflowInput is the input structure for the Restate workflow.
 type WorkflowInput struct {
-	GroupID     string `json:"group_id,omitempty"`
-	MCP         agents.MCPSelection
-	Skills      agents.SkillSelection
-	ClientTools []agents.ClientToolDefinition
-	RunID       string
-	AgentName   string `json:"agent_name"`
+	GroupID        string `json:"group_id,omitempty"`
+	ParentThreadID string `json:"parent_thread_id,omitempty"`
+	Hidden         bool   `json:"hidden,omitempty"`
+	MCP            agents.MCPSelection
+	Skills         agents.SkillSelection
+	ClientTools    []agents.ClientToolDefinition
+	RunID          string
+	AgentName      string `json:"agent_name"`
 
 	Namespace     string
 	ThreadID      string
@@ -72,6 +74,8 @@ func (r *RestateRuntime) Run(ctx context.Context, agent *agents.Agent, in *agent
 		RunID:             in.RunID,
 		Namespace:         in.Namespace,
 		GroupID:           in.GroupID,
+		ParentThreadID:    in.ParentThreadID,
+		Hidden:            in.Hidden,
 		ThreadID:          in.ThreadID,
 		SessionID:         in.SessionID,
 		PreviousRunID:     in.PreviousRunID,
@@ -84,10 +88,15 @@ func (r *RestateRuntime) Run(ctx context.Context, agent *agents.Agent, in *agent
 		ProviderConfigKey: gateway.ProviderConfigKeyFromContext(ctx),
 	}
 
+	// The workflow is keyed by the run, not the stream. The stream id is the
+	// thread's channel and the same for every turn on it, while a Restate
+	// workflow key runs once: keyed by the stream, a thread's second turn fails
+	// with 409 "the workflow method was already invoked". The run claim on the
+	// stream already keeps one run per thread in flight.
 	return ingress.Workflow[*WorkflowInput, *agents.AgentOutput](
 		r.client,
 		"AgentWorkflow",
-		streamID,
+		agents.ExecutionID(in),
 		"Run",
 	).Request(ctx, input)
 }
