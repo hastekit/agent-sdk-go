@@ -29,6 +29,7 @@ func TestProxyAgent_CarriesTheAgentsOwnOptions(t *testing.T) {
 	options := &agents.AgentOptions{
 		Name:          "Root",
 		History:       history.NewConversationManager(history.NewInMemoryConversationPersistence()),
+		Description:   "Triages.",
 		StickyHandoff: true,
 		SingleTurn:    true,
 		Handoffs: []*agents.Handoff{
@@ -46,6 +47,7 @@ func TestProxyAgent_CarriesTheAgentsOwnOptions(t *testing.T) {
 	assert.True(t, proxy.StickyHandoff(), "a turn must still resume in the specialist it ended in")
 	assert.True(t, proxy.SingleTurn())
 	assert.Equal(t, "Root", proxy.Name)
+	assert.Equal(t, "Triages.", proxy.Description(), "a caller that can hand it work is told what it is for")
 }
 
 // An edge added after construction has to reach the workflow rebuild.
@@ -157,4 +159,35 @@ func TestProxyAgent_HandlesASelfHandoff(t *testing.T) {
 			streambroker.NewMemoryStreamBroker()).newTemporalProxyAgent(nil)
 		require.NotNil(t, proxy)
 	})
+}
+
+// An agent with sub-agents lists them in an activity, so the registry stays on
+// the worker, and its call_sub_agent tool gets the activities every tool and
+// every background wait does.
+func TestTemporalAgent_RegistersSubAgentActivities(t *testing.T) {
+	options := &agents.AgentOptions{
+		Name:      "Root",
+		History:   history.NewConversationManager(history.NewInMemoryConversationPersistence()),
+		SubAgents: subAgentsStub{},
+	}
+	agents.NewAgent(options)
+
+	activities := NewTemporalAgent(map[string]*agents.AgentOptions{"Root": options}, options, streambroker.NewMemoryStreamBroker()).GetActivities()
+	assert.Contains(t, activities, "Root_SubAgents_ListSubAgents")
+	assert.Contains(t, activities, "Root_"+agents.CallSubAgentToolName+"_ExecuteToolActivity")
+	assert.Contains(t, activities, "Root_"+agents.CallSubAgentToolName+awaitTaskActivitySuffix)
+}
+
+type subAgentsStub struct{}
+
+func (subAgentsStub) ListSubAgents(context.Context, agents.SubAgentQuery) ([]agents.SubAgentInfo, error) {
+	return nil, nil
+}
+
+func (subAgentsStub) RunSubAgent(context.Context, agents.SubAgentRequest) (agents.AgentTaskOutcome, error) {
+	return agents.AgentTaskOutcome{}, nil
+}
+
+func (subAgentsStub) SteerSubAgent(context.Context, agents.SubAgentRequest) (bool, error) {
+	return false, nil
 }

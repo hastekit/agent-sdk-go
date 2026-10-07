@@ -38,6 +38,8 @@ type fileRecord struct {
 // without re-running the branching logic.
 type fileMessageRecord struct {
 	GroupID        string         `json:"group_id,omitempty"`
+	ParentThreadID string         `json:"parent_thread_id,omitempty"`
+	Hidden         bool           `json:"hidden,omitempty"`
 	RunID          string         `json:"run_id"`
 	PreviousRunID  string         `json:"previous_run_id,omitempty"`
 	ThreadID       string         `json:"thread_id"`
@@ -120,7 +122,7 @@ func (p *FileConversationPersistence) LoadMessages(ctx context.Context, namespac
 // SaveMessages appends and syncs each increment, including the opening user
 // message and metadata-only state transitions. Replay merges those increments
 // into one run with its latest metadata and update time.
-func (p *FileConversationPersistence) SaveMessages(ctx context.Context, namespace, groupID, runId, previousRunId, threadId, conversationId string, messages []Message, meta map[string]any) error {
+func (p *FileConversationPersistence) SaveMessages(ctx context.Context, namespace, groupID, parentThreadID string, hidden bool, runId, previousRunId, threadId, conversationId string, messages []Message, meta map[string]any) error {
 	ctx, span := tracer.Start(ctx, "FileConversationPersistence.SaveMessages")
 	defer span.End()
 
@@ -135,7 +137,7 @@ func (p *FileConversationPersistence) SaveMessages(ctx context.Context, namespac
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	if err := p.mem.SaveMessages(ctx, namespace, groupID, runId, previousRunId, threadId, conversationId, messages, meta); err != nil {
+	if err := p.mem.SaveMessages(ctx, namespace, groupID, parentThreadID, hidden, runId, previousRunId, threadId, conversationId, messages, meta); err != nil {
 		return err
 	}
 
@@ -160,6 +162,8 @@ func (p *FileConversationPersistence) SaveMessages(ctx context.Context, namespac
 			ThreadID:       stored.ThreadID,
 			ConversationID: stored.ConversationID,
 			GroupID:        stored.GroupID,
+			ParentThreadID: stored.ParentThreadID,
+			Hidden:         stored.Hidden,
 			Namespace:      stored.Namespace,
 			// Persist this save's increment, not the in-memory readback:
 			// a run saved more than once under the same run id merges its
@@ -357,6 +361,8 @@ func (p *FileConversationPersistence) applyMessageRecord(rec *fileMessageRecord)
 			ThreadID:       rec.ThreadID,
 			ConversationID: rec.ConversationID,
 			GroupID:        rec.GroupID,
+			ParentThreadID: rec.ParentThreadID,
+			Hidden:         rec.Hidden,
 			OriginRunID:    rec.RunID,
 			Namespace:      rec.Namespace,
 			CreatedAt:      rec.CreatedAt,
@@ -372,6 +378,8 @@ func (p *FileConversationPersistence) applyMessageRecord(rec *fileMessageRecord)
 		ThreadID:       rec.ThreadID,
 		ConversationID: rec.ConversationID,
 		GroupID:        rec.GroupID,
+		ParentThreadID: rec.ParentThreadID,
+		Hidden:         rec.Hidden,
 		Namespace:      rec.Namespace,
 		Messages:       rec.Messages,
 		Meta:           rec.Meta,

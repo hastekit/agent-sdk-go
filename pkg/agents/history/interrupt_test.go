@@ -1,6 +1,7 @@
 package history
 
 import (
+	"context"
 	"testing"
 
 	"github.com/hastekit/agent-sdk-go/pkg/agents/agentstate"
@@ -68,7 +69,7 @@ func TestProcessIncomingMessages_ResolutionDrain(t *testing.T) {
 			},
 		},
 	})
-	cm.ProcessIncomingMessages(msg, false)
+	cm.ProcessIncomingMessages(context.Background(), msg, false)
 
 	rs := cm.RunState
 	if len(rs.QueuedApprovals) != 1 || rs.QueuedApprovals[0] != "inner_call" {
@@ -99,7 +100,7 @@ func TestProcessIncomingMessages_DropsResolutionFromMixedBundle(t *testing.T) {
 			Content: responses.InputContent{{OfInputText: &responses.InputTextContent{Text: "hi"}}},
 		}},
 	})
-	cm.ProcessIncomingMessages(msg, false)
+	cm.ProcessIncomingMessages(context.Background(), msg, false)
 
 	// The decision drained to the queue.
 	if len(cm.RunState.QueuedApprovals) != 1 || cm.RunState.QueuedApprovals[0] != "call_1" {

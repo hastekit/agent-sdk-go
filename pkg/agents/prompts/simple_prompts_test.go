@@ -232,3 +232,34 @@ func TestConnectorsAreInTheDefaultChain(t *testing.T) {
 		t.Errorf("DefaultResolvers must render connectors:\n%s", got)
 	}
 }
+
+// Sub-agents are listed by name and description, the caller's own entry as a
+// copy of itself, with the tool that calls them.
+func TestSubAgentsAreListedWithTheToolThatCallsThem(t *testing.T) {
+	p := prompts.New("You lead the team.", prompts.WithResolver(prompts.DefaultResolvers()...))
+
+	got, err := p.GetPrompt(context.Background(), &agents.Dependencies{SubAgents: []agents.SubAgentInfo{
+		{Name: "lead", Self: true},
+		{Name: "researcher", Description: "Finds sources."},
+	}})
+	if err != nil {
+		t.Fatalf("GetPrompt: %v", err)
+	}
+	for _, want := range []string{
+		"`call_sub_agent`",
+		"<sub_agent><name>lead</name><description>A copy of yourself",
+		"<sub_agent><name>researcher</name><description>Finds sources.</description></sub_agent>",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("prompt is missing %q:\n%s", want, got)
+		}
+	}
+
+	got, err = p.GetPrompt(context.Background(), &agents.Dependencies{})
+	if err != nil {
+		t.Fatalf("GetPrompt: %v", err)
+	}
+	if got != "You lead the team." {
+		t.Errorf("a run with no sub-agents must leave the prompt alone:\n%s", got)
+	}
+}

@@ -89,6 +89,11 @@ func (a *TemporalAgentV2) GetActivities() map[string]interface{} {
 		activities[prefix+"_ListSkills"] = temporalSkills.ListSkills
 		activities[prefix+"_ReadSkill"] = temporalSkills.ReadSkill
 	}
+
+	if a.options.SubAgents != nil {
+		temporalSubAgents := NewTemporalSubAgentClient(a.options.SubAgents)
+		activities[a.options.Name+"_SubAgents_ListSubAgents"] = temporalSubAgents.ListSubAgents
+	}
 	return activities
 }
 
@@ -104,14 +109,6 @@ func (a *TemporalAgentV2) Execute(ctx workflow.Context, in *agents.AgentInput) (
 	ctx = workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
 		StartToCloseTimeout: 30 * time.Second,
 	})
-
-	// Fall back to the workflow execution ID when the caller didn't set
-	// a StreamID. The proxy agent receives the broker via AgentOptions
-	// and publishes through it using in.StreamID.
-	if in.StreamID == "" {
-		in.StreamID = workflow.GetInfo(ctx).WorkflowExecution.ID
-	}
-
 	agent := a.newTemporalProxyAgent(ctx)
 
 	// The agent loop runs on a plain context.Context (workflow.Context can't
@@ -177,11 +174,17 @@ func (a *TemporalAgentV2) proxyAgent(ctx workflow.Context, built map[string]*age
 	if a.options.SkillClient != nil {
 		skillClient = &temporalSkillClientProxy{ctx: ctx, prefix: a.options.Name + "_Skills"}
 	}
+
+	var subAgents agents.SubAgentClient
+	if a.options.SubAgents != nil {
+		subAgents = &temporalSubAgentClientProxy{ctx: ctx, prefix: a.options.Name + "_SubAgents"}
+	}
 	opts := &agents.AgentOptions{
-		Name:       a.options.Name,
-		Output:     a.options.Output,
-		Parameters: a.options.Parameters,
-		MaxLoops:   a.options.MaxLoops,
+		Name:        a.options.Name,
+		Description: a.options.Description,
+		Output:      a.options.Output,
+		Parameters:  a.options.Parameters,
+		MaxLoops:    a.options.MaxLoops,
 		// Behaviour the agent was configured with, and which the workflow
 		// rebuild has to carry: a field left out here does not fail, it just
 		// stops applying inside a workflow. Sticky routing went missing that
@@ -193,6 +196,7 @@ func (a *TemporalAgentV2) proxyAgent(ctx workflow.Context, built map[string]*age
 		Instruction:  promptProxy,
 		Tools:        toolProxies,
 		SkillClient:  skillClient,
+		SubAgents:    subAgents,
 		MCPClient:    mcpClient,
 		ClientTools:  a.options.ClientTools,
 		ToolExecutor: NewTemporalToolExecutor(ctx),

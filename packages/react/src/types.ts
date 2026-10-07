@@ -106,6 +106,10 @@ export interface Thread {
   title: string;
   conversation_id?: string;
   group_id?: string;
+  // Empty for user-started threads; the spawning thread for agent-started ones.
+  parent_thread_id?: string;
+  // Internal threads (sub-agent conversations); omitted from listings by default.
+  hidden?: boolean;
   agent_name?: string;
   namespace?: string;
   message_count?: number;

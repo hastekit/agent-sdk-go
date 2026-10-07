@@ -32,7 +32,7 @@ func NewRestateLLM(restateCtx restate.WorkflowContext, wrappedLLM llm.Provider, 
 		restateCtx:        restateCtx,
 		wrappedLLM:        wrappedLLM,
 		providerConfigKey: providerConfigKey,
-		middlewares:       append([]agents.ModelCallMiddleware{agents.StopMiddleware{Watcher: agents.StopWatcherFrom(broker), StreamID: streamID}}, middlewares...),
+		middlewares:       append([]agents.ModelCallMiddleware{agents.StopMiddleware{Watcher: agents.StopWatcherFrom(broker), StreamID: streamID}, agents.TimestampMiddleware{}}, middlewares...),
 	}
 }
 

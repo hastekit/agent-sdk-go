@@ -56,7 +56,7 @@ func TestTemporalHistoryAndPromptMiddlewareUseExistingActivities(t *testing.T) {
 	for _, name := range []string{"agent_LoadMessagesActivity", "agent_SaveMessagesActivity", "agent_GetPromptActivity"} {
 		env.RegisterActivityWithOptions(activities[name], activity.RegisterOptions{Name: name})
 	}
-	_, err := env.ExecuteActivity("agent_SaveMessagesActivity", "tenant", "default", "run", "", "thread", "conversation", []history.Message{}, map[string]any{"source": "original"})
+	_, err := env.ExecuteActivity("agent_SaveMessagesActivity", "tenant", "default", "", false, "run", "", "thread", "conversation", []history.Message{}, map[string]any{"source": "original"})
 	require.NoError(t, err)
 	value, err := env.ExecuteActivity("agent_LoadMessagesActivity", "tenant", "thread", "")
 	require.NoError(t, err)
@@ -82,7 +82,7 @@ func TestGroupedHistoryActivity(t *testing.T) {
 	env := suite.NewTestActivityEnvironment()
 	name := "agent_SaveMessagesActivity"
 	env.RegisterActivityWithOptions(a.GetActivities()[name], activity.RegisterOptions{Name: name})
-	_, err := env.ExecuteActivity(name, "tenant", "project-1", "run", "", "thread", "conversation", []history.Message{}, map[string]any{"source": "original"})
+	_, err := env.ExecuteActivity(name, "tenant", "project-1", "", false, "run", "", "thread", "conversation", []history.Message{}, map[string]any{"source": "original"})
 	require.NoError(t, err)
 	normal, err := store.ListThreads(context.Background(), "tenant", "default")
 	require.NoError(t, err)
