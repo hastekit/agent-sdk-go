@@ -200,10 +200,15 @@ func NativeRequestToConverseRequest(in *responses.Request) *ConverseRequest {
 }
 
 // injectCachePoints adds Bedrock-native cachePoint blocks at the standard
-// breakpoints: the end of the last user message's content, and the end of the
-// tool list. Mirrors the Strands SDK default behavior for Anthropic models on
-// Bedrock — the Converse translator converts these into the model's native
-// caching directives.
+// breakpoints: the last user message's content, and the end of the tool list.
+// Mirrors the Strands SDK default behavior for Anthropic models on Bedrock —
+// the Converse translator converts these into the model's native caching
+// directives.
+//
+// The breakpoint is re-derived on every request and never persisted, so it
+// walks forward on its own as the conversation grows: a document that has to
+// sit outside the cached prefix on the turn it arrives is behind the
+// breakpoint on the next one, and caches from then on.
 //
 // ttl is optional; pass "" to use Bedrock's default (5m), "5m", or "1h".
 func injectCachePoints(req *ConverseRequest, ttl string) {
@@ -212,12 +217,21 @@ func injectCachePoints(req *ConverseRequest, ttl string) {
 	}
 
 	for i := len(req.Messages) - 1; i >= 0; i-- {
-		if req.Messages[i].Role == "user" {
-			req.Messages[i].Content = append(req.Messages[i].Content, ContentBlock{
-				CachePoint: point(),
-			})
+		if req.Messages[i].Role != "user" {
+			continue
+		}
+		content := req.Messages[i].Content
+		at := cachePointIndex(content)
+		// Nowhere legal in this message. The tool list below is still worth
+		// caching, and the next turn moves the document out of the way.
+		if at < 0 {
 			break
 		}
+		// Capacity is capped so the second append cannot write back into the
+		// array this content already shares.
+		shifted := append(content[:at:at], ContentBlock{CachePoint: point()})
+		req.Messages[i].Content = append(shifted, content[at:]...)
+		break
 	}
 
 	if req.ToolConfig != nil && len(req.ToolConfig.Tools) > 0 {
@@ -225,6 +239,38 @@ func injectCachePoints(req *ConverseRequest, ttl string) {
 			CachePoint: point(),
 		})
 	}
+}
+
+// cachePointIndex is where a cachePoint may go in one user message's content,
+// or -1 when it may not go anywhere in it.
+//
+// Bedrock rejects a cache point placed directly after a non-PDF document
+// block — "Cache point cannot be inserted after the preceding content block
+// for this model" — because its format conversion drops the cachePoint's type
+// field at that adjacency. PDFs convert cleanly and are not affected.
+//
+// So the end of the content is still the first choice, and only a *trailing*
+// run of non-PDF documents pushes the breakpoint back in front of itself.
+// That keeps everything a turn adds after its attachment inside the cached
+// prefix, where appending before the first document would have left it out.
+// A message that is nothing but those documents has no legal position at all.
+//
+// This reads the rule as being about adjacency, which is what the error says
+// and what the conversion bug implies. Were it instead to apply anywhere after
+// such a document, this would have to fall back to the first one's index.
+func cachePointIndex(content []ContentBlock) int {
+	at := len(content)
+	for at > 0 && isNonPDFDocument(content[at-1]) {
+		at--
+	}
+	if at == 0 {
+		return -1
+	}
+	return at
+}
+
+func isNonPDFDocument(block ContentBlock) bool {
+	return block.Document != nil && !strings.EqualFold(block.Document.Format, "pdf")
 }
 
 func nativeToolsToConverseTools(nativeTools []responses.ToolUnion) []Tool {
