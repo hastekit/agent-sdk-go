@@ -78,8 +78,65 @@ func TestFileAsDocument(t *testing.T) {
 	require.Len(t, blocks, 1)
 	require.NotNil(t, blocks[0].Document, "a PDF used to be ignored entirely")
 	assert.Equal(t, "pdf", blocks[0].Document.Format)
-	assert.Equal(t, "report.pdf", blocks[0].Document.Name)
+	assert.Equal(t, "report", blocks[0].Document.Name, "the extension is both redundant and illegal here")
 	assert.Equal(t, "JVBERi0=", blocks[0].Document.Source.Bytes)
+}
+
+// The name Converse rejects is the ordinary one: a person uploads 123.csv and
+// the dot fails the request, with nothing about the document itself at fault.
+func TestDocumentNameDropsTheExtension(t *testing.T) {
+	blocks := attachedBlocks(t, responses.InputContentUnion{
+		OfInputFile: &responses.InputFileContent{
+			FileName: utils.Ptr("123.csv"),
+			FileData: utils.Ptr("data:text/csv;base64,YSxiCg=="),
+		},
+	})
+
+	require.Len(t, blocks, 1)
+	require.NotNil(t, blocks[0].Document)
+	assert.Equal(t, "csv", blocks[0].Document.Format, "the extension still decides the format")
+	assert.Equal(t, "123", blocks[0].Document.Name)
+}
+
+// Underscores arrive by way of the attachment store's own collision suffixes
+// (report_2.json), so this is not only what a person happens to type.
+func TestDocumentNameReplacesIllegalRunsWithOneSpace(t *testing.T) {
+	for _, tc := range []struct{ filename, want string }{
+		{"q3_sales.xlsx", "q3 sales"},
+		{"report_2.json", "report 2"},
+		{"a..b__c.txt", "a b c"},
+		{"notes (final) [v2].md", "notes (final) [v2]"},
+		{"my  spaced  name.txt", "my spaced name"},
+		{"_leading and trailing_.txt", "leading and trailing"},
+	} {
+		blocks := attachedBlocks(t, responses.InputContentUnion{
+			OfInputFile: &responses.InputFileContent{
+				FileName: utils.Ptr(tc.filename),
+				FileData: utils.Ptr("aGVsbG8="),
+			},
+		})
+
+		require.Len(t, blocks, 1)
+		require.NotNil(t, blocks[0].Document, tc.filename)
+		assert.Equal(t, tc.want, blocks[0].Document.Name, tc.filename)
+	}
+}
+
+// Nothing legal survives a name written in another script, and an empty name
+// is its own 400. Losing the name is the cheaper failure.
+func TestDocumentNameFallsBackWhenNothingSurvives(t *testing.T) {
+	for _, filename := range []string{"\u6587\u4ef6.csv", ".hidden", "___.txt"} {
+		blocks := attachedBlocks(t, responses.InputContentUnion{
+			OfInputFile: &responses.InputFileContent{
+				FileName: utils.Ptr(filename),
+				FileData: utils.Ptr("aGVsbG8="),
+			},
+		})
+
+		require.Len(t, blocks, 1)
+		require.NotNil(t, blocks[0].Document, filename)
+		assert.Equal(t, "document", blocks[0].Document.Name, filename)
+	}
 }
 
 // Converse names formats in its own vocabulary — a bare word, not a media type.

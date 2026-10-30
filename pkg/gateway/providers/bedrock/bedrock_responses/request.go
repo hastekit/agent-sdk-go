@@ -573,7 +573,7 @@ func nativeFileToBlock(file *responses.InputFileContent) ContentBlock {
 
 	return ContentBlock{Document: &DocumentBlock{
 		Format: format,
-		Name:   name,
+		Name:   documentName(name),
 		Source: DocumentSourceBlock{Bytes: data},
 	}}
 }
@@ -612,6 +612,56 @@ func documentFormat(filename string) string {
 		}
 		return "pdf"
 	}
+}
+
+// documentName is a Converse restriction rather than a filesystem one: a
+// document name takes alphanumerics, single spaces, hyphens, parentheses and
+// square brackets, and nothing else. A single dot is enough to fail the whole
+// request — "123.csv" comes back as "The document file name can only contain
+// alphanumeric characters, whitespace characters, hyphens, parentheses, and
+// square brackets" — so the name a person actually uploaded cannot be passed
+// through as it stands.
+//
+// The extension goes first, because Format already carries it and the dot is
+// the usual reason a name is rejected. Every other illegal run collapses to
+// one space, which leaves "q3_sales" readable as "q3 sales" and satisfies the
+// no-consecutive-whitespace half of the rule. Non-ASCII names keep nothing, so
+// they fall back to "document": losing the name costs the model a little
+// context, while sending it costs the whole turn.
+func documentName(filename string) string {
+	trimmed := strings.TrimSuffix(filename, filepath.Ext(filename))
+
+	var b strings.Builder
+	separated := false
+	for _, r := range trimmed {
+		if !allowedInDocumentName(r) {
+			separated = true
+			continue
+		}
+		// Held back until something legal follows, so a name never leads or
+		// trails with the space an illegal run would otherwise leave behind.
+		if separated && b.Len() > 0 {
+			b.WriteByte(' ')
+		}
+		separated = false
+		b.WriteRune(r)
+	}
+	if b.Len() == 0 {
+		return "document"
+	}
+	return b.String()
+}
+
+func allowedInDocumentName(r rune) bool {
+	switch {
+	case r >= '0' && r <= '9', r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z':
+		return true
+	}
+	switch r {
+	case '-', '(', ')', '[', ']':
+		return true
+	}
+	return false
 }
 
 func documentFormatFromMediaType(mediaType string) string {
