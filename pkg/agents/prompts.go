@@ -34,6 +34,11 @@ type Dependencies struct {
 	// A run with no MCP servers has none, and the resolver that renders these
 	// leaves such a prompt untouched.
 	Connectors []ConnectorStatus `json:"connectors,omitempty"`
+
+	// SubAgents is the agents this run may hand work to through
+	// call_sub_agent, as its SubAgentClient listed them. A run with none
+	// leaves the prompt untouched.
+	SubAgents []SubAgentInfo `json:"sub_agents,omitempty"`
 }
 
 type SystemPromptProvider interface {

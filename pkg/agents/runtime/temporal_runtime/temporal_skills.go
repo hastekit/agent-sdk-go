@@ -18,7 +18,7 @@ type TemporalSkillClient struct {
 }
 
 func NewTemporalSkillClient(client agents.SkillClient, broker agents.StreamBroker, middlewares ...agents.ToolCallMiddleware) *TemporalSkillClient {
-	return &TemporalSkillClient{client: client, broker: broker, middlewares: append([]agents.ToolCallMiddleware{agents.StopMiddleware{Watcher: agents.StopWatcherFrom(broker)}}, middlewares...)}
+	return &TemporalSkillClient{client: client, broker: broker, middlewares: append([]agents.ToolCallMiddleware{agents.StopMiddleware{Watcher: agents.StopWatcherFrom(broker)}, agents.TimestampMiddleware{}}, middlewares...)}
 }
 
 func (c *TemporalSkillClient) ListSkills(ctx context.Context, namespace string, rc map[string]any) ([]agents.Skill, error) {

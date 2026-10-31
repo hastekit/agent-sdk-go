@@ -1491,3 +1491,86 @@ func TestAgentLoop_FormElicitationRoundTrip(t *testing.T) {
 	assert.Equal(t, "Ada Lovelace", name, "the submitted form must reach the tool")
 	assert.Contains(t, messagesText(out.Output), "booked for Ada Lovelace")
 }
+
+// A model reply and a tool result are stored with when they were produced, as
+// stamped by the built-in TimestampMiddleware inside their calls: the tool
+// result after the tool finished, the reply that asked for it before.
+func TestRepliesAndToolResultsKeepWhenTheyWereProduced(t *testing.T) {
+	store := history.NewInMemoryConversationPersistence()
+	llm := &scriptedLLM{script: []*responses.Response{
+		toolCallResponse("call_lookup", "lookup", "{}"),
+		textResponse("found it"),
+	}}
+	agent := newScriptedAgent("main", llm, history.NewConversationManager(store), streambroker.NewMemoryStreamBroker(),
+		[]agents.Tool{newFakeTool("lookup", false, "result")}, nil)
+
+	before := time.Now()
+	runAgent(t, agent, &agents.AgentInput{Namespace: "test", ThreadID: "thread-stamped", Message: userMessage("look it up")})
+
+	rows, err := history.LoadTranscript(context.Background(), store, "test", "thread-stamped")
+	require.NoError(t, err)
+	var asked, answered time.Time
+	for _, bundle := range rows[0].Messages {
+		for _, msg := range bundle.Messages {
+			if msg.OfFunctionCall != nil {
+				asked = bundle.CreatedAt
+			}
+			if msg.OfFunctionCallOutput != nil && msg.OfFunctionCallOutput.CallID == "call_lookup" {
+				answered = bundle.CreatedAt
+			}
+		}
+	}
+	require.False(t, asked.Before(before), "the reply carries its own time")
+	require.False(t, answered.Before(asked), "the result was produced after the reply that asked for it")
+}
+
+// A sync agent tool in shared-thread mode bubbles its sub-agent's approval up
+// the same way, and a rejection resumes it too: the sub-agent is told no, its
+// tool never runs, and it finishes the task. The sub-agent's thread stays one
+// thread — hidden, in the caller's namespace, under the calling thread —
+// across the pause.
+func TestAgentLoop_SubAgentRejectionResumesTheSharedThread(t *testing.T) {
+	persistence := history.NewInMemoryConversationPersistence()
+	hist := history.NewConversationManager(persistence)
+	broker := streambroker.NewMemoryStreamBroker()
+
+	childLLM := &scriptedLLM{script: []*responses.Response{
+		toolCallResponse("call_child_danger", "child_danger", "{}"),
+		textResponse("child gave up"),
+	}}
+	childDanger := newFakeTool("child_danger", true, "child danger done")
+	child := newScriptedAgent("child", childLLM, hist, broker, []agents.Tool{childDanger}, nil)
+
+	parentLLM := &scriptedLLM{script: []*responses.Response{
+		toolCallResponse("call_delegate", "child_agent", `{"message":"do it"}`),
+		textResponse("parent finished"),
+	}}
+	parent := newScriptedAgent("parent", parentLLM, hist, broker, []agents.Tool{
+		agenttools.NewAgentTool("child_agent", "delegate to the child agent", child, agenttools.SubAgentContextModeNone),
+	}, nil)
+
+	out := runAgent(t, parent, &agents.AgentInput{Namespace: "test", ThreadID: "thread-reject", Message: userMessage("delegate this")})
+	requireStatus(t, out, agentstate.RunStatusPaused)
+	requireSinglePendingApproval(t, out, "child_danger", "call_child_danger")
+
+	out = runAgent(t, parent, &agents.AgentInput{
+		Namespace: "test", ThreadID: "thread-reject", PreviousRunID: out.RunID,
+		Message: approvalMessage(nil, []string{"call_child_danger"}),
+	})
+	requireStatus(t, out, agentstate.RunStatusCompleted)
+	require.Zero(t, childDanger.callCount(), "a rejected tool never runs")
+	require.Equal(t, 2, childLLM.callCount(), "the sub-agent resumed once, with the rejection")
+	text := messagesText(out.Output)
+	require.Contains(t, text, "child gave up")
+	require.Contains(t, text, "Thread ID: ")
+	require.Contains(t, text, "parent finished")
+
+	threads, err := persistence.ListThreads(context.Background(), "test", "thread-reject")
+	require.NoError(t, err)
+	require.Len(t, threads, 1, "the pause and the resume are one sub-agent thread")
+	require.True(t, threads[0].Hidden)
+	require.Equal(t, "thread-reject", threads[0].ParentThreadID)
+	rows, err := history.LoadTranscript(context.Background(), persistence, "test", threads[0].ThreadID)
+	require.NoError(t, err)
+	require.Len(t, rows, 1, "the resume continued the paused run rather than starting another")
+}

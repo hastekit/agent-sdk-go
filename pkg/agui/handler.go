@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -377,6 +378,11 @@ func serveThreads(w http.ResponseWriter, r *http.Request, agent *agents.Agent, o
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "unable to list threads: "+err.Error())
 		return
+	}
+	// Hidden threads (sub-agent conversations, say) are internal; a client
+	// asks for them explicitly with include_hidden=true.
+	if r.URL.Query().Get("include_hidden") != "true" {
+		threads = slices.DeleteFunc(threads, func(t history.ThreadInfo) bool { return t.Hidden })
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"threads": threads})

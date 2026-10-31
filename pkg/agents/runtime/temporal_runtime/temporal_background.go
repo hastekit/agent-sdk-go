@@ -150,8 +150,11 @@ func (w *BackgroundTaskWorkflow) Execute(ctx workflow.Context, in *BackgroundTas
 	// The thread was idle, and this workflow now holds its claim. Run the
 	// agent so it can react — as a child, so the wait is not holding a worker
 	// slot while the model works.
+	// Keyed by this run, not the thread's stream (see TemporalRuntime.Run):
+	// the delivered message's id, which the decision activity journaled, so a
+	// replay starts the same child.
 	runCtx := workflow.WithChildOptions(ctx, workflow.ChildWorkflowOptions{
-		WorkflowID:        in.Ref.ThreadStreamID,
+		WorkflowID:        in.AgentName + "-delivery-" + decision.Message.ID,
 		ParentClosePolicy: enums.PARENT_CLOSE_POLICY_ABANDON,
 	})
 	run := workflow.ExecuteChildWorkflow(runCtx, in.AgentName+"_AgentWorkflow", &agents.AgentInput{

@@ -22,7 +22,7 @@ func NewRestateSkillClient(restateCtx restate.WorkflowContext, client agents.Ski
 	return &RestateSkillClient{
 		restateCtx:  restateCtx,
 		client:      client,
-		middlewares: append([]agents.ToolCallMiddleware{agents.StopMiddleware{Watcher: agents.StopWatcherFrom(broker)}}, middlewares...),
+		middlewares: append([]agents.ToolCallMiddleware{agents.StopMiddleware{Watcher: agents.StopWatcherFrom(broker)}, agents.TimestampMiddleware{}}, middlewares...),
 	}
 }
 

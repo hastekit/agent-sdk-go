@@ -30,13 +30,10 @@ func (w *AgentWorkflow) Run(restateCtx restate.WorkflowContext, input *WorkflowI
 		return &agents.AgentOutput{Status: agentstate.RunStatusError}, fmt.Errorf("agent not found: %s", input.AgentName)
 	}
 
-	// Prefer the StreamID supplied by the caller. The Restate runtime
-	// sets it equal to the workflow key, so falling back to the key
-	// keeps older callers working.
+	// The run streams on the StreamID the caller set. A run started without
+	// one does not stream, as a local run without one does not; the workflow
+	// key is the run's execution, not a channel.
 	streamID := input.StreamID
-	if streamID == "" {
-		streamID = restate.Key(restateCtx)
-	}
 
 	agent := w.newRestateAgentProxy(restateCtx, agentOptions, input.ProviderConfigKey, streamID)
 
@@ -44,18 +41,20 @@ func (w *AgentWorkflow) Run(restateCtx restate.WorkflowContext, input *WorkflowI
 	// chunks itself using StreamID. ExecuteLocal owns both stream closure
 	// and heartbeat setup through the broker proxy.
 	return agent.ExecuteWithoutTrace(restateCtx, &agents.AgentInput{
-		Namespace:     input.Namespace,
-		GroupID:       input.GroupID,
-		RunID:         input.RunID,
-		ThreadID:      input.ThreadID,
-		SessionID:     input.SessionID,
-		PreviousRunID: input.PreviousRunID,
-		Message:       input.Message,
-		RunContext:    input.RunContext,
-		Skills:        input.Skills,
-		MCP:           input.MCP,
-		ClientTools:   input.ClientTools,
-		StreamID:      streamID,
+		Namespace:      input.Namespace,
+		GroupID:        input.GroupID,
+		ParentThreadID: input.ParentThreadID,
+		Hidden:         input.Hidden,
+		RunID:          input.RunID,
+		ThreadID:       input.ThreadID,
+		SessionID:      input.SessionID,
+		PreviousRunID:  input.PreviousRunID,
+		Message:        input.Message,
+		RunContext:     input.RunContext,
+		Skills:         input.Skills,
+		MCP:            input.MCP,
+		ClientTools:    input.ClientTools,
+		StreamID:       streamID,
 	})
 }
 
@@ -113,12 +112,18 @@ func (w *AgentWorkflow) proxyAgent(
 	if agentOptions.SkillClient != nil {
 		skillClient = NewRestateSkillClient(restateCtx, agentOptions.SkillClient, w.broker, agents.ToolCallMiddlewaresOf(agentOptions.Middlewares)...)
 	}
+
+	var subAgents agents.SubAgentClient
+	if agentOptions.SubAgents != nil {
+		subAgents = NewRestateSubAgentClient(restateCtx, agentOptions.SubAgents)
+	}
 	// Keep durable broker operations separate from non-durable heartbeat delivery.
 	opts := &agents.AgentOptions{
-		Name:       agentOptions.Name,
-		Output:     agentOptions.Output,
-		Parameters: agentOptions.Parameters,
-		MaxLoops:   agentOptions.MaxLoops,
+		Name:        agentOptions.Name,
+		Description: agentOptions.Description,
+		Output:      agentOptions.Output,
+		Parameters:  agentOptions.Parameters,
+		MaxLoops:    agentOptions.MaxLoops,
 		// Behaviour the agent was configured with, and which the workflow
 		// rebuild has to carry: a field left out here does not fail, it just
 		// stops applying inside a workflow. Sticky routing went missing that
@@ -130,6 +135,7 @@ func (w *AgentWorkflow) proxyAgent(
 		History:      conversationHistory,
 		Tools:        restateTools,
 		SkillClient:  skillClient,
+		SubAgents:    subAgents,
 		MCPClient:    mcpClient,
 		ClientTools:  agentOptions.ClientTools,
 		ToolExecutor: NewRestateToolExecutor(restateCtx),

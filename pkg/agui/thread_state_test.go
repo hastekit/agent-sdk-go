@@ -129,3 +129,35 @@ func TestThreadRunStateOfAnEmptyTranscript(t *testing.T) {
 	assert.Nil(t, threadRunState(nil))
 	assert.Nil(t, threadRunState([]history.ConversationMessage{{}}), "no run meta, nothing to say")
 }
+
+// Hidden threads (sub-agent conversations) share their caller's namespace and
+// group, so the sidebar listing must leave them out unless asked.
+func TestThreadListingSkipsHiddenThreads(t *testing.T) {
+	store := history.NewInMemoryConversationPersistence()
+	ctx := t.Context()
+	require.NoError(t, store.SaveMessages(ctx, "default", "", "", false, "r1", "", "visible", "c1", nil, nil))
+	require.NoError(t, store.SaveMessages(ctx, "default", "", "visible", true, "r2", "", "sub-agent", "c1", nil, nil))
+	agent := agents.NewAgent(&agents.AgentOptions{Name: "Helper", History: history.NewConversationManager(store)})
+	server := httptest.NewServer(NewHandler(registry{"Helper": agent}))
+	defer server.Close()
+
+	list := func(query string) []history.ThreadInfo {
+		res, err := http.Get(server.URL + "/agents/Helper/threads" + query)
+		require.NoError(t, err)
+		defer res.Body.Close()
+		require.Equal(t, http.StatusOK, res.StatusCode)
+		var out struct {
+			Threads []history.ThreadInfo `json:"threads"`
+		}
+		require.NoError(t, json.NewDecoder(res.Body).Decode(&out))
+		return out.Threads
+	}
+
+	threads := list("")
+	require.Len(t, threads, 1)
+	assert.Equal(t, "visible", threads[0].ThreadID)
+	assert.Empty(t, threads[0].ParentThreadID)
+
+	threads = list("?include_hidden=true")
+	require.Len(t, threads, 2)
+}

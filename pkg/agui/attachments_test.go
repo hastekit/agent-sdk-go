@@ -123,7 +123,7 @@ func TestAttachmentSessionSharedByForkedThreads(t *testing.T) {
 	manager := history.NewConversationManager(persistence)
 	agent := agents.NewAgent(&agents.AgentOptions{Name: "test", History: manager})
 	for _, row := range []struct{ run, previous string }{{"first", ""}, {"second", "first"}, {"fork", "first"}} {
-		require.NoError(t, persistence.SaveMessages(ctx, "tenant", "default", row.run, row.previous, "parent", "conversation", []history.Message{{ID: row.run}}, nil))
+		require.NoError(t, persistence.SaveMessages(ctx, "tenant", "default", "", false, row.run, row.previous, "parent", "conversation", []history.Message{{ID: row.run}}, nil))
 	}
 	threads, err := persistence.ListThreads(ctx, "tenant", "default")
 	require.NoError(t, err)

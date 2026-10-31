@@ -2,6 +2,8 @@ package responses
 
 import (
 	"errors"
+	"fmt"
+	"time"
 
 	"github.com/bytedance/sonic"
 	"github.com/google/uuid"
@@ -16,6 +18,48 @@ type Response struct {
 	Error       *Error                 `json:"error"`
 	ServiceTier string                 `json:"service_tier"`
 	Metadata    map[string]interface{} `json:"metadata"`
+}
+
+// CreatedAtMetadataKey is the Response.Metadata entry holding when the reply
+// was produced: when the model call that made it returned. Read it with
+// Response.CreatedAt.
+const CreatedAtMetadataKey = "created_at"
+
+// SetCreatedAt records when the reply was produced.
+func (r *Response) SetCreatedAt(at time.Time) {
+	if r.Metadata == nil {
+		r.Metadata = map[string]interface{}{}
+	}
+	r.Metadata[CreatedAtMetadataKey] = at
+}
+
+// CreatedAt reads what SetCreatedAt recorded; ok is false when it was not
+// recorded.
+func (r *Response) CreatedAt() (at time.Time, ok bool, err error) {
+	if r == nil {
+		return at, false, nil
+	}
+	return CreatedAtFromMetadata(r.Metadata)
+}
+
+// CreatedAtFromMetadata reads a time stored under CreatedAtMetadataKey. It
+// accepts both the value as set and its JSON form (an RFC 3339 string), which
+// is what arrives after metadata crossed a durable runtime's boundary.
+func CreatedAtFromMetadata(metadata map[string]interface{}) (at time.Time, ok bool, err error) {
+	switch value := metadata[CreatedAtMetadataKey].(type) {
+	case nil:
+		return at, false, nil
+	case time.Time:
+		return value, true, nil
+	case string:
+		at, err = time.Parse(time.RFC3339Nano, value)
+		if err != nil {
+			return at, false, fmt.Errorf("%s: %w", CreatedAtMetadataKey, err)
+		}
+		return at, true, nil
+	default:
+		return at, false, fmt.Errorf("%s: unexpected %T", CreatedAtMetadataKey, value)
+	}
 }
 
 type Error struct {

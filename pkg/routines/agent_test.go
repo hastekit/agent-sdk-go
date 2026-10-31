@@ -90,7 +90,7 @@ func TestRoutineExecutionPersistsGroup(t *testing.T) {
 	}
 	defer store.Close()
 	// Match stores containing legacy records with an empty run ID.
-	if err := store.SaveMessages(ctx, "tenant", history.DefaultGroupID, "", "", "legacy-thread", "legacy-conversation", nil, nil); err != nil {
+	if err := store.SaveMessages(ctx, "tenant", history.DefaultGroupID, "", false, "", "", "legacy-thread", "legacy-conversation", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	broker := streambroker.NewMemoryStreamBroker()

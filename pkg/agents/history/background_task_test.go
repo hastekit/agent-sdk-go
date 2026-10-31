@@ -1,6 +1,7 @@
 package history
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -33,7 +34,7 @@ func TestProcessIncoming_CompletesTheTaskAResultBelongsTo(t *testing.T) {
 
 	bundle := messages.New("", notice("[Background task task-1 has finished.]"))
 	bundle.BackgroundTaskID = "task-1"
-	cm.ProcessIncomingMessages(bundle, false)
+	cm.ProcessIncomingMessages(context.Background(), bundle, false)
 
 	remaining := cm.RunState.BackgroundTaskList()
 	require.Len(t, remaining, 1, "only the one that landed is dropped")
@@ -47,7 +48,7 @@ func TestProcessIncoming_CompletesFromTheQueueToo(t *testing.T) {
 
 	bundle := messages.New("", notice("[Background task task-1 has finished.]"))
 	bundle.BackgroundTaskID = "task-1"
-	cm.ProcessIncomingMessages(bundle, true)
+	cm.ProcessIncomingMessages(context.Background(), bundle, true)
 
 	assert.False(t, cm.RunState.HasBackgroundTasks())
 }
@@ -58,7 +59,7 @@ func TestProcessIncoming_CompletesFromTheQueueToo(t *testing.T) {
 func TestProcessIncoming_LeavesTasksAloneForAnOrdinaryTurn(t *testing.T) {
 	cm := runManagerWithTasks("task-1")
 
-	cm.ProcessIncomingMessages(messages.New("user", notice("what is the weather")), false)
+	cm.ProcessIncomingMessages(context.Background(), messages.New("user", notice("what is the weather")), false)
 
 	assert.True(t, cm.RunState.HasBackgroundTasks(),
 		"a turn of the user's own is not a task landing")
@@ -70,7 +71,7 @@ func TestProcessIncoming_IgnoresAnUnknownTask(t *testing.T) {
 
 	bundle := messages.New("", notice("[Background task task-9 has finished.]"))
 	bundle.BackgroundTaskID = "task-9"
-	assert.NotPanics(t, func() { cm.ProcessIncomingMessages(bundle, false) })
+	assert.NotPanics(t, func() { cm.ProcessIncomingMessages(context.Background(), bundle, false) })
 
 	assert.True(t, cm.RunState.HasBackgroundTasks())
 }

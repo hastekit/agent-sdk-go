@@ -3,6 +3,7 @@ import { CopilotChat, CopilotKitProvider } from "@copilotkit/react-core/v2";
 import type { InputContent } from "@ag-ui/core";
 import { HastekitAgent } from "@hastekit/copilotkit";
 import { fetchMCPServers, fetchSkillCatalog, isGlobalMCPServer, type MCPServerInfo } from "./api";
+import { ToolResultLookup } from "./tool-results";
 import { AttachmentMessageView } from "./attachment-message";
 import { ComposerMCPContext, ComposerSkillsContext } from "./composer-menu";
 import { MCPLibrary } from "./mcp-library";
@@ -131,6 +132,12 @@ export default function App() {
     [steer, server.attachmentsEnabled, active.sessionId]
   );
 
+  // Tool cards find their stored result (and when it came back) by call id.
+  const toolResultLookup = useCallback(
+    (toolCallId: string) => agent?.messages.find((m) => m.role === "tool" && m.toolCallId === toolCallId),
+    [agent]
+  );
+
   const [routinesOpen, setRoutinesOpen] = useState(false);
   const [libraryOpen, setLibraryOpen] = useState(false);
   const [mcpLibraryOpen, setMCPLibraryOpen] = useState(false);
@@ -205,6 +212,7 @@ export default function App() {
             <ComposerSkillsContext.Provider value={{ builtIn: builtInSkills, skills: skills.items, choices: skills.choices, error: skills.error, toggle: skills.toggle, canManage: server.skillStoreEnabled, onManage: () => setLibraryOpen(true) }}>
             <ComposerMCPContext.Provider value={{ servers: mcp.items, choices: mcp.choices, error: mcp.error, toggle: mcp.toggle, canManage: server.mcpStoreEnabled, onManage: () => setMCPLibraryOpen(true) }}>
             <TrayContext.Provider value={activity.tray}>
+              <ToolResultLookup.Provider value={toolResultLookup}>
               <HistoryPager key={`${agentName}:${active.threadId}`} agent={agent} initialCursor={active.nextCursor ?? ""}>
                 <CopilotChat
                   agentId={agentName}
@@ -218,6 +226,7 @@ export default function App() {
                   messageView={AttachmentMessageView as any}
                 />
               </HistoryPager>
+              </ToolResultLookup.Provider>
             </TrayContext.Provider>
             </ComposerMCPContext.Provider>
             </ComposerSkillsContext.Provider>

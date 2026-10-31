@@ -2,12 +2,13 @@ package sdk
 
 import (
 	"fmt"
+	"strings"
+
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/history"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/streambroker"
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm"
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
-	"strings"
 )
 
 type Agent = agents.Agent
@@ -27,7 +28,12 @@ type HistoryMiddleware = agents.HistoryMiddleware
 type PromptMiddleware = agents.PromptMiddleware
 
 type AgentConfig struct {
-	Name          string
+	Name string
+
+	// Description is what the agent is for, in a sentence or two: what an
+	// agent that can hand it work is told about it. See SubAgents.
+	Description string
+
 	LLM           llm.Provider
 	Output        map[string]any
 	Tools         []Tool
@@ -51,11 +57,18 @@ type AgentConfig struct {
 	// Middlewares wrap model/tool calls, history loads/saves and prompt
 	// retrieval. Embed agents.NoopMiddleware and override selected methods.
 	Middlewares []agents.Middleware
+
+	// SubAgents is the agents this one may hand work to through the
+	// call_sub_agent tool, waiting for the answer or not. See
+	// subagents.NewClient, which serves agents from a Registry and can let the
+	// agent hand work to copies of itself.
+	SubAgents agents.SubAgentClient
 }
 
 func (ac *AgentConfig) toAgentOptions() *agents.AgentOptions {
 	return &agents.AgentOptions{
 		Name:          ac.Name,
+		Description:   ac.Description,
 		LLM:           ac.LLM,
 		Output:        ac.Output,
 		Tools:         ac.Tools,
@@ -69,6 +82,7 @@ func (ac *AgentConfig) toAgentOptions() *agents.AgentOptions {
 		SkillClient:   ac.SkillClient,
 		ClientTools:   ac.ClientTools,
 		Middlewares:   ac.Middlewares,
+		SubAgents:     ac.SubAgents,
 	}
 }
 

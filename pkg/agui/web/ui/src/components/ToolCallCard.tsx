@@ -1,4 +1,7 @@
+import { useContext } from "react";
 import { useDefaultRenderTool } from "@copilotkit/react-core/v2";
+import { MessageTime } from "../message-time";
+import { ToolResultLookup } from "../tool-results";
 
 export function InlineToolRenderer({ agentName }: { agentName: string }) {
   useDefaultRenderTool(
@@ -12,15 +15,22 @@ export function InlineToolRenderer({ agentName }: { agentName: string }) {
 
 function ToolCallCard({
   name,
+  toolCallId,
   status,
   parameters,
   result,
 }: {
   name: string;
+  toolCallId: string;
   status: "inProgress" | "executing" | "complete";
   parameters: unknown;
   result: string | undefined;
 }) {
+  // When the result came back: the stored time, or for a call that finished
+  // while this page watched, when the card first showed it done.
+  const lookup = useContext(ToolResultLookup);
+  const stored = lookup(toolCallId);
+  const finished = status === "complete" ? { id: `tool-result:${toolCallId}`, metadata: stored?.metadata } : null;
   const dot =
     status === "complete" ? "#10b981" : status === "executing" ? "#f59e0b" : "#94a3b8";
   const pill =
@@ -39,6 +49,7 @@ function ToolCallCard({
           <span className="hk-pill" style={{ background: pill.bg, color: pill.fg }}>
             {pill.label}
           </span>
+          {finished && <MessageTime message={finished} />}
         </summary>
         <div className="body">
           {hasContent(parameters) && <Block label="Arguments" value={parameters} />}

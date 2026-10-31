@@ -1,6 +1,8 @@
 package messages
 
 import (
+	"time"
+
 	"github.com/google/uuid"
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
 )
@@ -25,6 +27,13 @@ type Message struct {
 	// delivery, which knows the call and the tool as well. This is only the
 	// bookkeeping.
 	BackgroundTaskID string `json:"background_task_id,omitempty" db:"background_task_id"`
+
+	// CreatedAt is when the bundle was produced: for a model reply or a tool
+	// result, when the call returned (stamped by TimestampMiddleware inside
+	// the call's step); for anything else, when it joined its run, read from
+	// the run's clock. Both are recorded by a durable runtime, so replay
+	// repeats them. Zero on bundles stored before it existed.
+	CreatedAt time.Time `json:"created_at,omitzero" db:"created_at"`
 }
 
 // New builds a bundle under a fresh uuid.

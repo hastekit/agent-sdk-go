@@ -18,8 +18,14 @@ var (
 )
 
 // ConversationMessage represents a turn within a thread.
+//
+// ParentThreadID is the thread that started the conversation: empty for
+// user-started conversations, the spawning thread for agent-started ones.
+// Hidden marks internal conversations that listing UIs may skip.
 type ConversationMessage struct {
 	GroupID        string         `json:"group_id,omitempty" db:"group_id"`
+	ParentThreadID string         `json:"parent_thread_id,omitempty" db:"parent_thread_id"`
+	Hidden         bool           `json:"hidden,omitempty" db:"hidden"`
 	RunID          string         `json:"run_id" db:"run_id"`
 	ThreadID       string         `json:"thread_id" db:"thread_id"`
 	ConversationID string         `json:"conversation_id" db:"conversation_id"`
@@ -45,12 +51,15 @@ type ConversationPersistenceAdapter interface {
 	NewRunID(ctx context.Context) string
 	Now(ctx context.Context) time.Time
 	LoadMessages(ctx context.Context, namespace string, threadID string, previousRunID string) ([]ConversationMessage, error)
-	// SaveMessages assigns the group (empty selects DefaultGroupID) to a new conversation. Implementations
-	// must preserve its group on continuations, incremental saves, and forks.
+	// SaveMessages assigns the group (empty selects DefaultGroupID), parent thread (empty for
+	// user-started conversations) and hidden flag to a new conversation. Implementations must
+	// preserve all three on continuations, incremental saves, and forks. A new thread joining an
+	// existing conversation takes that conversation's group, unless it has a parent thread: an
+	// agent-started thread keeps the group supplied.
 	// The loop saves its opening message before generation, then saves later increments under the
 	// same run ID. Append the supplied messages and replace non-nil metadata, including on saves
 	// with no new messages; preserve the run's conversation, thread, and creation time.
-	SaveMessages(ctx context.Context, namespace, groupID, runId, previousRunId, threadID string, conversationId string, messages []Message, meta map[string]any) error
+	SaveMessages(ctx context.Context, namespace, groupID, parentThreadID string, hidden bool, runId, previousRunId, threadID string, conversationId string, messages []Message, meta map[string]any) error
 	SaveSummary(ctx context.Context, namespace string, summary Summary) error
 }
 
@@ -128,6 +137,8 @@ type ConversationRunManager struct {
 	ConversationPersistenceAdapter
 
 	groupID        string
+	parentThreadID string
+	hidden         bool
 	namespace      string
 	conversationId string
 	runId          string
@@ -276,6 +287,27 @@ func WithGroupID(id string) RunOption {
 	}
 }
 
+// WithParentThreadID records the thread that started a new conversation, for
+// conversations an agent spawns. Restored threads and forks retain their
+// original parent. Empty marks a user-started conversation.
+func WithParentThreadID(id string) RunOption {
+	return func(cm *ConversationRunManager) {
+		if cm.previousRunId == "" {
+			cm.parentThreadID = id
+		}
+	}
+}
+
+// WithHidden marks a new conversation as internal, for listing UIs to skip.
+// Restored threads and forks retain their original visibility.
+func WithHidden(hidden bool) RunOption {
+	return func(cm *ConversationRunManager) {
+		if cm.previousRunId == "" {
+			cm.hidden = hidden
+		}
+	}
+}
+
 // DefaultGroupID is the group used for ordinary conversations.
 const DefaultGroupID = "default"
 
@@ -363,14 +395,14 @@ func (cm *ConversationRunManager) AddMessages(ctx context.Context, message Messa
 	for _, o := range opts {
 		o(&cfg)
 	}
-	cm.processIncoming(message, false, cfg)
+	cm.processIncoming(ctx, message, false, cfg)
 }
 
 // AddMessagesToQueue appends bundles sent into the run while it was going.
 // They are input (see AsInput).
 func (cm *ConversationRunManager) AddMessagesToQueue(ctx context.Context, msgs []Message) {
 	for _, m := range msgs {
-		cm.processIncoming(m, true, addMessageConfig{estimate: true, input: true})
+		cm.processIncoming(ctx, m, true, addMessageConfig{estimate: true, input: true})
 	}
 }
 
@@ -577,6 +609,8 @@ func (cm *ConversationRunManager) LoadMessages(ctx context.Context, namespace st
 		cm.threadId = msg.ThreadID
 		cm.conversationId = msg.ConversationID
 		cm.groupID = NormalizeGroupID(msg.GroupID)
+		cm.parentThreadID = msg.ParentThreadID
+		cm.hidden = msg.Hidden
 		cm.previousRunId = msg.RunID
 
 		oldMessages = append(oldMessages, msg.Messages...)
@@ -610,6 +644,12 @@ func (cm *ConversationRunManager) GetMeta() map[string]any {
 // GetGroupID returns the group of the new or restored conversation.
 func (cm *ConversationRunManager) GetGroupID() string {
 	return cm.groupID
+}
+
+// GetParentThreadID returns the thread that started the new or restored
+// conversation, or empty for a user-started one.
+func (cm *ConversationRunManager) GetParentThreadID() string {
+	return cm.parentThreadID
 }
 
 // GetRunID returns the current run ID.
@@ -667,7 +707,7 @@ func (cm *ConversationRunManager) SaveMessages(ctx context.Context) error {
 	}
 
 	if cm.ConversationPersistenceAdapter != nil {
-		err := cm.ConversationPersistenceAdapter.SaveMessages(ctx, cm.namespace, cm.groupID, cm.runId, cm.previousRunId, cm.threadId, cm.conversationId, cm.newMessages, meta)
+		err := cm.ConversationPersistenceAdapter.SaveMessages(ctx, cm.namespace, cm.groupID, cm.parentThreadID, cm.hidden, cm.runId, cm.previousRunId, cm.threadId, cm.conversationId, cm.newMessages, meta)
 		if err != nil {
 			return err
 		}
@@ -768,11 +808,11 @@ func (cm *ConversationRunManager) loadSubAgentContext(ctx context.Context) {
 // ProcessIncomingMessages appends an inbound message, estimating its size
 // against the context window. It is input (see AsInput). Use AddMessages
 // with AlreadyMeasured to append one the provider has already counted.
-func (cm *ConversationRunManager) ProcessIncomingMessages(message Message, queue bool) {
-	cm.processIncoming(message, queue, addMessageConfig{estimate: true, input: true})
+func (cm *ConversationRunManager) ProcessIncomingMessages(ctx context.Context, message Message, queue bool) {
+	cm.processIncoming(ctx, message, queue, addMessageConfig{estimate: true, input: true})
 }
 
-func (cm *ConversationRunManager) processIncoming(message Message, queue bool, cfg addMessageConfig) {
+func (cm *ConversationRunManager) processIncoming(ctx context.Context, message Message, queue bool, cfg addMessageConfig) {
 	// A background task's result landing is the answer to something the run is
 	// carrying, the same as an approval is — so it is reconciled here, where
 	// every incoming bundle already passes and where the run state is to hand.
@@ -830,6 +870,11 @@ func (cm *ConversationRunManager) processIncoming(message Message, queue bool, c
 		bundle := message
 		if len(stored) != len(message.Messages) {
 			bundle.Messages = stored
+		}
+		// Stamped here, where it joins the run, and only when it is kept: an
+		// approval-only bundle never reads the clock.
+		if bundle.CreatedAt.IsZero() {
+			bundle.CreatedAt = cm.now(ctx)
 		}
 		cm.trackRun(bundle)
 

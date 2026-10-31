@@ -42,6 +42,18 @@ func StreamIDForThread(namespace, threadID string) string {
 	return uuid.NewSHA1(uuid.NameSpaceURL, []byte("hastekit:stream:"+namespace+"\x00"+threadID)).String()
 }
 
+// ExecutionID is the id a durable runtime runs one execution of in under:
+// the caller's RunID when it chose one — so a repeated start of the same run
+// is recognised — or else a fresh id. It is deliberately not the stream id,
+// which names the thread's channel and is the same for every turn on it,
+// while a workflow id or key names one execution.
+func ExecutionID(in *AgentInput) string {
+	if in.RunID != "" {
+		return in.RunID
+	}
+	return uuid.NewString()
+}
+
 // StreamIDForTask returns the broker channel a background task streams its
 // progress on.
 //

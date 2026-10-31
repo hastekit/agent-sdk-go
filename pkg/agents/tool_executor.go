@@ -119,7 +119,7 @@ func (e *DefaultToolExecutor) WithStreamBroker(broker StreamBroker) ToolExecutor
 // ExecuteAll runs calls sequentially, with stop middleware outside user middleware.
 func (e *DefaultToolExecutor) ExecuteAll(ctx context.Context, executions []ExecutableToolCall) []ToolExecutionResult {
 	results := make([]ToolExecutionResult, len(executions))
-	middlewares := append([]ToolCallMiddleware{StopMiddleware{Watcher: e.StopWatcher, CancelGracePeriod: e.CancelGracePeriod}}, e.Middlewares...)
+	middlewares := append([]ToolCallMiddleware{StopMiddleware{Watcher: e.StopWatcher, CancelGracePeriod: e.CancelGracePeriod}, TimestampMiddleware{}}, e.Middlewares...)
 	updates := map[string]string{}
 	stopped := false
 	for i, ex := range executions {

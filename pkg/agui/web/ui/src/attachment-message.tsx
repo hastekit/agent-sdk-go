@@ -1,8 +1,11 @@
 import {
+  CopilotChatAssistantMessage,
   CopilotChatMessageView,
   CopilotChatUserMessage,
+  type CopilotChatAssistantMessageProps,
   type CopilotChatUserMessageProps,
 } from "@copilotkit/react-core/v2";
+import { MessageTime } from "./message-time";
 
 function AttachmentUserMessage(props: CopilotChatUserMessageProps) {
   const original = props.message.content;
@@ -21,7 +24,11 @@ function AttachmentUserMessage(props: CopilotChatUserMessageProps) {
     }
     return part;
   });
-  props = { ...props, message: { ...props.message, content } };
+  props = {
+    ...props,
+    message: { ...props.message, content },
+    additionalToolbarItems: <>{props.additionalToolbarItems}<MessageTime message={props.message} /></>,
+  };
   if (typeof content === "string") return <CopilotChatUserMessage {...props} />;
   // CopilotKit renders document cards without a link. Owned documents use
   // the authorized download endpoint so the user can retrieve the original.
@@ -44,6 +51,13 @@ function AttachmentUserMessage(props: CopilotChatUserMessageProps) {
   </div>;
 }
 
+function TimedAssistantMessage(props: CopilotChatAssistantMessageProps) {
+  return <CopilotChatAssistantMessage {...props}
+    additionalToolbarItems={<>{props.additionalToolbarItems}<MessageTime message={props.message} /></>} />;
+}
+
 export function AttachmentMessageView(props: any) {
-  return <CopilotChatMessageView {...props} userMessage={AttachmentUserMessage as any} />;
+  return <CopilotChatMessageView {...props}
+    userMessage={AttachmentUserMessage as any}
+    assistantMessage={TimedAssistantMessage as any} />;
 }

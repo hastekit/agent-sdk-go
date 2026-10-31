@@ -15,6 +15,8 @@ import (
 // inMemoryMessage represents a message with its ordering metadata
 type inMemoryMessage struct {
 	GroupID        string
+	ParentThreadID string
+	Hidden         bool
 	RunID          string
 	PreviousRunID  string
 	ThreadID       string
@@ -29,6 +31,8 @@ type inMemoryMessage struct {
 // inMemoryThread represents a thread with its message chain
 type inMemoryThread struct {
 	GroupID        string
+	ParentThreadID string
+	Hidden         bool
 	ThreadID       string
 	ConversationID string
 	OriginRunID    string
@@ -145,6 +149,8 @@ func (p *InMemoryConversationPersistence) LoadMessages(ctx context.Context, name
 				ThreadID:       summary.ThreadID,
 				ConversationID: thread.ConversationID,
 				GroupID:        thread.GroupID,
+				ParentThreadID: thread.ParentThreadID,
+				Hidden:         thread.Hidden,
 				Messages:       []Message{summary.SummaryMessage},
 				Meta:           summary.Meta,
 			}
@@ -158,6 +164,8 @@ func (p *InMemoryConversationPersistence) LoadMessages(ctx context.Context, name
 					ThreadID:       m.ThreadID,
 					ConversationID: m.ConversationID,
 					GroupID:        m.GroupID,
+					ParentThreadID: m.ParentThreadID,
+					Hidden:         m.Hidden,
 					Messages:       m.Messages,
 					Meta:           m.Meta,
 				})
@@ -175,6 +183,8 @@ func (p *InMemoryConversationPersistence) LoadMessages(ctx context.Context, name
 			ThreadID:       m.ThreadID,
 			ConversationID: m.ConversationID,
 			GroupID:        m.GroupID,
+			ParentThreadID: m.ParentThreadID,
+			Hidden:         m.Hidden,
 			Messages:       m.Messages,
 			Meta:           m.Meta,
 		})
@@ -190,7 +200,7 @@ func (p *InMemoryConversationPersistence) LoadMessages(ctx context.Context, name
 }
 
 // SaveMessages saves messages with support for conversations and threads
-func (p *InMemoryConversationPersistence) SaveMessages(ctx context.Context, namespace, groupID, runId, previousRunId, threadId, conversationId string, messages []Message, meta map[string]any) error {
+func (p *InMemoryConversationPersistence) SaveMessages(ctx context.Context, namespace, groupID, parentThreadID string, hidden bool, runId, previousRunId, threadId, conversationId string, messages []Message, meta map[string]any) error {
 	ctx, span := tracer.Start(ctx, "InMemoryConversationPersistence.SaveMessages")
 	defer span.End()
 
@@ -206,8 +216,13 @@ func (p *InMemoryConversationPersistence) SaveMessages(ctx context.Context, name
 	defer p.mu.Unlock()
 
 	groupID = NormalizeGroupID(groupID)
-	// New threads within an existing conversation belong to that same group.
-	if conversationId != "" {
+	// New threads within an existing conversation belong to that same group,
+	// unless an agent started them: a thread with a parent is grouped under
+	// the thread that started it, as supplied. Parent and hidden describe the
+	// thread itself (a sub-agent thread shares its caller's conversation but
+	// not its visibility), so new threads keep the values supplied;
+	// continuations and forks keep their thread's.
+	if conversationId != "" && parentThreadID == "" {
 		for _, existing := range p.threads {
 			if existing.Namespace == namespace && existing.ConversationID == conversationId {
 				groupID = existing.GroupID
@@ -217,12 +232,16 @@ func (p *InMemoryConversationPersistence) SaveMessages(ctx context.Context, name
 	}
 	if existing, ok := p.threads[historyKey(namespace, threadId)]; ok {
 		groupID = existing.GroupID
+		parentThreadID = existing.ParentThreadID
+		hidden = existing.Hidden
 	}
 	// Only continuations and forks have a parent. Legacy files may contain a
 	// row indexed under an empty run ID; it must not classify new conversations.
 	if previousRunId != "" {
 		if previous, ok := p.messages[historyKey(namespace, previousRunId)]; ok {
 			groupID = previous.GroupID
+			parentThreadID = previous.ParentThreadID
+			hidden = previous.Hidden
 		}
 	}
 	now := time.Now()
@@ -270,7 +289,7 @@ func (p *InMemoryConversationPersistence) SaveMessages(ctx context.Context, name
 		}
 
 		// Create a new thread
-		p.threads[historyKey(namespace, threadID)] = &inMemoryThread{GroupID: groupID,
+		p.threads[historyKey(namespace, threadID)] = &inMemoryThread{GroupID: groupID, ParentThreadID: parentThreadID, Hidden: hidden,
 			ThreadID:       threadID,
 			OriginRunID:    runId,
 			ConversationID: convID,
@@ -290,7 +309,7 @@ func (p *InMemoryConversationPersistence) SaveMessages(ctx context.Context, name
 			}
 			threadID = uuid.New().String()
 
-			p.threads[historyKey(namespace, threadID)] = &inMemoryThread{GroupID: groupID,
+			p.threads[historyKey(namespace, threadID)] = &inMemoryThread{GroupID: groupID, ParentThreadID: parentThreadID, Hidden: hidden,
 				ThreadID:       threadID,
 				ConversationID: convID,
 				OriginRunID:    runId,
@@ -322,7 +341,7 @@ func (p *InMemoryConversationPersistence) SaveMessages(ctx context.Context, name
 						}
 					}
 
-					p.threads[historyKey(namespace, newThreadID)] = &inMemoryThread{GroupID: groupID,
+					p.threads[historyKey(namespace, newThreadID)] = &inMemoryThread{GroupID: groupID, ParentThreadID: parentThreadID, Hidden: hidden,
 						ThreadID:       newThreadID,
 						ConversationID: convID,
 						OriginRunID:    prevMsg.ThreadID, // Reference to original thread
@@ -342,7 +361,7 @@ func (p *InMemoryConversationPersistence) SaveMessages(ctx context.Context, name
 		convID = uuid.New().String()
 		threadID = uuid.New().String()
 
-		p.threads[historyKey(namespace, threadID)] = &inMemoryThread{GroupID: groupID,
+		p.threads[historyKey(namespace, threadID)] = &inMemoryThread{GroupID: groupID, ParentThreadID: parentThreadID, Hidden: hidden,
 			ThreadID:       threadID,
 			ConversationID: convID,
 			OriginRunID:    runId,
@@ -354,7 +373,7 @@ func (p *InMemoryConversationPersistence) SaveMessages(ctx context.Context, name
 	}
 
 	// Create and store the message
-	p.messages[historyKey(namespace, runId)] = &inMemoryMessage{GroupID: groupID,
+	p.messages[historyKey(namespace, runId)] = &inMemoryMessage{GroupID: groupID, ParentThreadID: parentThreadID, Hidden: hidden,
 		RunID:          runId,
 		PreviousRunID:  previousRunId,
 		ThreadID:       threadID,

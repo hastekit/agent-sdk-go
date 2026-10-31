@@ -16,7 +16,7 @@ type RestateMCPClient struct {
 }
 
 func NewRestateMCPClient(ctx restate.WorkflowContext, client agents.MCPClient, broker agents.StreamBroker, middlewares ...agents.ToolCallMiddleware) *RestateMCPClient {
-	return &RestateMCPClient{ctx: ctx, client: client, middlewares: append([]agents.ToolCallMiddleware{agents.StopMiddleware{Watcher: agents.StopWatcherFrom(broker)}}, middlewares...)}
+	return &RestateMCPClient{ctx: ctx, client: client, middlewares: append([]agents.ToolCallMiddleware{agents.StopMiddleware{Watcher: agents.StopWatcherFrom(broker)}, agents.TimestampMiddleware{}}, middlewares...)}
 }
 
 func (c *RestateMCPClient) ListTools(_ context.Context, namespace string, runContext map[string]any, selection ...agents.MCPSelection) ([]agents.ConnectorStatus, []agents.Tool, error) {

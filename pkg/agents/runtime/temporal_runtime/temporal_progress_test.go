@@ -32,10 +32,12 @@ func (t *progressTool) Execute(ctx context.Context, params *agents.ToolCall) (*a
 // The tool activity runs the tool with ToolCall.Progress stripped by the
 // workflow→activity serialization boundary; NewTemporalTool must re-inject a
 // broker-backed reporter so the tool's progress still reaches the run stream.
+//
+// That stream is the one the call carries, not the workflow id: the workflow
+// is keyed by the run, the stream by the thread, and progress published on the
+// workflow id reaches nobody.
 func TestTemporalToolActivity_ReinjectsProgressReporter(t *testing.T) {
-	// The activity test environment reports this fixed workflow execution id,
-	// which is the stream channel the injected reporter publishes on.
-	const streamID = "default-test-workflow-id"
+	const streamID = "thread-stream"
 
 	broker := streambroker.NewMemoryStreamBroker()
 	chunks, err := broker.Subscribe(context.Background(), streamID)
@@ -66,6 +68,7 @@ func TestTemporalToolActivity_ReinjectsProgressReporter(t *testing.T) {
 			CallID: "call_1",
 			Name:   "worker",
 		},
+		StreamID: streamID,
 	})
 	if err != nil {
 		t.Fatalf("activity failed: %v", err)
@@ -98,5 +101,37 @@ func TestTemporalToolActivity_ReinjectsProgressReporter(t *testing.T) {
 	}
 	if p.Message != "halfway" || p.Progress != 1 || p.Total != 2 {
 		t.Fatalf("progress chunk payload wrong: %+v", p)
+	}
+}
+
+// A call with no stream has nowhere to report to: the tool runs without a
+// reporter, and nothing is published on the workflow id in its place.
+func TestTemporalToolActivity_NoStreamNoProgress(t *testing.T) {
+	const workflowID = "default-test-workflow-id"
+
+	broker := streambroker.NewMemoryStreamBroker()
+	chunks, err := broker.Subscribe(context.Background(), workflowID)
+	if err != nil {
+		t.Fatalf("subscribe failed: %v", err)
+	}
+	tool := &progressTool{BaseTool: &agents.BaseTool{ToolUnion: responses.ToolUnion{OfFunction: &responses.FunctionTool{
+		Name: "worker", Parameters: map[string]any{"type": "object", "properties": map[string]any{}},
+	}}}}
+	temporalTool := temporal_runtime.NewTemporalTool(tool, broker)
+
+	var suite testsuite.WorkflowTestSuite
+	env := suite.NewTestActivityEnvironment()
+	env.RegisterActivity(temporalTool.Execute)
+	if _, err := env.ExecuteActivity(temporalTool.Execute, &agents.ToolCall{
+		FunctionCallMessage: &responses.FunctionCallMessage{ID: "fc_1", CallID: "call_1", Name: "worker"},
+	}); err != nil {
+		t.Fatalf("activity failed: %v", err)
+	}
+
+	broker.Close(context.Background(), workflowID)
+	for chunk := range chunks {
+		if chunk.OfToolProgress != nil {
+			t.Fatalf("progress published on the workflow id: %+v", chunk.OfToolProgress)
+		}
 	}
 }

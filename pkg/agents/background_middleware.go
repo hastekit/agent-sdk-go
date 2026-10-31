@@ -27,6 +27,7 @@ func (t *backgroundToolMiddleware) AwaitTask(ctx context.Context, ref Background
 		AgentName:           t.agentName,
 		Namespace:           ref.Namespace,
 		ThreadID:            ref.ThreadID,
+		GroupID:             ref.ThreadID, // as the loop sets it for the call that started the task
 		SessionID:           ref.SessionID,
 		StreamID:            ref.TaskStreamID,
 		RunContext:          ref.RunContext,

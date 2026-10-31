@@ -16,7 +16,7 @@ type TemporalMCPClient struct {
 }
 
 func NewTemporalMCPClient(client agents.MCPClient, broker agents.StreamBroker, middlewares ...agents.ToolCallMiddleware) *TemporalMCPClient {
-	return &TemporalMCPClient{client: client, broker: broker, middlewares: append([]agents.ToolCallMiddleware{agents.StopMiddleware{Watcher: agents.StopWatcherFrom(broker)}}, middlewares...)}
+	return &TemporalMCPClient{client: client, broker: broker, middlewares: append([]agents.ToolCallMiddleware{agents.StopMiddleware{Watcher: agents.StopWatcherFrom(broker)}, agents.TimestampMiddleware{}}, middlewares...)}
 }
 
 // ListTools resolves configuration and credentials only inside the activity.

@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/history"
@@ -334,4 +335,56 @@ func TestHistoryToMessagesSkipsEveryMessageInABackgroundBundle(t *testing.T) {
 	}}
 
 	assert.Empty(t, HistoryToMessages(rows))
+}
+
+// The chat shows when each message was sent; on reload that time comes from
+// the stored bundle.
+func TestHistoryToMessagesCarriesMessageTimes(t *testing.T) {
+	asked := time.Date(2026, 10, 1, 9, 30, 0, 0, time.UTC)
+	answered := asked.Add(4 * time.Second)
+	user := messages.New("user", []responses.InputMessageUnion{responses.UserMessage("hi")})
+	user.CreatedAt = asked
+	reply := messages.New("Assistant", []responses.InputMessageUnion{
+		{OfFunctionCall: &responses.FunctionCallMessage{ID: "fc_1", CallID: "call_1", Name: "lookup", Arguments: `{}`}},
+		{OfFunctionCallOutput: &responses.FunctionCallOutputMessage{ID: "fco_1", CallID: "call_1", Output: responses.FunctionCallOutputContentUnion{OfString: utils.Ptr("ok")}}},
+		{OfOutputMessage: &responses.OutputMessage{ID: "msg_1", Role: constants.RoleAssistant, Content: &responses.OutputContent{{OfOutputText: &responses.OutputTextContent{Text: "hello"}}}}},
+	})
+	reply.CreatedAt = answered
+	legacy := messages.New("user", []responses.InputMessageUnion{responses.UserMessage("from before times were stored")})
+
+	out := HistoryToMessages([]history.ConversationMessage{{RunID: "turn-1", Messages: []history.Message{user, reply, legacy}}})
+	require.Len(t, out, 5)
+	assert.Equal(t, "2026-10-01T09:30:00Z", out[0].Metadata["createdAt"])
+	assert.Equal(t, "2026-10-01T09:30:04Z", out[1].Metadata["createdAt"], "the tool-call carrier")
+	assert.Equal(t, "2026-10-01T09:30:04Z", out[2].Metadata["createdAt"], "the tool result")
+	assert.Equal(t, "2026-10-01T09:30:04Z", out[3].Metadata["createdAt"])
+	require.Contains(t, out[4].Metadata, "createdAt", "a stored message says it has no time")
+	assert.Nil(t, out[4].Metadata["createdAt"])
+}
+
+// Every message loaded from history says who sent it.
+func TestHistoryToMessagesCarriesSenderIDs(t *testing.T) {
+	out := HistoryToMessages([]history.ConversationMessage{{RunID: "turn-1", Messages: []history.Message{
+		messages.New("user-42", []responses.InputMessageUnion{responses.UserMessage("hi")}),
+		messages.New("Root_Agent", []responses.InputMessageUnion{
+			{OfReasoning: &responses.ReasoningMessage{ID: "rs_1", Summary: []responses.SummaryTextContent{{Text: "thinking"}}}},
+			{OfOutputMessage: &responses.OutputMessage{ID: "msg_1", Role: constants.RoleAssistant, Content: &responses.OutputContent{{OfOutputText: &responses.OutputTextContent{Text: "hello"}}}}},
+		}),
+		messages.New("", []responses.InputMessageUnion{{OfReasoning: &responses.ReasoningMessage{ID: "rs_2", Summary: []responses.SummaryTextContent{{Text: "unattributed"}}}}}),
+	}}})
+	require.Len(t, out, 4)
+	assert.Equal(t, "user-42", out[0].Metadata["senderId"])
+	assert.Equal(t, "Root_Agent", out[1].Metadata["senderId"], "reasoning")
+	assert.Equal(t, "Root_Agent", out[2].Metadata["senderId"])
+	assert.Nil(t, out[3].Metadata, "no sender, no metadata for a reasoning message")
+}
+
+// A message stored without an id of its own is named the way the run
+// announced it live (bundle id and position), so loading the history after
+// watching the run does not show the message twice.
+func TestHistoryToMessagesNamesIDlessInputLikeTheLiveEcho(t *testing.T) {
+	bundle := messages.NewWithID("bundle-1", "agent:Root_Agent", []responses.InputMessageUnion{responses.UserMessage("do this")})
+	out := HistoryToMessages([]history.ConversationMessage{{RunID: "turn-1", Messages: []history.Message{bundle}}})
+	require.Len(t, out, 1)
+	assert.Equal(t, "bundle-1#0", out[0].ID)
 }

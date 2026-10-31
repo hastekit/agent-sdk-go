@@ -55,7 +55,8 @@ func TestSaveRecordsTheTurnsSpan(t *testing.T) {
 	started := time.Date(2026, 3, 1, 9, 0, 0, 0, time.UTC)
 	completed := started.Add(12 * time.Second)
 
-	p := newScriptedClock(started, completed)
+	// Readings: the run opens, the user's bundle joins it, the run completes.
+	p := newScriptedClock(started, started, completed)
 	cm := NewConversationManager(p)
 
 	run, err := NewRun(ctx, cm, "ns", "thread-1", "")
@@ -71,6 +72,7 @@ func TestSaveRecordsTheTurnsSpan(t *testing.T) {
 	assert.Equal(t, started, mustParse(t, loaded[0].Meta[agentstate.StartedAtMetaKey]),
 		"the run is opened when the turn arrives")
 	assert.Equal(t, completed, mustParse(t, loaded[0].Meta[agentstate.CompletedAtMetaKey]))
+	assert.Equal(t, started, loaded[0].Messages[0].CreatedAt, "a bundle is stamped when it joins the run")
 }
 
 // A run that paused for an approval and continued keeps the time it was
@@ -82,7 +84,7 @@ func TestAResumedTurnKeepsItsOriginalStart(t *testing.T) {
 	paused := opened.Add(3 * time.Second)
 	answered := opened.Add(2 * time.Hour)
 
-	p := newScriptedClock(opened, paused, answered)
+	p := newScriptedClock(opened, opened, paused, answered, answered)
 	cm := NewConversationManager(p)
 
 	run, err := NewRun(ctx, cm, "ns", "thread-1", "")
@@ -116,7 +118,7 @@ func TestANewTurnStartsItsOwnSpan(t *testing.T) {
 	secondOpened := firstOpened.Add(time.Hour)
 	secondDone := secondOpened.Add(2 * time.Second)
 
-	p := newScriptedClock(firstOpened, firstDone, secondOpened, secondDone)
+	p := newScriptedClock(firstOpened, firstOpened, firstDone, secondOpened, secondOpened, secondDone)
 	cm := NewConversationManager(p)
 
 	run, err := NewRun(ctx, cm, "ns", "thread-1", "")
@@ -150,7 +152,7 @@ func TestAResumeWithNoRecordedStartOpensOne(t *testing.T) {
 	cm := NewConversationManager(p)
 
 	// A row written by an older version: messages and state, no span.
-	require.NoError(t, p.SaveMessages(ctx, "ns", "default", "run-old", "", "thread-1", "conv-1",
+	require.NoError(t, p.SaveMessages(ctx, "ns", "default", "", false, "run-old", "", "thread-1", "conv-1",
 		[]Message{userBundle("ada", "asked before this existed")}, map[string]any{}))
 
 	resumed, err := NewRun(ctx, cm, "ns", "thread-1", "")

@@ -14,6 +14,7 @@ type ToolCall struct {
 	Namespace    string         `json:"namespace"`
 	SessionID    string         `json:"session_id"`
 	ThreadID     string         `json:"thread_id"`
+	GroupID      string         `json:"group_id,omitempty"` // the group threads started from this call belong to: the calling thread's id
 	StreamID     string         `json:"stream_id,omitempty"`
 	RunContext   map[string]any `json:"run_context"`
 
@@ -51,6 +52,16 @@ type ToolCall struct {
 	Progress ProgressReporter `json:"-"`
 }
 
+// NewThreadGroupID is the group a thread started from this call — a
+// sub-agent's, say — belongs to: GroupID, or the calling thread's id for a
+// call built without one.
+func (c *ToolCall) NewThreadGroupID() string {
+	if c.GroupID != "" {
+		return c.GroupID
+	}
+	return c.ThreadID
+}
+
 type ToolCallResponse struct {
 	*responses.FunctionCallOutputMessage
 	StateUpdates map[string]string     `json:"state_updates,omitempty"`
@@ -74,6 +85,11 @@ type ToolCallResponse struct {
 	// anything the wait needs — the call's arguments, a cursor, a handle — has
 	// to travel, and a field in memory does not.
 	TaskPayload json.RawMessage `json:"task_payload,omitempty"`
+
+	// Metadata is what the runtime knows about the call besides its result,
+	// such as when it was produced (ToolCallCreatedAtMetadataKey). It is not shown to the
+	// model.
+	Metadata map[string]any `json:"metadata,omitempty"`
 }
 
 type Tool interface {

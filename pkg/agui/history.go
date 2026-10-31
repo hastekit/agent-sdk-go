@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/history"
@@ -39,6 +40,11 @@ func stripContextBlocks(s string) string {
 //     summary text (and any encrypted content) so the reasoning panel
 //     rehydrates the same way it rendered live; empty reasoning items
 //     (no summary) are skipped
+//   - every message carries its bundle's sender as metadata.senderId, when
+//     the bundle has one
+//   - user, assistant and tool messages carry their bundle's time as
+//     metadata.createdAt, null when the bundle was stored without one (so a
+//     client can tell a stored message from one it only saw live)
 //   - bundles carrying a background task's result are skipped whole:
 //     they are a synthetic user turn addressed to the model
 //   - approval responses and other variants are skipped — hydration is
@@ -77,7 +83,8 @@ func HistoryToMessages(rows []history.ConversationMessage) []Message {
 			if bundle.BackgroundTaskID != "" {
 				continue
 			}
-			for _, msg := range bundle.Messages {
+			bundleStart := len(out)
+			for position, msg := range bundle.Messages {
 				switch {
 				case msg.OfEasyInput != nil:
 					m := msg.OfEasyInput
@@ -87,7 +94,7 @@ func HistoryToMessages(rows []history.ConversationMessage) []Message {
 						continue
 					}
 					out = append(out, Message{
-						ID:           uniq(m.ID),
+						ID:           uniq(inputMessageID(m.ID, bundle.ID, position)),
 						Role:         roleOrUser(string(m.Role)),
 						Content:      text,
 						ContentParts: parts,
@@ -101,7 +108,7 @@ func HistoryToMessages(rows []history.ConversationMessage) []Message {
 						continue
 					}
 					out = append(out, Message{
-						ID:           uniq(m.ID),
+						ID:           uniq(inputMessageID(m.ID, bundle.ID, position)),
 						Role:         roleOrUser(string(m.Role)),
 						Content:      text,
 						ContentParts: parts,
@@ -193,6 +200,7 @@ func HistoryToMessages(rows []history.ConversationMessage) []Message {
 					})
 				}
 			}
+			stampBundle(out[bundleStart:], bundle)
 		}
 	}
 	return out
@@ -267,4 +275,43 @@ func functionOutputText(output responses.FunctionCallOutputContentUnion) string 
 		}
 	}
 	return ""
+}
+
+// stampBundle records what the stored bundle knows on the messages built
+// from it:
+//   - senderId, on every message, when the bundle has a sender;
+//   - createdAt, on user, assistant and tool messages: RFC 3339, or null when
+//     the bundle was stored without a time.
+func stampBundle(msgs []Message, bundle history.Message) {
+	var createdAt any
+	if !bundle.CreatedAt.IsZero() {
+		createdAt = bundle.CreatedAt.UTC().Format(time.RFC3339Nano)
+	}
+	for i := range msgs {
+		timed := msgs[i].Role == RoleUser || msgs[i].Role == RoleAssistant || msgs[i].Role == RoleTool
+		if !timed && bundle.SenderID == "" {
+			continue
+		}
+		if msgs[i].Metadata == nil {
+			msgs[i].Metadata = map[string]any{}
+		}
+		if timed {
+			msgs[i].Metadata["createdAt"] = createdAt
+		}
+		if bundle.SenderID != "" {
+			msgs[i].Metadata["senderId"] = bundle.SenderID
+		}
+	}
+}
+
+// inputMessageID is the id an authored message goes by. One stored without
+// an id of its own is named by its bundle and position — the same name the
+// run announced it under as it took the turn in (see the agents package's
+// publishInputMessages), so a client that saw the announcement and then loads
+// the history holds one message, not two.
+func inputMessageID(id, bundleID string, position int) string {
+	if id != "" || bundleID == "" {
+		return id
+	}
+	return fmt.Sprintf("%s#%d", bundleID, position)
 }

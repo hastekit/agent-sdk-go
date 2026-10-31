@@ -22,7 +22,7 @@ func TestConversationGroups(t *testing.T) {
 			}
 			save := func(ns, run, prev, thread, conversation, group string) {
 				t.Helper()
-				require.NoError(t, p.SaveMessages(ctx, ns, group, run, prev, thread, conversation, nil, nil))
+				require.NoError(t, p.SaveMessages(ctx, ns, group, "", false, run, prev, thread, conversation, nil, nil))
 			}
 			save("tenant", "normal", "", "normal", "normal-conv", "")
 			save("tenant", "project", "", "project", "project-conv", "project-1")
@@ -32,7 +32,7 @@ func TestConversationGroups(t *testing.T) {
 			save("tenant", "related", "", "related", "routine-conv", "")
 			save("other", "other", "", "other", "other-conv", "routine-1")
 			// A metadata-only routine marker must not classify a normal conversation.
-			require.NoError(t, p.SaveMessages(ctx, "tenant", "default", "metadata", "", "metadata", "", nil, map[string]any{
+			require.NoError(t, p.SaveMessages(ctx, "tenant", "default", "", false, "metadata", "", "metadata", "", nil, map[string]any{
 				RunContextMetaKey: map[string]any{RoutineIDContextKey: "routine-1"},
 			}))
 			if f, ok := p.(*FileConversationPersistence); ok {
@@ -114,14 +114,34 @@ func TestNewConversationDoesNotInheritEmptyPreviousRun(t *testing.T) {
 	require.NoError(t, err)
 	// Legacy conversation files can contain records without a run_id. Replaying
 	// them indexes a row under "", which is not a parent of a new conversation.
-	require.NoError(t, p.SaveMessages(ctx, "default", DefaultGroupID, "", "", "legacy-thread", "legacy-conversation", nil, nil))
+	require.NoError(t, p.SaveMessages(ctx, "default", DefaultGroupID, "", false, "", "", "legacy-thread", "legacy-conversation", nil, nil))
 	require.NoError(t, p.Close())
 	p, err = NewFileConversationPersistence(dir)
 	require.NoError(t, err)
 	defer p.Close()
-	require.NoError(t, p.SaveMessages(ctx, "default", "routine-id", "new-run", "", "new-thread", "new-conversation", nil, nil))
+	require.NoError(t, p.SaveMessages(ctx, "default", "routine-id", "", false, "new-run", "", "new-thread", "new-conversation", nil, nil))
 	threads, err := p.ListThreads(ctx, "default", "routine-id")
 	require.NoError(t, err)
 	require.Len(t, threads, 1, "an empty previousRunID must not inherit from a legacy row with an empty run ID")
 	require.Equal(t, "new-thread", threads[0].ThreadID)
+}
+
+func TestNewThreadInExistingConversationGroup(t *testing.T) {
+	ctx := context.Background()
+	p := NewInMemoryConversationPersistence()
+	require.NoError(t, p.SaveMessages(ctx, "tenant", "project-1", "", false, "r1", "", "origin", "conversation", nil, nil))
+
+	// A user-started thread joining the conversation takes its group.
+	require.NoError(t, p.SaveMessages(ctx, "tenant", "", "", false, "r2", "", "joined", "conversation", nil, nil))
+	// An agent-started thread is grouped under the thread that started it.
+	require.NoError(t, p.SaveMessages(ctx, "tenant", "origin", "origin", true, "r3", "", "sub-agent", "conversation", nil, nil))
+
+	grouped, err := p.ListThreads(ctx, "tenant", "project-1")
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{"origin", "joined"}, []string{grouped[0].ThreadID, grouped[1].ThreadID})
+	children, err := p.ListThreads(ctx, "tenant", "origin")
+	require.NoError(t, err)
+	require.Len(t, children, 1)
+	require.Equal(t, "sub-agent", children[0].ThreadID)
+	require.Equal(t, "origin", children[0].ParentThreadID)
 }

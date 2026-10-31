@@ -18,7 +18,7 @@ func NewRestateTool(restateCtx restate.WorkflowContext, wrappedTool agents.Tool,
 	return &RestateTool{
 		restateCtx:  restateCtx,
 		wrappedTool: wrappedTool,
-		middlewares: append([]agents.ToolCallMiddleware{agents.StopMiddleware{Watcher: agents.StopWatcherFrom(broker)}}, middlewares...),
+		middlewares: append([]agents.ToolCallMiddleware{agents.StopMiddleware{Watcher: agents.StopWatcherFrom(broker)}, agents.TimestampMiddleware{}}, middlewares...),
 	}
 }
 

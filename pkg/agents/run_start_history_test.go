@@ -77,7 +77,7 @@ type failedOpeningSave struct {
 	err error
 }
 
-func (p *failedOpeningSave) SaveMessages(context.Context, string, string, string, string, string, string, []history.Message, map[string]any) error {
+func (p *failedOpeningSave) SaveMessages(context.Context, string, string, string, bool, string, string, string, string, []history.Message, map[string]any) error {
 	return p.err
 }
 

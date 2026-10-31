@@ -20,13 +20,13 @@ func TestListThreadsInMemory(t *testing.T) {
 	ctx := context.Background()
 	p := NewInMemoryConversationPersistence()
 
-	require.NoError(t, p.SaveMessages(ctx, "ns", "default", "m1", "", "thread-a", "conv-a",
+	require.NoError(t, p.SaveMessages(ctx, "ns", "default", "", false, "m1", "", "thread-a", "conv-a",
 		[]Message{userBundle("user", "first question about Go")}, nil))
-	require.NoError(t, p.SaveMessages(ctx, "ns", "default", "m2", "m1", "thread-a", "conv-a",
+	require.NoError(t, p.SaveMessages(ctx, "ns", "default", "", false, "m2", "m1", "thread-a", "conv-a",
 		[]Message{userBundle("user", "follow-up")}, nil))
-	require.NoError(t, p.SaveMessages(ctx, "ns", "default", "m3", "", "thread-b", "conv-b",
+	require.NoError(t, p.SaveMessages(ctx, "ns", "default", "", false, "m3", "", "thread-b", "conv-b",
 		[]Message{userBundle("user", "another topic")}, nil))
-	require.NoError(t, p.SaveMessages(ctx, "other-ns", "default", "m4", "", "thread-c", "conv-c",
+	require.NoError(t, p.SaveMessages(ctx, "other-ns", "default", "", false, "m4", "", "thread-c", "conv-c",
 		[]Message{userBundle("user", "hidden")}, nil))
 
 	threads, err := p.ListThreads(ctx, "ns", "default")
@@ -62,7 +62,7 @@ func TestListThreadsFilePersistenceSurvivesRestart(t *testing.T) {
 
 	p, err := NewFileConversationPersistence(dir)
 	require.NoError(t, err)
-	require.NoError(t, p.SaveMessages(ctx, "ns", "default", "m1", "", "thread-a", "conv-a",
+	require.NoError(t, p.SaveMessages(ctx, "ns", "default", "", false, "m1", "", "thread-a", "conv-a",
 		[]Message{userBundle("user", "persisted question")}, nil))
 	require.NoError(t, p.Close())
 
@@ -91,10 +91,10 @@ func TestListThreadsOrderedByUpdatedAtDesc(t *testing.T) {
 	ctx := context.Background()
 	p := NewInMemoryConversationPersistence()
 
-	require.NoError(t, p.SaveMessages(ctx, "ns", "default", "m1", "", "thread-a", "conv-a",
+	require.NoError(t, p.SaveMessages(ctx, "ns", "default", "", false, "m1", "", "thread-a", "conv-a",
 		[]Message{userBundle("user", "older")}, nil))
 	time.Sleep(5 * time.Millisecond)
-	require.NoError(t, p.SaveMessages(ctx, "ns", "default", "m2", "", "thread-b", "conv-b",
+	require.NoError(t, p.SaveMessages(ctx, "ns", "default", "", false, "m2", "", "thread-b", "conv-b",
 		[]Message{userBundle("user", "newer")}, nil))
 
 	threads, err := p.ListThreads(ctx, "ns", "default")
@@ -148,13 +148,13 @@ func TestSaveMessagesMergesSameRunID(t *testing.T) {
 	p := NewInMemoryConversationPersistence()
 
 	// Turn 1: run A completes.
-	require.NoError(t, p.SaveMessages(ctx, "ns", "default", "runA", "", "T", "C",
+	require.NoError(t, p.SaveMessages(ctx, "ns", "default", "", false, "runA", "", "T", "C",
 		[]Message{userBundle("user", "how are you")}, map[string]any{}))
 	// Turn 2: run B, first incremental save (opens with the user turn).
-	require.NoError(t, p.SaveMessages(ctx, "ns", "default", "runB", "runA", "T", "C",
+	require.NoError(t, p.SaveMessages(ctx, "ns", "default", "", false, "runB", "runA", "T", "C",
 		[]Message{userBundle("user", "tell me a joke")}, map[string]any{}))
 	// Turn 2: run B continues under the SAME id (tool/approval round).
-	require.NoError(t, p.SaveMessages(ctx, "ns", "default", "runB", "runB", "T", "C",
+	require.NoError(t, p.SaveMessages(ctx, "ns", "default", "", false, "runB", "runB", "T", "C",
 		[]Message{userBundle("agent", "here is a joke")}, map[string]any{}))
 
 	rows, err := p.LoadMessages(ctx, "ns", "T", "")
@@ -177,17 +177,17 @@ func TestIncrementalSaveRetainsAssignedThread(t *testing.T) {
 			thread, parent := "", ""
 			if fork {
 				thread, parent = "source", "first"
-				require.NoError(t, p.SaveMessages(ctx, "ns", "default", "first", "", thread, "C", []Message{userBundle("user", "first")}, nil))
-				require.NoError(t, p.SaveMessages(ctx, "ns", "default", "second", "first", thread, "C", []Message{userBundle("user", "second")}, nil))
+				require.NoError(t, p.SaveMessages(ctx, "ns", "default", "", false, "first", "", thread, "C", []Message{userBundle("user", "first")}, nil))
+				require.NoError(t, p.SaveMessages(ctx, "ns", "default", "", false, "second", "first", thread, "C", []Message{userBundle("user", "second")}, nil))
 			}
-			require.NoError(t, p.SaveMessages(ctx, "ns", "default", "run", parent, thread, "C", []Message{userBundle("user", "question")}, nil))
+			require.NoError(t, p.SaveMessages(ctx, "ns", "default", "", false, "run", parent, thread, "C", []Message{userBundle("user", "question")}, nil))
 			assigned := p.getMessage("ns", "run").ThreadID
 			require.NotEmpty(t, assigned)
 			require.NotEqual(t, thread, assigned)
-			require.NoError(t, p.SaveMessages(ctx, "ns", "default", "run", parent, thread, "C", []Message{userBundle("agent", "answer")}, nil))
+			require.NoError(t, p.SaveMessages(ctx, "ns", "default", "", false, "run", parent, thread, "C", []Message{userBundle("agent", "answer")}, nil))
 			require.Equal(t, assigned, p.getMessage("ns", "run").ThreadID)
 			require.Len(t, p.getMessage("ns", "run").Messages, 2)
-			require.ErrorContains(t, p.SaveMessages(ctx, "ns", "default", "run", parent, "unrelated", "C", nil, nil), "another thread")
+			require.ErrorContains(t, p.SaveMessages(ctx, "ns", "default", "", false, "run", parent, "unrelated", "C", nil, nil), "another thread")
 		})
 	}
 }
@@ -198,11 +198,11 @@ func TestFileReplayMergesSameRunID(t *testing.T) {
 
 	p, err := NewFileConversationPersistence(dir)
 	require.NoError(t, err)
-	require.NoError(t, p.SaveMessages(ctx, "ns", "default", "runA", "", "T", "C",
+	require.NoError(t, p.SaveMessages(ctx, "ns", "default", "", false, "runA", "", "T", "C",
 		[]Message{userBundle("user", "how are you")}, map[string]any{}))
-	require.NoError(t, p.SaveMessages(ctx, "ns", "default", "runB", "runA", "T", "C",
+	require.NoError(t, p.SaveMessages(ctx, "ns", "default", "", false, "runB", "runA", "T", "C",
 		[]Message{userBundle("user", "tell me a joke")}, map[string]any{}))
-	require.NoError(t, p.SaveMessages(ctx, "ns", "default", "runB", "runB", "T", "C",
+	require.NoError(t, p.SaveMessages(ctx, "ns", "default", "", false, "runB", "runB", "T", "C",
 		[]Message{userBundle("agent", "here is a joke")}, map[string]any{}))
 	require.NoError(t, p.Close())
 

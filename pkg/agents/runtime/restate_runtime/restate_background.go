@@ -152,7 +152,9 @@ func (s *BackgroundTaskService) Await(ctx restate.Context, in *BackgroundTaskInp
 	// The thread was idle, and this invocation now holds its claim. Start the
 	// run one-way: this task is done, and waiting for the model to finish
 	// talking is not part of it.
-	restate.WorkflowSend(ctx, "AgentWorkflow", in.Ref.ThreadStreamID, "Run").Send(&WorkflowInput{
+	// Keyed by this run, not the thread's stream (see RestateRuntime.Run); a
+	// key Restate draws for this invocation, so a replay sends the same one.
+	restate.WorkflowSend(ctx, "AgentWorkflow", restate.UUID(ctx).String(), "Run").Send(&WorkflowInput{
 		AgentName:         in.AgentName,
 		Namespace:         in.Ref.Namespace,
 		ThreadID:          in.Ref.ThreadID,
