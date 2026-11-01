@@ -120,7 +120,7 @@ termination depends on the provider. Do not retry commands blindly.
 | Output | Separate streams | Separate streams | Combined in stdout, `OutputCombined=true` |
 | Timeout | Kills process group, exit 124 | Cancels stream and attempts native PID kill | Sent to toolbox in seconds |
 | Files | Binary HTTP stream | Native multipart upload and binary download | Native raw upload and binary download |
-| Lifetime | Configured daemon idle timeout | TTL seconds | Wall-clock TTL rounded up to minutes |
+| Lifetime | Configured daemon idle timeout | Pauses TTL seconds after creation or the latest reconnect | Deleted after a wall-clock TTL rounded up to minutes |
 
 HasteKit tracks active requests so a long command or upload does not trigger its
 idle shutdown. E2B and HasteKit cap output at 4 MiB per stream and flag truncation.
@@ -140,8 +140,12 @@ access; that application-specific tool is not a portable replacement for Exec.
 
 Missing compute is an error, not an implicit replacement. To reset a sandbox,
 call `Delete(reference)` and explicitly clear `run.State[sandbox.StateKey]`.
-The next acquisition can create fresh compute. E2B reconnect does not extend TTL
-and rejects paused sandboxes. Daytona can start stopped or archived sandboxes.
+The next acquisition can create fresh compute. E2B sandboxes pause when their TTL
+runs out, keeping files and processes, and reconnecting resumes a paused sandbox
+or extends a running one for another TTL. E2B keeps paused sandboxes until they
+are deleted: call the E2B provider's `DeletePaused` periodically with your
+retention period. Daytona can start stopped or archived sandboxes; a Daytona TTL
+deletes the sandbox, so leave it unset for sessions that should resume.
 
 State is persisted at the normal run/tool-result boundaries, not transactionally
 with provider creation. A crash or cancellation between these operations can

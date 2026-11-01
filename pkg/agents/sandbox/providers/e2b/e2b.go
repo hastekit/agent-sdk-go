@@ -13,6 +13,8 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/url"
+	"strconv"
+	"sync"
 	"time"
 
 	"github.com/hastekit/agent-sdk-go/pkg/agents/sandbox"
@@ -21,7 +23,9 @@ import (
 
 type Profile struct {
 	TemplateID string
-	TTL        time.Duration
+	// TTL is how long a sandbox runs after it is created, or after its latest
+	// Connect, before E2B pauses it. Zero selects five minutes.
+	TTL time.Duration
 }
 type Config struct {
 	APIKey     string
@@ -37,11 +41,27 @@ type Provider struct {
 	config Config
 }
 type info struct {
-	ID     string `json:"sandboxID"`
-	Domain string `json:"domain"`
-	Token  string `json:"envdAccessToken"`
-	State  string `json:"state"`
+	ID       string            `json:"sandboxID"`
+	Domain   string            `json:"domain"`
+	Token    string            `json:"envdAccessToken"`
+	Metadata map[string]string `json:"metadata"`
+	EndAt    time.Time         `json:"endAt"`
 }
+
+const (
+	defaultTTL = 5 * time.Minute
+
+	// ttlKey records a sandbox's TTL in seconds. Connect needs it to give the
+	// sandbox the lifetime it was created with, and a Reference has no profile.
+	ttlKey = "ttl"
+
+	// ownerKey marks the sandboxes DeletePaused may delete.
+	ownerKey, owner = "managed_by", "hastekit"
+
+	// execGrace keeps a sandbox running past a command's timeout, so a pause
+	// never cuts the stream that reports how the command ended.
+	execGrace = 30 * time.Second
+)
 
 func New(cfg Config) (*Provider, error) {
 	if cfg.APIKey == "" {
@@ -64,6 +84,9 @@ func New(cfg Config) (*Provider, error) {
 	}
 	return &Provider{api, cfg}, nil
 }
+
+// Create starts a sandbox that pauses, rather than being deleted, when its TTL
+// runs out: the session keeps its files and processes, and Connect resumes it.
 func (p *Provider) Create(ctx context.Context, req sandbox.CreateRequest) (sandbox.Sandbox, error) {
 	profile, ok := p.config.Profiles[req.Profile]
 	if !ok || profile.TemplateID == "" {
@@ -74,17 +97,19 @@ func (p *Provider) Create(ctx context.Context, req sandbox.CreateRequest) (sandb
 		ttl = profile.TTL
 	}
 	if ttl == 0 {
-		ttl = 5 * time.Minute
+		ttl = defaultTTL
 	}
 	if ttl < 0 {
 		return nil, fmt.Errorf("negative TTL")
 	}
-	body := map[string]any{"templateID": profile.TemplateID, "timeout": int64((ttl + time.Second - 1) / time.Second), "secure": true, "envVars": req.Env, "metadata": map[string]string{"namespace": req.Session.Namespace, "session": req.Session.SessionID, "agent": req.AgentName}}
+	metadata := map[string]string{"namespace": req.Session.Namespace, "session": req.Session.SessionID, "agent": req.AgentName, ttlKey: strconv.FormatInt(seconds(ttl), 10), ownerKey: owner}
+	body := map[string]any{"templateID": profile.TemplateID, "timeout": seconds(ttl), "autoPause": true, "envVars": req.Env, "metadata": metadata}
+	start := time.Now()
 	var i info
-	if err := p.api.JSON(ctx, "POST", "/sandboxes", body, &i); err != nil {
+	if err := p.api.JSON(ctx, "POST", "/v2/sandboxes", body, &i); err != nil {
 		return nil, err
 	}
-	s, err := p.wrap(i)
+	s, err := p.wrap(i, start.Add(ttl))
 	if err != nil && i.ID != "" {
 		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 		defer cancel()
@@ -98,16 +123,35 @@ func validate(ref sandbox.Reference) error {
 	}
 	return nil
 }
+
+// Connect resumes a paused sandbox, or extends a running one, for another TTL.
+// A sandbox from before TTLs were recorded gets the default.
 func (p *Provider) Connect(ctx context.Context, ref sandbox.Reference) (sandbox.Sandbox, error) {
 	if err := validate(ref); err != nil {
 		return nil, err
 	}
-	var i info
-	// GET retains the sandbox's existing lifetime; connecting must not renew its TTL.
-	if err := p.api.JSON(ctx, "GET", "/sandboxes/"+url.PathEscape(ref.ID), nil, &i); err != nil {
+	var current info
+	if err := p.api.JSON(ctx, "GET", "/sandboxes/"+url.PathEscape(ref.ID), nil, &current); err != nil {
 		return nil, err
 	}
-	return p.wrap(i)
+	ttl := defaultTTL
+	if s, err := strconv.ParseInt(current.Metadata[ttlKey], 10, 64); err == nil && s > 0 {
+		ttl = time.Duration(s) * time.Second
+	}
+	start := time.Now()
+	i, err := p.connect(ctx, ref.ID, ttl)
+	if err != nil {
+		return nil, err
+	}
+	return p.wrap(i, start.Add(ttl))
+}
+
+// connect resumes or extends a sandbox so that it runs for at least d from now.
+// E2B only ever lengthens a timeout this way, never shortens it.
+func (p *Provider) connect(ctx context.Context, id string, d time.Duration) (info, error) {
+	var i info
+	err := p.api.JSON(ctx, "POST", "/v2/sandboxes/"+url.PathEscape(id)+"/connect", map[string]int64{"timeout": seconds(d)}, &i)
+	return i, err
 }
 func (p *Provider) Delete(ctx context.Context, ref sandbox.Reference) error {
 	if err := validate(ref); err != nil {
@@ -119,12 +163,58 @@ func (p *Provider) Delete(ctx context.Context, ref sandbox.Reference) error {
 	}
 	return err
 }
-func (p *Provider) wrap(i info) (sandbox.Sandbox, error) {
+
+// DeletePaused deletes the sandboxes this provider created that have been
+// paused for longer than idle, and reports how many it deleted. E2B keeps a
+// paused sandbox until something deletes it, so call this periodically. A
+// session whose sandbox is gone fails its next sandbox call, as with any
+// missing compute, until its sandbox state is cleared.
+func (p *Provider) DeletePaused(ctx context.Context, idle time.Duration) (int, error) {
+	if idle < 0 {
+		return 0, fmt.Errorf("negative idle duration")
+	}
+	// A paused sandbox ends when its timeout runs out, which is never before
+	// its last use, so this cannot delete one used within idle.
+	cutoff := time.Now().Add(-idle)
+	query := url.Values{"state": {"paused"}, "metadata": {url.Values{ownerKey: {owner}}.Encode()}, "limit": {"100"}}
+	var stale []string
+	for {
+		r, err := p.api.Do(ctx, "GET", "/v2/sandboxes?"+query.Encode(), nil, "")
+		if err != nil {
+			return 0, err
+		}
+		var page []info
+		err = json.NewDecoder(io.LimitReader(r.Body, 16<<20)).Decode(&page)
+		r.Body.Close()
+		if err != nil {
+			return 0, err
+		}
+		for _, i := range page {
+			if !i.EndAt.IsZero() && i.EndAt.Before(cutoff) {
+				stale = append(stale, i.ID)
+			}
+		}
+		next := r.Header.Get("X-Next-Token")
+		if next == "" {
+			break
+		}
+		query.Set("nextToken", next)
+	}
+	// Deleting waits until the listing is done, so it cannot move the cursor.
+	deleted := 0
+	for _, id := range stale {
+		if err := p.Delete(ctx, sandbox.Reference{Provider: "e2b", ID: id}); err != nil {
+			return deleted, err
+		}
+		deleted++
+	}
+	return deleted, nil
+}
+
+// wrap builds the runtime for a sandbox that runs until at least expires.
+func (p *Provider) wrap(i info, expires time.Time) (sandbox.Sandbox, error) {
 	if i.ID == "" {
 		return nil, fmt.Errorf("e2b returned no sandbox ID")
-	}
-	if i.State != "" && i.State != "running" {
-		return nil, fmt.Errorf("%w: e2b sandbox state %s requires explicit lifecycle management", sandbox.ErrUnsupported, i.State)
 	}
 	if i.Domain == "" {
 		i.Domain = "e2b.app"
@@ -140,13 +230,43 @@ func (p *Provider) wrap(i info) (sandbox.Sandbox, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &runtime{ref: sandbox.Reference{Provider: "e2b", ID: i.ID}, api: api, user: p.config.User}, nil
+	extend := func(ctx context.Context, d time.Duration) error {
+		_, err := p.connect(ctx, i.ID, d)
+		return err
+	}
+	return &runtime{ref: sandbox.Reference{Provider: "e2b", ID: i.ID}, api: api, user: p.config.User, extend: extend, expires: expires}, nil
+}
+
+// seconds rounds up, so a sandbox never gets less time than it asked for.
+func seconds(d time.Duration) int64 {
+	return int64((d + time.Second - 1) / time.Second)
 }
 
 type runtime struct {
 	ref  sandbox.Reference
 	api  *httpapi.Client
 	user string
+
+	// extend goes through the control API, which envd's credentials cannot
+	// reach. expires is when the sandbox pauses at the earliest.
+	extend  func(context.Context, time.Duration) error
+	mu      sync.Mutex
+	expires time.Time
+}
+
+// keepFor makes sure the sandbox runs for at least d more before it pauses.
+func (s *runtime) keepFor(ctx context.Context, d time.Duration) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	start := time.Now()
+	if !start.Add(d).After(s.expires) {
+		return nil
+	}
+	if err := s.extend(ctx, d); err != nil {
+		return fmt.Errorf("extend e2b sandbox timeout: %w", err)
+	}
+	s.expires = start.Add(d)
+	return nil
 }
 
 func (s *runtime) Reference() sandbox.Reference { return s.ref }
@@ -160,6 +280,9 @@ func frame(data []byte) []byte {
 func (s *runtime) Exec(ctx context.Context, req sandbox.ExecRequest) (*sandbox.ExecResult, error) {
 	timeout, err := sandbox.ValidateExec(req)
 	if err != nil {
+		return nil, err
+	}
+	if err := s.keepFor(ctx, timeout+execGrace); err != nil {
 		return nil, err
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
