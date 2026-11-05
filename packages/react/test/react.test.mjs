@@ -64,3 +64,39 @@ test("context shares selection between sidebar and transcript", async () => {
     root.unmount();
   });
 });
+
+// Applications reach steering and its queue through the hook, like every other action.
+test("useChat exposes steering", async () => {
+  let posted;
+  const client = transport({
+    stream: async function* (_agent, _thread, input) {
+      if (input) yield { type: "RUN_STARTED", runId: "run" };
+      await new Promise(() => {});
+    },
+    steer: async (_agent, _thread, input) => {
+      posted = input;
+      return true;
+    },
+  });
+  let chat;
+  function App() {
+    chat = useChat({ agent: "a", transport: client });
+    return null;
+  }
+  let root;
+  await act(async () => {
+    root = TestRenderer.create(React.createElement(App));
+  });
+  await act(async () => {
+    void chat.sendMessage("first");
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  });
+  await act(async () => {
+    await chat.steer("second");
+  });
+  assert.equal(posted.messages[0].content, "second");
+  assert.deepEqual(chat.queuedMessageIds, [posted.messages[0].id]);
+  await act(async () => {
+    root.unmount();
+  });
+});

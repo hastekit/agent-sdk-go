@@ -2,9 +2,9 @@
 
 Headless React hooks for building a chat UI against HasteKit's AG-UI endpoints.
 The package owns conversation selection, sidebar data, paginated messages,
-stream assembly, reconnects, stopping, approval resumes, and attachment uploads.
-Your application owns markup, styles, routing, and message rendering. There is
-no CopilotKit, React DOM, or CSS dependency.
+stream assembly, reconnects, stopping, steering, approval resumes, and attachment
+uploads. Your application owns markup, styles, routing, and message rendering.
+There is no CopilotKit, React DOM, or CSS dependency.
 
 This package is standalone. The embedded `pkg/agui/web` UI has not been migrated.
 It is prepared for npm packaging but has not been published to a registry.
@@ -157,6 +157,7 @@ are accessed during rendering; network work starts in effects or user actions.
 | `threads`, `loadingThreads`, `threadsSupported` | Sidebar rows and availability; HTTP 501 disables listing            |
 | `threadId`, `sessionId`                         | Selected conversation and attachment storage session                |
 | `messages`, `loadingMessages`                   | AG-UI messages in chronological order                               |
+| `queuedMessageIds`                              | Steered messages the run has not taken in yet                       |
 | `hasOlderMessages`, `loadingOlder`              | History pagination status                                           |
 | `connection`                                    | `idle`, `connecting`, `streaming`, or `reconnecting`                |
 | `isRunning`, `isStopping`                       | Observed execution and pending stop request                         |
@@ -173,6 +174,7 @@ are accessed during rendering; network work starts in effects or user actions.
 | `refreshThreads()`                      | Reload sidebar rows                                               |
 | `loadOlderMessages()`                   | Prepend the next page, deduplicated by message ID                 |
 | `sendMessage(content, forwardedProps?)` | Display input immediately and POST one turn                       |
+| `steer(content)`                        | Send a message into the run in flight; see below                  |
 | `resume(entries)`                       | Answer every open interrupt with AG-UI 1.0 `resume` entries       |
 | `stop()`                                | POST cancellation to the server and keep reading its final events |
 | `disconnect()`                          | Detach browser observation without stopping server work           |
@@ -180,13 +182,44 @@ are accessed during rendering; network work starts in effects or user actions.
 | `uploadAttachment(file)`                | Upload to the selected session; returns file metadata             |
 | `clearError()`                          | Dismiss the current error                                         |
 
-Sending while a stream is attached is rejected; disable the composer until
-`connection === "idle"`. This first version does not implement steering an
-active run. Sidebar rename/delete is also not implemented because the default
-SDK endpoints do not provide it. Attachment uploads return metadata;
-applications choose how to construct multipart message content. Interrupts are
-answered with AG-UI 1.0 resume entries (`resume(entries)`). Pass skill selection
-or other extensions in `forwardedProps`.
+`sendMessage` is rejected while a stream is attached; call `steer` instead, or
+disable the composer until `connection === "idle"`. Sidebar rename/delete is not
+implemented because the default SDK endpoints do not provide it. Attachment
+uploads return metadata; applications choose how to construct multipart message
+content. Interrupts are answered with AG-UI 1.0 resume entries
+(`resume(entries)`). Pass skill selection or other extensions in `forwardedProps`.
+
+## Steer a running agent
+
+`steer(content)` sends a message into the run in flight, for a correction that
+should not wait for the run to finish. The run completes the tool calls it is
+working on, takes the message in at its next step, and replies on the stream
+already open. With no stream attached it is an ordinary `sendMessage`, so a
+composer can leave its button enabled and always call `steer`:
+
+```tsx
+// Works whether or not the agent is busy; failures are retained in chat.error.
+await chat.steer(text).catch(() => {});
+```
+
+The message appears in `messages` at once and stays last, with its ID in
+`queuedMessageIds`, until the run announces taking it in. Work the run finishes
+first lands ahead of it, which is the order history will show. Use
+`queuedMessageIds` to mark those messages as queued if that suits your UI.
+
+A queued message is not always taken in:
+
+| What happens                  | Result                                                     |
+| ----------------------------- | ---------------------------------------------------------- |
+| The request fails             | Removed and surfaced in `error`; `steer` rejects           |
+| The run finishes without it   | Sent again as the next turn, and that run is followed      |
+| The run pauses on an approval | Stays queued, and is taken in when the run resumes         |
+| `stop()` or the run fails     | Removed, so no new run starts after the user asked to stop |
+
+`steer` takes no `forwardedProps`, because a run already going ignores them.
+Custom transports implement `ChatTransport.steer`, resolving `true` when a run
+took the message and `false` when it started one; without it `steer` rejects
+while a stream is attached.
 
 ## Reconnect behavior
 

@@ -304,3 +304,61 @@ func TestRejoinCarriesTheTurnsTheRunTookIn(t *testing.T) {
 	assert.Equal(t, []string{"go", "and hurry"}, userTurns(rejoin),
 		"a client that joined late still learns what it was asked, and in what order")
 }
+
+// holdFirstCall keeps the first model call open so a turn can arrive during it.
+type holdFirstCall struct {
+	*scriptedLLM
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (l *holdFirstCall) NewStreamingResponses(ctx context.Context, call *agents.ModelCall, in *responses.Request, cb func(chunk *responses.ResponseChunk)) (*responses.Response, error) {
+	l.once.Do(func() {
+		close(l.entered)
+		<-l.release
+	})
+	return l.scriptedLLM.NewStreamingResponses(ctx, call, in, cb)
+}
+
+// A 204 tells the sender a run has their turn, so one arriving during what would
+// have been the final reply has to be answered by that run. The next run would
+// start by clearing the queue it is sitting on.
+func TestTurnDuringTheFinalModelCallIsAnsweredByTheSameRun(t *testing.T) {
+	llm := &holdFirstCall{
+		scriptedLLM: &scriptedLLM{steps: []scriptedStep{
+			{chunks: []*responses.ResponseChunk{messageAdded("msg_1"), textDelta("msg_1", "first"), messageDone("msg_1")}, response: assistantTextResponse("first")},
+			{chunks: []*responses.ResponseChunk{messageAdded("msg_2"), textDelta("msg_2", "second"), messageDone("msg_2")}, response: assistantTextResponse("second")},
+		}},
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	agent := agents.NewAgent(&agents.AgentOptions{Name: "Helper"}).WithLLM(llm)
+	server := httptest.NewServer(NewHandler(registry{"Helper": agent}))
+	defer server.Close()
+
+	const threadID = "thread-final-call"
+	done := make(chan []sseFrame, 1)
+	go func() {
+		done <- postRun(t, server, "Helper", RunAgentInput{
+			ThreadID: threadID,
+			Messages: []Message{{ID: "u1", Role: RoleUser, Content: "go"}},
+		})
+	}()
+	<-llm.entered
+
+	status := postTurn(t, server, "Helper", RunAgentInput{
+		ThreadID: threadID,
+		Messages: []Message{{ID: "msg_more", Role: RoleUser, Content: "one more thing"}},
+	})
+	assert.Equal(t, http.StatusNoContent, status)
+	close(llm.release)
+
+	var started []string
+	for _, frame := range <-done {
+		if frame.data["type"] == "TEXT_MESSAGE_START" {
+			started = append(started, frame.data["messageId"].(string))
+		}
+	}
+	assert.Equal(t, []string{"msg_u1", "msg_1", "msg_more", "msg_2"}, started)
+}

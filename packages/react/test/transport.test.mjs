@@ -76,3 +76,45 @@ test("attachment uploads preserve session IDs without JSON content headers", asy
     "file",
   );
 });
+
+// A turn folded into a live run has no stream; one that starts a run leaves it to be joined.
+test("steer reports whether a run took the turn and never reads a stream", async () => {
+  const requests = [];
+  let answer;
+  const client = createAGUITransport({
+    headers: { Authorization: "Bearer token" },
+    fetch: async (url, init) => {
+      requests.push({ url, init });
+      return answer();
+    },
+  });
+  const input = { threadId: "t", messages: [{ id: "m", role: "user" }] };
+
+  answer = () => new Response(null, { status: 204 });
+  assert.equal(await client.steer("a b", "t", input), true);
+  assert.equal(requests[0].url, "/api/agui/agents/a%20b/run");
+  assert.equal(requests[0].init.method, "POST");
+  assert.equal(requests[0].init.body, JSON.stringify(input));
+  assert.equal(
+    new Headers(requests[0].init.headers).get("Authorization"),
+    "Bearer token",
+  );
+
+  let cancelled = false;
+  answer = () =>
+    new Response(
+      new ReadableStream({
+        cancel() {
+          cancelled = true;
+        },
+      }),
+    );
+  assert.equal(await client.steer("a", "t", input), false);
+  assert.equal(cancelled, true);
+
+  answer = () => new Response("busy", { status: 409 });
+  await assert.rejects(client.steer("a", "t", input), /busy/);
+
+  answer = () => new Response(null, { status: 501 });
+  await assert.rejects(client.steer("a", "t", input), /not supported/);
+});

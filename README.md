@@ -539,7 +539,8 @@ The `StreamID` on the handle (also returned in the `X-Stream-Id` HTTP header whe
 A run does not have to be left alone until it finishes. The same broker that
 carries a stop can carry a message into a run already in flight — the loop drains
 the queue at iteration boundaries, the same cadence at which it checks for a stop,
-and folds what it finds into the conversation before the next model call:
+and once more when the model has finished answering, and folds what it finds into
+the conversation before the next model call:
 
 ```go
 err := broker.EnqueueMessage(ctx, streamID, history.Message{
@@ -550,7 +551,12 @@ err := broker.EnqueueMessage(ctx, streamID, history.Message{
 ```
 
 The agent finishes the tool calls already running, then continues with the new
-instruction in context, so a correction lands without losing the work so far.
+instruction in context, so a correction lands without losing the work so far. A
+message that arrives during what would have been the final reply gets an answer of
+its own in the same run. A stop discards whatever is still queued, and a message
+is left unanswered if the run has used up `MaxLoops` or is a `SingleTurn` agent, or
+arrives after that last check, as the run is finishing. Clients should treat a
+message as delivered only once the run announces taking it in.
 
 ### AG-UI
 

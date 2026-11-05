@@ -218,6 +218,16 @@ export interface ChatTransport {
     input: RunInput,
     signal?: AbortSignal,
   ): Promise<void>;
+  // Send a turn into the run going on the thread without reading a stream: the
+  // run replies on the stream already followed. Resolves true when a run took
+  // the turn, false when none was going and the turn started one, which is
+  // joined through the thread.
+  steer?(
+    agent: string,
+    thread: string,
+    input: RunInput,
+    signal?: AbortSignal,
+  ): Promise<boolean>;
   listSkills?(signal: AbortSignal): Promise<UserSkill[]>;
   listThreads(
     agent: string,
@@ -270,6 +280,8 @@ export interface ChatSnapshot {
   threadId: string | null;
   sessionId: string | null;
   messages: Message[];
+  // Steered turns the run has not yet announced taking in; last in messages.
+  queuedMessageIds: string[];
   loadingMessages: boolean;
   loadingOlder: boolean;
   hasOlderMessages: boolean;

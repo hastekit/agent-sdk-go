@@ -2,6 +2,7 @@ import type { Routine } from "./routines.js";
 import { HTTPError, resumableStream } from "./stream.js";
 import type {
   ChatTransport,
+  RunInput,
   UserSkill,
   MCPServer,
   MessagePage,
@@ -104,6 +105,26 @@ export function createAGUITransport(
   }
   const routinePath = (id: string) => `/${encodeURIComponent(id)}`;
 
+  // Post a turn without reading the stream of a run it may start: that run goes
+  // on regardless and is joined through the thread.
+  async function postTurn(
+    agent: string,
+    input: RunInput,
+    signal?: AbortSignal,
+  ) {
+    const response = await request(`${agentPath(agent)}/run`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "text/event-stream",
+      },
+      body: JSON.stringify(input),
+      signal,
+    });
+    void response.body?.cancel().catch(() => {});
+    return response;
+  }
+
   // Expose semantic operations so controllers never need to construct URLs.
   return {
     // Routine definitions, scheduler operations, and occurrence history share one transport.
@@ -143,19 +164,20 @@ export function createAGUITransport(
         ).threads ?? [],
     },
 
-    // Send a client tool's results as a turn. The stream of a run it starts
-    // is not read here; the run goes on and is joined through the thread.
+    // Send a client tool's results as a turn.
     async sendToolResults(agent, _thread, input, signal) {
-      const response = await request(`${agentPath(agent)}/run`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Accept: "text/event-stream",
-        },
-        body: JSON.stringify(input),
-        signal,
-      });
-      void response.body?.cancel().catch(() => {});
+      await postTurn(agent, input, signal);
+    },
+
+    // Send a turn into the thread's run. The server answers 204 when a run took
+    // it, and otherwise streams the run the turn started.
+    async steer(agent, _thread, input, signal) {
+      const response = await postTurn(agent, input, signal);
+
+      // Represent unsupported capabilities explicitly instead of parsing an error body.
+      if (response.status === 501)
+        throw new HTTPError(501, "Steering is not supported");
+      return response.status === 204;
     },
 
     // Manage the user's MCP servers. A server without an MCP store has none.

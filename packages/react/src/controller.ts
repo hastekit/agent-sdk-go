@@ -17,6 +17,15 @@ function asError(value: unknown): Error {
   return value instanceof Error ? value : new Error(String(value));
 }
 
+// An empty turn is never worth posting.
+function assertHasContent(content: string | ContentPart[]): void {
+  if (
+    (typeof content === "string" && !content.trim()) ||
+    (Array.isArray(content) && content.length === 0)
+  )
+    throw new Error("Message content is required");
+}
+
 // Create an isolated store for one agent and conversation group.
 export class ChatController {
   private snapshot: ChatSnapshot = {
@@ -34,6 +43,7 @@ export class ChatController {
     threadId: null,
     sessionId: null,
     messages: [],
+    queuedMessageIds: [],
     loadingMessages: false,
     loadingOlder: false,
     hasOlderMessages: false,
@@ -119,12 +129,19 @@ export class ChatController {
   // Calls whose results have already resumed the conversation. A call is
   // resumed once: a run that pauses on it again is not answered in a loop.
   private resumedClientCalls = new Set<string>();
+  // Steered turns whose POST has not been answered: until it is, nothing can
+  // tell whether they reached a run or started one.
+  private unansweredSteers = new Set<string>();
+  // A steered turn is on a run the attached stream, if any, is not following.
+  private joinAfterStream = false;
 
   // Invalidate asynchronous work before replacing the visible conversation.
   private resetSelection(): number {
     this.generation++;
     this.clientToolResults = new Map();
     this.resumedClientCalls = new Set();
+    this.unansweredSteers = new Set();
+    this.joinAfterStream = false;
     this.selectionAbort.abort();
     this.selectionAbort = new AbortController();
     this.streamAbort?.abort();
@@ -333,6 +350,7 @@ export class ChatController {
       threadId: id,
       sessionId: id,
       messages: [],
+      queuedMessageIds: [],
       state: {},
       run: null,
       loadingMessages: false,
@@ -356,6 +374,7 @@ export class ChatController {
       threadId,
       sessionId: threadId,
       messages: [],
+      queuedMessageIds: [],
       state: {},
       run: null,
       loadingMessages: true,
@@ -475,11 +494,7 @@ export class ChatController {
       throw new Error(
         "Wait for the current run or history load before sending",
       );
-    if (
-      (typeof content === "string" && !content.trim()) ||
-      (Array.isArray(content) && content.length === 0)
-    )
-      throw new Error("Message content is required");
+    assertHasContent(content);
     if (!this.snapshot.threadId) this.newThread();
     const message: Message = { id: `msg_${this.id()}`, role: "user", content };
     this.update({
@@ -492,6 +507,99 @@ export class ChatController {
       : [message];
     await this.consume(this.input(messages, forwardedProps));
   };
+
+  // Send one user turn into the run being followed, which takes it in at its
+  // next step and replies on the same stream. With no stream attached there is
+  // nothing to steer, and this is an ordinary send.
+  steer = async (content: string | ContentPart[]): Promise<void> => {
+    if (!this.streamAbort) return this.sendMessage(content);
+    if (!this.options.transport.steer)
+      throw new Error("Steering is not supported by this transport");
+    assertHasContent(content);
+    const thread = this.snapshot.threadId!;
+    const generation = this.generation;
+    const message: Message = { id: `msg_${this.id()}`, role: "user", content };
+    this.update({
+      messages: [...this.snapshot.messages, message],
+      queuedMessageIds: [...this.snapshot.queuedMessageIds, message.id],
+      error: null,
+    });
+    const messages = this.options.fullHistory
+      ? this.snapshot.messages
+      : [message];
+    this.unansweredSteers.add(message.id);
+    let folded: boolean;
+    try {
+      // Not tied to the selection: what the user said is still delivered after
+      // they move on.
+      folded = await this.options.transport.steer(
+        this.options.agent,
+        thread,
+        this.input(messages),
+      );
+    } catch (error) {
+      if (generation === this.generation) {
+        this.unansweredSteers.delete(message.id);
+        this.withdrawQueued([message.id]);
+        this.update({ error: asError(error) });
+        void this.afterStream().catch(() => {});
+      }
+      throw error;
+    }
+    if (generation !== this.generation) return;
+    this.unansweredSteers.delete(message.id);
+    // Starting a run makes the turn that run's input, not something to wait for.
+    if (!folded)
+      this.update({
+        queuedMessageIds: this.snapshot.queuedMessageIds.filter(
+          (id) => id !== message.id,
+        ),
+      });
+    if (!folded || !this.streamAbort) this.joinAfterStream = true;
+    void this.afterStream().catch(() => {});
+  };
+
+  // Take queued turns back out of the transcript. Should the server have them
+  // after all, the run's announcement restores them.
+  private withdrawQueued(ids = this.snapshot.queuedMessageIds): void {
+    this.update({
+      messages: this.snapshot.messages.filter(
+        (message) => !ids.includes(message.id),
+      ),
+      queuedMessageIds: this.snapshot.queuedMessageIds.filter(
+        (id) => !ids.includes(id),
+      ),
+    });
+  }
+
+  // Decide what follows a stream that ended, once every steered turn's POST has
+  // been answered. The stream is what says whether a run took a turn in: a 204
+  // only says it reached the queue, and a run can end without draining that,
+  // after which the server discards it. Such a turn is what the user wants
+  // next, so it goes out as the next turn; a run that paused keeps its queue
+  // for when it resumes.
+  private async afterStream(): Promise<void> {
+    if (this.streamAbort || this.unansweredSteers.size) return;
+    if (this.joinAfterStream) {
+      this.joinAfterStream = false;
+      await this.consume(undefined, true);
+      return;
+    }
+    const { queuedMessageIds: ids, messages, run, lastEvent } = this.snapshot;
+    if (!ids.length || run?.status === "paused") return;
+    if (lastEvent?.type === "RUN_ERROR") {
+      this.withdrawQueued();
+      return;
+    }
+    this.update({ queuedMessageIds: [] });
+    await this.consume(
+      this.input(
+        this.options.fullHistory
+          ? messages
+          : messages.filter((message) => ids.includes(message.id)),
+      ),
+    );
+  }
 
   // Answer the run's open interrupts (AG-UI 1.0 resume entries) without adding a
   // synthetic user message to the transcript. Answer every open interrupt at once.
@@ -536,6 +644,8 @@ export class ChatController {
     const thread = this.snapshot.threadId;
     if (!thread || this.snapshot.isStopping) return;
     const generation = this.generation;
+    // Turns the run has yet to take in stop with it, not start the next one.
+    this.withdrawQueued();
     this.update({ isStopping: true });
     try {
       await this.options.transport.stop(
@@ -567,7 +677,7 @@ export class ChatController {
   };
 
   // Consume a single run pipeline so reconnects retain partially assembled messages.
-  private async consume(input?: RunInput): Promise<void> {
+  private async consume(input?: RunInput, join = false): Promise<void> {
     const thread = this.snapshot.threadId!;
     const generation = this.generation;
     const abort = new AbortController();
@@ -590,7 +700,8 @@ export class ChatController {
       : undefined;
 
     // Wait for publication when the feed has already announced a running thread.
-    const waitForRun = !input && this.snapshot.activeThreadIds.includes(thread);
+    const waitForRun =
+      join || (!input && this.snapshot.activeThreadIds.includes(thread));
     let sawEvent = false;
     let endedNormally = false;
     const current = () =>
@@ -638,6 +749,8 @@ export class ChatController {
           this.cursor = page.nextCursor;
           this.update({
             messages: prependMessages(this.snapshot.messages, page.messages),
+            // Whether the run took a queued turn in can no longer be told.
+            queuedMessageIds: [],
             run: page.run,
             error:
               page.run?.status === "error"
@@ -652,7 +765,7 @@ export class ChatController {
           throw recoveryError;
         }
       } else {
-        this.update({ error: asError(error) });
+        this.update({ error: asError(error), queuedMessageIds: [] });
         throw error;
       }
     } finally {
@@ -684,8 +797,11 @@ export class ChatController {
     // a result sent early already resumed it, the thread is running and this
     // turn joins that run instead of starting another.
     const pausedOn = endedNormally ? clientTools?.pausedOn() : undefined;
-    if (!pausedOn?.length) return;
-    await this.resumeWith(thread, generation, await Promise.all(pausedOn));
+    if (pausedOn?.length) {
+      await this.resumeWith(thread, generation, await Promise.all(pausedOn));
+      return;
+    }
+    if (endedNormally && !abort.signal.aborted) await this.afterStream();
   }
 
   // Answers client tool calls the conversation is paused on, from the calls in

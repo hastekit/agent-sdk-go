@@ -38,6 +38,7 @@ function useController(controller: ChatController) {
     refreshThreads: controller.refreshThreads,
     loadOlderMessages: controller.loadOlderMessages,
     sendMessage: controller.sendMessage,
+    steer: controller.steer,
     stop: controller.stop,
     resume: controller.resume,
     reconnect: controller.reconnect,

@@ -88,9 +88,10 @@ type StreamBroker interface {
 
 	// EnqueueMessage pushes an input message onto the channel's queue.
 	// The agent loop drains this queue at iteration boundaries — same
-	// cadence as IsStopped — and folds queued messages into the current
-	// run. The message's tool outputs are kept for their calls instead,
-	// where WaitToolResult reads them.
+	// cadence as IsStopped — and once more when the model has finished
+	// answering, and folds queued messages into the current run. The
+	// message's tool outputs are kept for their calls instead, where
+	// WaitToolResult reads them.
 	EnqueueMessage(ctx context.Context, channel string, msg history.Message) error
 
 	// WaitToolResult returns the output a client sent for callID into the

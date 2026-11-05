@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/bytedance/sonic"
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/agentstate"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/messages"
@@ -106,6 +107,107 @@ func TestInputMessage_ASteeringTurnIsAnnouncedWhereItWasPickedUp(t *testing.T) {
 	resultAt := indexOfToolResult(t, chunks, "call_gather")
 	assert.Less(t, resultAt, steerAt,
 		"the turn arrived during the tool call, so it lands after that call's result")
+}
+
+// enqueueDuringFirstCall makes a turn reach the queue while the first model
+// call is in flight, then runs the agent to its end.
+func enqueueDuringFirstCall(t *testing.T, opts *agents.AgentOptions, scripted *scriptedLLM, text string) (*agents.AgentOutput, []*responses.ResponseChunk) {
+	t.Helper()
+	const streamID = "final-call-stream"
+	broker := streambroker.NewMemoryStreamBroker()
+	opts.StreamBroker = broker
+	agent := agents.NewAgent(opts).WithLLM(&llmWithSideEffect{inner: scripted, before: func(call int) {
+		if call != 0 {
+			return
+		}
+		require.NoError(t, broker.EnqueueMessage(context.Background(), streamID,
+			messages.New("alice", []responses.InputMessageUnion{{
+				OfEasyInput: &responses.EasyMessage{
+					Role:    constants.RoleUser,
+					Content: responses.EasyInputContentUnion{OfString: utils.Ptr(text)},
+				},
+			}})))
+	}})
+	handle, err := agent.Execute(context.Background(), &agents.AgentInput{
+		Namespace: "test", ThreadID: "thread-final-call", StreamID: streamID,
+		Message: userMessage("start working"),
+	})
+	require.NoError(t, err)
+	chunks := chunksOf(t, handle)
+	out, err := handle.Wait()
+	require.NoError(t, err)
+	return out, chunks
+}
+
+// A model call that uses no tools is the run's last, so nothing used to look at
+// the queue after it. A turn arriving during that call was acknowledged to its
+// sender and then discarded by the next run — and this is the call users are
+// most likely to interrupt, since it is the answer they are watching appear.
+func TestSteering_ATurnArrivingDuringTheFinalModelCallIsAnswered(t *testing.T) {
+	scripted := &scriptedLLM{script: []*responses.Response{
+		textResponse("first answer"),
+		textResponse("second answer"),
+	}}
+	out, chunks := enqueueDuringFirstCall(t, &agents.AgentOptions{Name: "main"}, scripted, "one more thing")
+
+	assert.Equal(t, agentstate.RunStatusCompleted, out.Status)
+	require.Equal(t, 2, scripted.callCount(), "the run goes round again for the turn")
+	input, err := sonic.Marshal(scripted.request(1).Input)
+	require.NoError(t, err)
+	assert.Contains(t, string(input), "one more thing")
+	assert.Contains(t, string(input), "first answer", "the turn follows the reply it arrived during")
+
+	said := inputMessages(chunks)
+	require.Len(t, said, 2)
+	assert.Equal(t, "one more thing", said[1].Content)
+}
+
+// Going round again costs a loop. A run on its last one has still succeeded, and
+// must not turn into a failure because someone spoke while it was finishing.
+func TestSteering_ARunOutOfLoopsCompletesRatherThanFails(t *testing.T) {
+	scripted := &scriptedLLM{script: []*responses.Response{textResponse("only answer")}}
+	out, chunks := enqueueDuringFirstCall(t, &agents.AgentOptions{Name: "main", MaxLoops: utils.Ptr(1)}, scripted, "too late")
+
+	assert.Equal(t, agentstate.RunStatusCompleted, out.Status)
+	assert.Equal(t, 1, scripted.callCount())
+	assert.Len(t, inputMessages(chunks), 1, "the turn was never taken in, so it is not announced")
+}
+
+// A single-turn agent ends as soon as the model has responded; that is its contract.
+func TestSteering_ASingleTurnAgentDoesNotGoRound(t *testing.T) {
+	scripted := &scriptedLLM{script: []*responses.Response{textResponse("only answer")}}
+	out, chunks := enqueueDuringFirstCall(t, &agents.AgentOptions{Name: "main", SingleTurn: true}, scripted, "ignored")
+
+	assert.Equal(t, agentstate.RunStatusCompleted, out.Status)
+	assert.Equal(t, 1, scripted.callCount())
+	assert.Len(t, inputMessages(chunks), 1)
+}
+
+// A stop asked for before the model finished wins over a turn queued alongside it.
+func TestSteering_AStopWinsOverAQueuedTurn(t *testing.T) {
+	scripted := &scriptedLLM{script: []*responses.Response{textResponse("only answer")}}
+	broker := streambroker.NewMemoryStreamBroker()
+	const streamID = "stop-final-call"
+	agent := agents.NewAgent(&agents.AgentOptions{Name: "main", StreamBroker: broker}).WithLLM(&llmWithSideEffect{inner: scripted, before: func(call int) {
+		if call != 0 {
+			return
+		}
+		ctx := context.Background()
+		require.NoError(t, broker.EnqueueMessage(ctx, streamID, userMessage("never mind")))
+		require.NoError(t, broker.Stop(ctx, streamID))
+	}})
+	handle, err := agent.Execute(context.Background(), &agents.AgentInput{
+		Namespace: "test", ThreadID: "thread-stop-final-call", StreamID: streamID,
+		Message: userMessage("start working"),
+	})
+	require.NoError(t, err)
+	chunks := chunksOf(t, handle)
+	out, err := handle.Wait()
+	require.NoError(t, err)
+
+	assert.Equal(t, agentstate.RunStatusCompleted, out.Status)
+	assert.Equal(t, 1, scripted.callCount(), "no further model call after the stop")
+	assert.Len(t, inputMessages(chunks), 1, "the queued turn was never taken in")
 }
 
 // A task's result is delivered as a user turn — the only shape a provider

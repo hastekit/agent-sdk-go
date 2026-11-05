@@ -851,8 +851,22 @@ func (e *Agent) ExecuteWithRun(ctx context.Context, in *AgentInput, run *history
 				// Complete before any tool runs.
 				run.RunState.TransitionToComplete()
 			} else if len(toolCalls) == 0 {
-				// No tools = done
-				run.RunState.TransitionToComplete()
+				// No tools = done, unless a turn reached the queue while the model
+				// was answering. Its sender has been told a run has it, and this
+				// is the last run that can: the next one starts by clearing the
+				// queue. So it goes round again, the same as after a tool call —
+				// budget permitting, since running out of loops is a failure and
+				// this run has otherwise succeeded.
+				var queued []history.Message
+				if in.StreamID != "" && e.streamBroker != nil && run.RunState.LoopIteration+1 < e.maxLoops {
+					queued, _ = e.streamBroker.DrainMessages(context.Background(), in.StreamID)
+				}
+				if len(queued) > 0 {
+					run.AddMessagesToQueue(ctx, queued)
+					run.RunState.TransitionToLLM()
+				} else {
+					run.RunState.TransitionToComplete()
+				}
 			} else {
 				// Partition tools by approval requirement
 				needsApproval, immediate := partitionByApproval(tools, toolCalls)

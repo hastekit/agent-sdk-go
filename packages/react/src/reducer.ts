@@ -57,6 +57,13 @@ function text(event: ChatEvent, key: string): string {
   return typeof event[key] === "string" ? (event[key] as string) : "";
 }
 
+// The turn an event says the run has taken in, if it says so.
+function announcedTurn(event: ChatEvent): string {
+  if (event.type === "CUSTOM" && event.name === "input_message")
+    return (event.value as Message).id;
+  return text(event, "role") === "user" ? text(event, "messageId") : "";
+}
+
 // Keep replay-local bookkeeping separate from the serializable React snapshot.
 export class EventReducer {
   private readonly echoedUsers = new Set<string>();
@@ -66,8 +73,33 @@ export class EventReducer {
   private chunkMessageId = "";
   private chunkToolId = "";
 
-  // Apply standard AG-UI events and the SDK's chat-related custom events.
+  // A queued turn stays last in the transcript until the run announces taking
+  // it in, so work the run finishes first lands ahead of it: the order history
+  // will show.
   apply(snapshot: ChatSnapshot, event: ChatEvent): Partial<ChatSnapshot> {
+    const patch = this.reduce(snapshot, event);
+    if (!snapshot.queuedMessageIds.length) return patch;
+    const announced = announcedTurn(event);
+    const queuedMessageIds = snapshot.queuedMessageIds.filter(
+      (id) => id !== announced,
+    );
+    const messages = patch.messages ?? snapshot.messages;
+    const queued = (message: Message) => queuedMessageIds.includes(message.id);
+    return {
+      ...patch,
+      queuedMessageIds,
+      messages: [
+        ...messages.filter((message) => !queued(message)),
+        ...messages.filter(queued),
+      ],
+    };
+  }
+
+  // Apply standard AG-UI events and the SDK's chat-related custom events.
+  private reduce(
+    snapshot: ChatSnapshot,
+    event: ChatEvent,
+  ): Partial<ChatSnapshot> {
     const messages = snapshot.messages;
     const id = text(event, "messageId");
 
@@ -80,7 +112,7 @@ export class EventReducer {
         this.chunkMessageId = messageId;
         next = {
           ...next,
-          ...this.apply(next, {
+          ...this.reduce(next, {
             ...event,
             type: "TEXT_MESSAGE_START",
             messageId,
@@ -88,7 +120,7 @@ export class EventReducer {
         };
       }
       return {
-        ...this.apply(next, {
+        ...this.reduce(next, {
           ...event,
           type: "TEXT_MESSAGE_CONTENT",
           messageId,
@@ -105,14 +137,18 @@ export class EventReducer {
         this.chunkToolId = toolCallId;
         next = {
           ...next,
-          ...this.apply(next, {
+          ...this.reduce(next, {
             ...event,
             type: "TOOL_CALL_START",
             toolCallId,
           }),
         };
       }
-      return this.apply(next, { ...event, type: "TOOL_CALL_ARGS", toolCallId });
+      return this.reduce(next, {
+        ...event,
+        type: "TOOL_CALL_ARGS",
+        toolCallId,
+      });
     }
 
     // Text starts reset replayed assistant content, while existing user input is an echo.
