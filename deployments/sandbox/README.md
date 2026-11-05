@@ -1,9 +1,10 @@
 # Sandbox image
 
-The SDK owns the daemon at `cmd/sandbox-daemon` and its reusable server package at
-`pkg/agents/sandbox/daemon`. The image includes Python 3.11, Bash, curl, wget,
-Git, jq, CA certificates, and tini. It serves the SDK's existing `/health`,
-`/v2/exec`, and `/v2/files` protocol, used by the Docker and Kubernetes providers.
+The image includes Python 3.11, Bash, curl, wget, Git, jq, CA certificates, and
+tini. Nothing in it runs as a service. The Docker and Kubernetes providers run
+commands through their platform's exec API and replace its entrypoint with their
+own, so it opens no port and any image with a POSIX shell and common tools can
+take its place.
 
 Python packages are preinstalled for common agent tasks:
 
@@ -30,28 +31,16 @@ From the SDK repository root:
 
 ```sh
 docker build -f deployments/sandbox/Dockerfile -t hastekit-sandbox:dev .
-docker run --rm -p 127.0.0.1:8080:8080 \
-  -e SANDBOX_IDLE_TIMEOUT=0s hastekit-sandbox:dev
+docker run --rm -it hastekit-sandbox:dev bash
 ```
 
-The daemon has no authentication and permits arbitrary command execution. Keep
-its port on a private network accessible only to the agent service. The container
-or VM is the isolation boundary; `SANDBOX_ROOT` is not a shell jail.
+The container or VM is the isolation boundary; the workspace is not a shell jail.
 
 ## Configuration
 
 | Environment variable | Default | Meaning |
 | --- | --- | --- |
-| `SANDBOX_ROOT` | `/workspace` | Absolute workspace path; created on startup. File APIs are confined here, and commands default to this directory. |
-| `SANDBOX_PORT` | `8080` | HTTP listen port. |
-| `SANDBOX_IDLE_TIMEOUT` | `30s` | Go duration; `0s` disables shutdown. Active requests prevent idle shutdown. |
-| `SANDBOX_SKILLS_DIR` | `/skills` | Optional skill directories; their `bin/*` entries are symlinked into the binary directory at startup. |
-| `SANDBOX_SKILL_BIN_DIR` | `/usr/local/bin` | Target for skill binary symlinks. Existing files are not replaced. |
-
-SIGTERM/SIGINT stop the standalone server and cancel active commands. Embedded
-applications can call `daemon.Run(ctx, daemon.Config{...})` directly. A zero
-`Config.IdleTimeout` disables the timer; the standalone executable supplies the
-30-second default. Applications own their OpenTelemetry exporter configuration.
+| `SANDBOX_ROOT` | `/workspace` | The workspace, for commands to read. Providers set it to the container's working directory, which is what the file tools are confined to and commands default to. |
 
 ## Releases
 
@@ -81,12 +70,11 @@ is published merely by adding this workflow.
 
 Set the Docker provider's `container.Config.Image` or the Kubernetes profile's
 container image to `ghcr.io/hastekit/sandbox-base:<tag>` or
-`<DOCKER_USERNAME>/sandbox-base:<tag>` (Docker Hub). Both providers already
-default to the `sandbox-daemon` executable on PATH, workspace `/workspace`, and
-port 8080. For a locally built Docker image, use `hastekit-sandbox:dev` with
-`docker.PullNever`.
+`<DOCKER_USERNAME>/sandbox-base:<tag>` (Docker Hub). Both providers default to
+workspace `/workspace`. For a locally built Docker image, use
+`hastekit-sandbox:dev` with `docker.PullNever`.
 
-Custom images inherit the daemon and can install their own dependencies:
+Custom images can install their own dependencies:
 
 ```dockerfile
 ARG SANDBOX_BASE_IMAGE=ghcr.io/hastekit/sandbox-base:latest
@@ -95,11 +83,13 @@ RUN pip install --no-cache-dir pandas pypdf
 COPY skills/ /skills/
 ```
 
-Use a release tag or digest for reproducible deployments. Keep `sandbox-daemon`
-on PATH and preserve its startup when overriding the image entrypoint. Python
-scripts can run as `python /skills/<name>/scripts/example.py`; uploading through
-the file API instead requires a path under `/workspace`. Mounted skill folders
-can also be read by commands without making them writable through the file API.
+Use a release tag or digest for reproducible deployments. Python scripts can run as `python /skills/<name>/scripts/example.py`; writing one with the
+file tools instead requires a path under `/workspace`. Mounted skill folders can also
+be read by commands without making them writable through the file tools. Nothing puts
+`/skills/*/bin` on the `PATH` by itself: set the profile's `StartupScript` to link them
+or to do any other setup when a sandbox starts, as the
+[Docker](../../pkg/agents/sandbox/providers/docker/README.md#startup-script) and
+[Kubernetes](../../pkg/agents/sandbox/providers/k8s/README.md#startup-script) guides show.
 
 The gateway's image extends this base with gateway-specific tools. Before the
 first release, build the SDK image locally and use

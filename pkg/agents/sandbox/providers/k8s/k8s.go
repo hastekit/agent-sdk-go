@@ -1,4 +1,6 @@
-// Package k8s provisions daemon-backed sandbox pods with the official Kubernetes client.
+// Package k8s provisions sandbox pods with the official Kubernetes client and runs
+// commands in them through the API server's exec subresource. Nothing of ours runs
+// inside the pod beyond a shell keeping it alive.
 package k8s
 
 import (
@@ -7,14 +9,14 @@ import (
 	"fmt"
 	"maps"
 	"net"
-	"net/http"
 	"slices"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/hastekit/agent-sdk-go/pkg/agents/sandbox"
-	"github.com/hastekit/agent-sdk-go/pkg/agents/sandbox/internal/daemonprovider"
+	"github.com/hastekit/agent-sdk-go/pkg/agents/sandbox/internal/execsandbox"
+	"github.com/hastekit/agent-sdk-go/pkg/agents/sandbox/internal/provision"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -27,33 +29,75 @@ import (
 
 // Profile uses a native pod template for images, resource limits, PVCs, secrets,
 // service accounts, scheduling, and security settings. No storage is created or
-// deleted implicitly. The daemon container defaults to the one named "sandbox".
+// deleted implicitly. Commands run in the container named "sandbox" unless
+// Container says otherwise. The image must provide a POSIX shell and the tools
+// listed in the README.
 type Profile struct {
-	Template        corev1.PodTemplateSpec
-	DaemonContainer string
+	Template  corev1.PodTemplateSpec
+	Container string
+	// StartupScript runs in sh when a pod has been created, as the last step of
+	// Create. It is stored in an annotation, so keep secrets out of it. It shares
+	// ReadyTimeout, and a pod whose script fails is deleted.
+	StartupScript string
 }
 
+// keepalive holds the container open between commands, and is what commands
+// without a parent end up attached to. A shell reaps those while it waits, and as
+// PID 1 it gets no signal it has not asked for, so it asks for the stop signal.
+const keepalive = `trap "exit 0" TERM INT
+while :; do
+	sleep 3600 &
+	wait "$!"
+done
+`
+
+const (
+	// containerKey names the container commands run in, since a reference carries
+	// no profile to look it up in.
+	containerKey = "hastekit.container"
+
+	// activityKey holds the time a pod was last used. It lives on the pod so that
+	// every provider using this namespace sees the same answer.
+	activityKey = "hastekit.last-activity"
+
+	defaultContainer = "sandbox"
+)
+
 type Config struct {
-	Client       coreclient.CoreV1Interface
-	RESTConfig   *rest.Config // used when Client is nil
-	Kubeconfig   string       // used when Client/RESTConfig are nil; otherwise in-cluster then default kubeconfig loading
-	Namespace    string       // defaults to "default"; must already exist
+	Client       coreclient.CoreV1Interface // for API calls; requires RESTConfig too, because exec cannot go through this interface
+	RESTConfig   *rest.Config               // required with Client; otherwise loaded from Kubeconfig, in-cluster, or default kubeconfig loading
+	Kubeconfig   string                     // used when RESTConfig is nil
+	Namespace    string                     // defaults to "default"; must already exist
 	Profiles     map[string]Profile
-	DaemonPort   int           // defaults to 8080
-	ReadyTimeout time.Duration // defaults to two minutes
-	HTTPClient   *http.Client  // daemon transport; separate from API-server credentials
+	ReadyTimeout time.Duration // includes scheduling, startup and the startup script; defaults to two minutes
+	// IdleTimeout deletes a pod after this long without activity. It defaults to
+	// one hour, and a negative value leaves deleting to the caller, through
+	// DeleteIdle. Pods cannot be paused or stopped, so this loses everything not
+	// on a volume, and the session's next sandbox call fails until its state is
+	// cleared. Every provider using a namespace sweeps its pods, so the shortest
+	// timeout among them wins.
+	IdleTimeout time.Duration
+	// MaxLifetime becomes the pod's activeDeadlineSeconds unless its template sets
+	// one, which bounds its lifetime when no provider is left to notice it is
+	// idle. Defaults to 24 hours.
+	MaxLifetime time.Duration
 	// Configure runs on a deep copy of the template. It can select a session PVC
 	// or subpath, mount uploads, or set scheduling. It must be stable for reuse.
 	// Pod identity and ownership metadata are assigned after it returns.
 	Configure func(context.Context, sandbox.CreateRequest, *corev1.Pod) error
-	// Endpoint defaults to http://<pod IP>:<port>. Supply a resolver/proxy URL
-	// when the SDK cannot route to pod IPs. The provider does not spawn kubectl.
+	// Endpoint resolves service ports requested through sandbox.EndpointResolver.
+	// It defaults to http://<pod IP>:<port>. Supply a resolver/proxy URL when the
+	// SDK cannot route to pod IPs.
 	Endpoint func(context.Context, *corev1.Pod, int) (string, error)
 }
 
 type Provider struct {
-	cfg    Config
-	client coreclient.CoreV1Interface
+	cfg        Config
+	client     coreclient.CoreV1Interface
+	execClient *coreclient.CoreV1Client
+	stream     streamFunc
+	stopSweep  context.CancelFunc
+	sweepEnded chan struct{}
 }
 
 func New(cfg Config) (*Provider, error) {
@@ -63,62 +107,84 @@ func New(cfg Config) (*Provider, error) {
 	if problems := validation.IsDNS1123Label(cfg.Namespace); len(problems) > 0 {
 		return nil, fmt.Errorf("invalid Kubernetes namespace: %s", strings.Join(problems, ", "))
 	}
-	if cfg.DaemonPort == 0 {
-		cfg.DaemonPort = 8080
-	}
-	if cfg.DaemonPort < 1 || cfg.DaemonPort > 65535 {
-		return nil, fmt.Errorf("invalid daemon port")
-	}
 	if cfg.ReadyTimeout == 0 {
 		cfg.ReadyTimeout = 2 * time.Minute
 	}
 	if cfg.ReadyTimeout < 0 {
 		return nil, fmt.Errorf("negative readiness timeout")
 	}
+	if cfg.IdleTimeout == 0 {
+		cfg.IdleTimeout = time.Hour
+	}
+	if cfg.MaxLifetime == 0 {
+		cfg.MaxLifetime = 24 * time.Hour
+	}
+	if cfg.MaxLifetime < 0 {
+		return nil, fmt.Errorf("negative max lifetime")
+	}
 	profiles := make(map[string]Profile, len(cfg.Profiles))
 	for name, profile := range cfg.Profiles {
 		profile.Template = *profile.Template.DeepCopy()
-		if profile.DaemonContainer == "" {
-			profile.DaemonContainer = "sandbox"
+		if profile.Container == "" {
+			profile.Container = defaultContainer
 		}
 		found := false
 		for _, c := range profile.Template.Spec.Containers {
-			if c.Name == profile.DaemonContainer && c.Image != "" {
+			if c.Name == profile.Container && c.Image != "" {
 				found = true
 			}
 		}
 		if !found {
-			return nil, fmt.Errorf("k8s profile %q requires daemon container %q with an image", name, profile.DaemonContainer)
+			return nil, fmt.Errorf("k8s profile %q requires container %q with an image", name, profile.Container)
 		}
 		profiles[name] = profile
 	}
 	cfg.Profiles = profiles
-	if cfg.Client == nil {
-		config := cfg.RESTConfig
-		if config == nil {
-			var err error
-			if cfg.Kubeconfig == "" {
-				config, err = rest.InClusterConfig()
-			}
-			if config == nil {
-				if err != nil && !errors.Is(err, rest.ErrNotInCluster) {
-					return nil, err
-				}
-				rules := clientcmd.NewDefaultClientConfigLoadingRules()
-				rules.ExplicitPath = cfg.Kubeconfig
-				config, err = clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, &clientcmd.ConfigOverrides{}).ClientConfig()
-				if err != nil {
-					return nil, err
-				}
-			}
+	if cfg.RESTConfig == nil {
+		if cfg.Client != nil {
+			return nil, fmt.Errorf("Config.Client also requires Config.RESTConfig, which running commands needs")
 		}
 		var err error
-		cfg.Client, err = coreclient.NewForConfig(config)
-		if err != nil {
-			return nil, err
+		if cfg.Kubeconfig == "" {
+			cfg.RESTConfig, err = rest.InClusterConfig()
+		}
+		if cfg.RESTConfig == nil {
+			if err != nil && !errors.Is(err, rest.ErrNotInCluster) {
+				return nil, err
+			}
+			rules := clientcmd.NewDefaultClientConfigLoadingRules()
+			rules.ExplicitPath = cfg.Kubeconfig
+			cfg.RESTConfig, err = clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, &clientcmd.ConfigOverrides{}).ClientConfig()
+			if err != nil {
+				return nil, err
+			}
 		}
 	}
-	return &Provider{cfg: cfg, client: cfg.Client}, nil
+	execClient, err := coreclient.NewForConfig(cfg.RESTConfig)
+	if err != nil {
+		return nil, err
+	}
+	if cfg.Client == nil {
+		cfg.Client = execClient
+	}
+	p := &Provider{cfg: cfg, client: cfg.Client, execClient: execClient}
+	p.stream = p.openStream
+	if cfg.IdleTimeout > 0 {
+		var ctx context.Context
+		ctx, p.stopSweep = context.WithCancel(context.Background())
+		p.sweepEnded = make(chan struct{})
+		go p.sweep(ctx)
+	}
+	return p, nil
+}
+
+// Close stops the idle sweep. Pods keep running, and Connect still reaches them.
+func (p *Provider) Close() error {
+	if p.stopSweep != nil {
+		p.stopSweep()
+		<-p.sweepEnded
+	}
+	return nil
 }
 
 func (p *Provider) pod(ctx context.Context, req sandbox.CreateRequest) (*corev1.Pod, error) {
@@ -130,14 +196,14 @@ func (p *Provider) pod(ctx context.Context, req sandbox.CreateRequest) (*corev1.
 	pod := &corev1.Pod{ObjectMeta: template.ObjectMeta, Spec: template.Spec}
 	for index := range pod.Spec.Containers {
 		c := &pod.Spec.Containers[index]
-		if c.Name != profile.DaemonContainer {
+		if c.Name != profile.Container {
 			continue
 		}
 		if c.WorkingDir == "" {
 			c.WorkingDir = "/workspace"
 		}
 		if len(c.Command) == 0 {
-			c.Command = []string{"sandbox-daemon"}
+			c.Command = []string{"sh", "-c", keepalive}
 		}
 		// Replace explicit entries, including ValueFrom, when request env overrides.
 		// Preserve template order: Kubernetes env values can reference earlier entries.
@@ -145,10 +211,13 @@ func (p *Provider) pod(ctx context.Context, req sandbox.CreateRequest) (*corev1.
 			setEnv(c, key, req.Env[key])
 		}
 		setEnv(c, "SANDBOX_ROOT", c.WorkingDir)
-		setEnv(c, "SANDBOX_PORT", strconv.Itoa(p.cfg.DaemonPort))
 	}
 	if pod.Spec.RestartPolicy == "" {
 		pod.Spec.RestartPolicy = corev1.RestartPolicyNever
+	}
+	if pod.Spec.ActiveDeadlineSeconds == nil {
+		seconds := int64((p.cfg.MaxLifetime + time.Second - 1) / time.Second)
+		pod.Spec.ActiveDeadlineSeconds = &seconds
 	}
 	if p.cfg.Configure != nil {
 		if err := p.cfg.Configure(ctx, req, pod); err != nil {
@@ -157,12 +226,12 @@ func (p *Provider) pod(ctx context.Context, req sandbox.CreateRequest) (*corev1.
 	}
 	found := false
 	for _, c := range pod.Spec.Containers {
-		if c.Name == profile.DaemonContainer && c.Image != "" {
+		if c.Name == profile.Container && c.Image != "" {
 			found = true
 		}
 	}
 	if !found {
-		return nil, fmt.Errorf("configured pod has no daemon container")
+		return nil, fmt.Errorf("configured pod has no container %q", profile.Container)
 	}
 	pod.Name = "hastekit-" + sandbox.ResourceID(req.Session)
 	pod.GenerateName = ""
@@ -173,16 +242,23 @@ func (p *Provider) pod(ctx context.Context, req sandbox.CreateRequest) (*corev1.
 	if pod.Labels == nil {
 		pod.Labels = map[string]string{}
 	}
-	pod.Labels[daemonprovider.ManagedKey] = daemonprovider.ManagedValue
+	pod.Labels[provision.ManagedKey] = provision.ManagedValue
 	if pod.Annotations == nil {
 		pod.Annotations = map[string]string{}
 	}
-	delete(pod.Annotations, daemonprovider.FingerprintKey)
-	fingerprint, err := daemonprovider.Fingerprint(req, pod)
+	delete(pod.Annotations, provision.FingerprintKey)
+	delete(pod.Annotations, activityKey)
+	delete(pod.Annotations, provision.StartupScriptKey)
+	pod.Annotations[containerKey] = profile.Container
+	if profile.StartupScript != "" {
+		pod.Annotations[provision.StartupScriptKey] = profile.StartupScript
+	}
+	fingerprint, err := provision.Fingerprint(req, pod)
 	if err != nil {
 		return nil, err
 	}
-	pod.Annotations[daemonprovider.FingerprintKey] = fingerprint
+	pod.Annotations[provision.FingerprintKey] = fingerprint
+	pod.Annotations[activityKey] = time.Now().UTC().Format(time.RFC3339)
 	return pod, nil
 }
 
@@ -197,7 +273,7 @@ func setEnv(c *corev1.Container, key, value string) {
 }
 
 func (p *Provider) Create(ctx context.Context, req sandbox.CreateRequest) (sandbox.Sandbox, error) {
-	if err := daemonprovider.Validate(req); err != nil {
+	if err := provision.Validate(req); err != nil {
 		return nil, err
 	}
 	ctx, cancel := context.WithTimeout(ctx, p.cfg.ReadyTimeout)
@@ -212,7 +288,7 @@ func (p *Provider) Create(ctx context.Context, req sandbox.CreateRequest) (sandb
 		if lookupErr != nil {
 			return nil, errors.Join(mapError(err), mapError(lookupErr))
 		}
-		if existing.Labels[daemonprovider.ManagedKey] != daemonprovider.ManagedValue || existing.Annotations[daemonprovider.FingerprintKey] != pod.Annotations[daemonprovider.FingerprintKey] {
+		if existing.Labels[provision.ManagedKey] != provision.ManagedValue || existing.Annotations[provision.FingerprintKey] != pod.Annotations[provision.FingerprintKey] {
 			return nil, fmt.Errorf("%w: named pod has different configuration", sandbox.ErrConflict)
 		}
 		ref, err := reference(existing)
@@ -228,7 +304,7 @@ func (p *Provider) Create(ctx context.Context, req sandbox.CreateRequest) (sandb
 	if err != nil {
 		return nil, err
 	}
-	result, err := p.Connect(ctx, ref)
+	result, err := p.connect(ctx, ref, true)
 	if err != nil {
 		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 		defer cancel()
@@ -263,6 +339,12 @@ func mapError(err error) error {
 }
 
 func (p *Provider) Connect(ctx context.Context, ref sandbox.Reference) (sandbox.Sandbox, error) {
+	return p.connect(ctx, ref, false)
+}
+
+// connect waits for the pod's container to run. A pod has one start, so a pod this
+// call has just created is the only one with a startup script still to run.
+func (p *Provider) connect(ctx context.Context, ref sandbox.Reference, created bool) (sandbox.Sandbox, error) {
 	name, uid, err := p.identity(ref)
 	if err != nil {
 		return nil, err
@@ -277,25 +359,22 @@ func (p *Provider) Connect(ctx context.Context, ref sandbox.Reference) (sandbox.
 		if pod.UID != uid {
 			return nil, fmt.Errorf("%w: original pod was replaced", sandbox.ErrNotFound)
 		}
-		if pod.Labels[daemonprovider.ManagedKey] != daemonprovider.ManagedValue {
+		if pod.Labels[provision.ManagedKey] != provision.ManagedValue {
 			return nil, fmt.Errorf("%w: pod ownership mismatch", sandbox.ErrConflict)
 		}
 		if pod.DeletionTimestamp != nil || pod.Status.Phase == corev1.PodFailed || pod.Status.Phase == corev1.PodSucceeded {
 			return nil, fmt.Errorf("%w: pod is terminating or %s", sandbox.ErrConflict, pod.Status.Phase)
 		}
-		if pod.Status.Phase == corev1.PodRunning && pod.Status.PodIP != "" {
-			endpoint, err := p.endpoint(ctx, pod, p.cfg.DaemonPort)
-			if err != nil {
-				return nil, err
-			}
-			daemon, err := sandbox.NewDaemonSandbox(sandbox.DaemonConfig{Reference: ref, Endpoint: endpoint, Client: p.cfg.HTTPClient})
-			if err != nil {
-				return nil, err
-			}
-			if err := daemon.WaitReady(ctx); err != nil {
-				return nil, err
-			}
-			return &runtime{DaemonSandbox: daemon, provider: p}, nil
+		container := pod.Annotations[containerKey]
+		if container == "" {
+			container = defaultContainer
+		}
+		state := containerState(pod, container)
+		if state != nil && state.Terminated != nil {
+			return nil, fmt.Errorf("%w: container %s has exited", sandbox.ErrConflict, container)
+		}
+		if pod.Status.Phase == corev1.PodRunning && state != nil && state.Running != nil {
+			return p.runtime(ctx, ref, pod, container, created)
 		}
 		select {
 		case <-ctx.Done():
@@ -304,6 +383,35 @@ func (p *Provider) Connect(ctx context.Context, ref sandbox.Reference) (sandbox.
 		}
 	}
 }
+func containerState(pod *corev1.Pod, name string) *corev1.ContainerState {
+	for i := range pod.Status.ContainerStatuses {
+		if pod.Status.ContainerStatuses[i].Name == name {
+			return &pod.Status.ContainerStatuses[i].State
+		}
+	}
+	return nil
+}
+
+func (p *Provider) runtime(ctx context.Context, ref sandbox.Reference, pod *corev1.Pod, container string, created bool) (sandbox.Sandbox, error) {
+	r := &runner{provider: p, name: pod.Name, uid: pod.UID, container: container, renewed: lastActivity(pod)}
+	if err := r.renewIfDue(ctx); err != nil {
+		return nil, err
+	}
+	root := "/workspace"
+	for _, c := range pod.Spec.Containers {
+		if c.Name == container && c.WorkingDir != "" {
+			root = c.WorkingDir
+		}
+	}
+	result := &runtime{Sandbox: execsandbox.New(execsandbox.Config{Reference: ref, Runner: r, Root: root}), provider: p, runner: r}
+	if created {
+		if err := result.Startup(ctx, pod.Annotations[provision.StartupScriptKey], p.cfg.ReadyTimeout); err != nil {
+			return nil, err
+		}
+	}
+	return result, nil
+}
+
 func (p *Provider) endpoint(ctx context.Context, pod *corev1.Pod, port int) (string, error) {
 	if port < 1 || port > 65535 {
 		return "", fmt.Errorf("invalid service port")
@@ -330,8 +438,15 @@ func (p *Provider) Delete(ctx context.Context, ref sandbox.Reference) error {
 }
 
 type runtime struct {
-	*sandbox.DaemonSandbox
+	*execsandbox.Sandbox
 	provider *Provider
+	runner   *runner
+}
+
+// KeepAlive counts as activity, for when the pod is busy with something that does
+// not go through exec, like traffic to a service running inside it.
+func (s *runtime) KeepAlive(ctx context.Context) error {
+	return s.runner.renew(ctx)
 }
 
 func (s *runtime) Endpoint(ctx context.Context, port int) (string, error) {

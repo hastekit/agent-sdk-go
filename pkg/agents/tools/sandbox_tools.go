@@ -2,9 +2,8 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"io"
-	"strings"
 	"unicode/utf8"
 
 	"github.com/bytedance/sonic"
@@ -155,19 +154,12 @@ func (t *ReadFileTool) Execute(ctx context.Context, params *agents.ToolCall) (*a
 		return nil, err
 	}
 
-	// Read through the provider's native file API.
-	reader, err := cli.Files().Read(ctx, in.FilePath)
+	data, err := sandbox.ReadFile(ctx, cli, in.FilePath)
+	if errors.Is(err, sandbox.ErrFileTooLarge) {
+		return sandboxToolError(ctx, params, updates, fmt.Errorf("file exceeds %d MB text tool limit; inspect it with shell commands", sandbox.MaxReadFile/1_000_000))
+	}
 	if err != nil {
 		return sandboxToolError(ctx, params, updates, err)
-	}
-
-	defer reader.Close()
-	data, err := io.ReadAll(io.LimitReader(reader, (4<<20)+1))
-	if err != nil {
-		return sandboxToolError(ctx, params, updates, err)
-	}
-	if len(data) > 4<<20 {
-		return sandboxToolError(ctx, params, updates, fmt.Errorf("file exceeds 4 MiB text tool limit; inspect it with shell commands"))
 	}
 	if !utf8.Valid(data) {
 		return sandboxToolError(ctx, params, updates, fmt.Errorf("file is binary; inspect it with shell commands"))
@@ -238,8 +230,7 @@ func (t *DeleteFileTool) Execute(ctx context.Context, params *agents.ToolCall) (
 		return nil, err
 	}
 
-	// Remove through the provider's native file API.
-	err = cli.Files().Remove(ctx, in.FilePath)
+	err = sandbox.RemoveFile(ctx, cli, in.FilePath)
 	if err != nil {
 		return sandboxToolError(ctx, params, updates, err)
 	}
@@ -310,8 +301,7 @@ func (t *WriteFileTool) Execute(ctx context.Context, params *agents.ToolCall) (*
 		return nil, err
 	}
 
-	// Write through the provider's native file API.
-	err = cli.Files().Write(ctx, in.FilePath, strings.NewReader(in.Content))
+	err = sandbox.WriteFile(ctx, cli, in.FilePath, []byte(in.Content))
 	if err != nil {
 		return sandboxToolError(ctx, params, updates, err)
 	}

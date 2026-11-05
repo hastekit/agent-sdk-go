@@ -6,8 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"mime"
-	"mime/multipart"
 	"net/http"
 	"strings"
 	"testing"
@@ -23,7 +21,6 @@ func response(body []byte) *http.Response {
 	return &http.Response{StatusCode: 200, Body: io.NopCloser(bytes.NewReader(body)), Header: make(http.Header)}
 }
 func TestNativeProtocols(t *testing.T) {
-	payload := []byte{0, 255, 128, '\n'}
 	calls := map[string]int{}
 	client := &http.Client{Transport: transport(func(r *http.Request) (*http.Response, error) {
 		calls[r.URL.Path]++
@@ -66,28 +63,6 @@ func TestNativeProtocols(t *testing.T) {
 			trailer[0] = 2
 			body = append(body, trailer...)
 			return response(body), nil
-		case "/files":
-			if r.URL.Query().Get("path") != "/home/user/a b.bin" {
-				t.Fatal(r.URL)
-			}
-			if r.Method == "GET" {
-				return response(payload), nil
-			}
-			_, params, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			part, err := multipart.NewReader(r.Body, params["boundary"]).NextPart()
-			if err != nil {
-				t.Fatal(err)
-			}
-			b, _ := io.ReadAll(part)
-			if !bytes.Equal(b, payload) {
-				t.Fatalf("corrupted upload %v", b)
-			}
-			return response([]byte(`[]`)), nil
-		case "/filesystem.Filesystem/Remove":
-			return response([]byte(`{}`)), nil
 		default:
 			t.Fatalf("unexpected request %s", r.URL)
 			return nil, nil
@@ -112,22 +87,6 @@ func TestNativeProtocols(t *testing.T) {
 	}
 	if result.Stdout != "hi" || result.Stderr != "err" || result.ExitCode != 7 {
 		t.Fatalf("%+v", result)
-	}
-	path := "/home/user/a b.bin"
-	if err := s.Files().Write(ctx, path, bytes.NewReader(payload)); err != nil {
-		t.Fatal(err)
-	}
-	r, err := s.Files().Read(ctx, path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	b, _ := io.ReadAll(r)
-	r.Close()
-	if !bytes.Equal(b, payload) {
-		t.Fatal(b)
-	}
-	if err := s.Files().Remove(ctx, path); err != nil {
-		t.Fatal(err)
 	}
 	if err := p.Delete(ctx, s.Reference()); err != nil {
 		t.Fatal(err)

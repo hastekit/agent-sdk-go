@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/hastekit/agent-sdk-go/pkg/agents/sandbox"
 )
@@ -20,8 +21,8 @@ type SandboxClient struct {
 	client  *http.Client
 }
 
-// NewSandboxClient routes lifecycle, execution, and binary file operations through
-// the gateway's configured provider. It never connects directly to a pod address.
+// NewSandboxClient routes lifecycle and execution through the gateway's configured
+// provider. It never connects directly to a pod address.
 func (c *Config) NewSandboxClient() *SandboxClient {
 	return &SandboxClient{baseURL: strings.TrimRight(c.Endpoint, "/") + "/api/sandbox", client: c.HttpClient}
 }
@@ -89,16 +90,9 @@ func (p *SandboxClient) runtime(ctx context.Context, ref sandbox.Reference, meth
 	if method != http.MethodPost && result != ref {
 		return nil, sandbox.ErrConflict
 	}
-	daemon, err := sandbox.NewDaemonSandbox(sandbox.DaemonConfig{
-		Reference: result, Client: p.client,
-		Endpoint: p.baseURL + "/" + url.PathEscape(result.Provider) + "/" + url.PathEscape(result.ID),
-	})
-	if err != nil {
-		return nil, err
-	}
 	// Do not expose EndpointResolver: gateway routes do not provide arbitrary
-	// service ports or direct access to the backend's daemon address.
-	return &gatewaySandbox{daemon}, nil
+	// service ports or direct access to the backend's address.
+	return &gatewaySandbox{ref: result, endpoint: p.baseURL + "/" + url.PathEscape(result.Provider) + "/" + url.PathEscape(result.ID), client: client}, nil
 }
 func (p *SandboxClient) Create(ctx context.Context, req sandbox.CreateRequest) (sandbox.Sandbox, error) {
 	return p.runtime(ctx, sandbox.Reference{}, http.MethodPost, req)
@@ -111,12 +105,65 @@ func (p *SandboxClient) Delete(ctx context.Context, ref sandbox.Reference) error
 	return err
 }
 
-type gatewaySandbox struct{ daemon *sandbox.DaemonSandbox }
-
-func (s *gatewaySandbox) Reference() sandbox.Reference { return s.daemon.Reference() }
-func (s *gatewaySandbox) Exec(ctx context.Context, req sandbox.ExecRequest) (*sandbox.ExecResult, error) {
-	return s.daemon.Exec(ctx, req)
+// gatewaySandbox runs commands through the gateway's routes.
+type gatewaySandbox struct {
+	ref      sandbox.Reference
+	endpoint string
+	client   *http.Client
 }
-func (s *gatewaySandbox) Files() sandbox.FileSystem { return s.daemon.Files() }
+
+func (s *gatewaySandbox) Reference() sandbox.Reference { return s.ref }
+
+func (s *gatewaySandbox) request(ctx context.Context, method, route string, body io.Reader, contentType string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, method, s.endpoint+route, body)
+	if err != nil {
+		return nil, err
+	}
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+	req.Header.Set("X-Sandbox-Provider", s.ref.Provider)
+	req.Header.Set("X-Sandbox-ID", s.ref.ID)
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode >= 300 {
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		switch resp.StatusCode {
+		case http.StatusNotFound:
+			return nil, fmt.Errorf("%w: %s", sandbox.ErrNotFound, b)
+		case http.StatusConflict:
+			return nil, fmt.Errorf("%w: %s", sandbox.ErrConflict, b)
+		case http.StatusNotImplemented:
+			return nil, fmt.Errorf("%w: %s", sandbox.ErrUnsupported, b)
+		}
+		return nil, fmt.Errorf("gateway sandbox HTTP %d: %s", resp.StatusCode, b)
+	}
+	return resp, nil
+}
+
+func (s *gatewaySandbox) Exec(ctx context.Context, req sandbox.ExecRequest) (*sandbox.ExecResult, error) {
+	timeout, err := sandbox.ValidateExec(req)
+	if err != nil {
+		return nil, err
+	}
+	req.Timeout = timeout
+	ctx, cancel := context.WithTimeout(ctx, timeout+10*time.Second)
+	defer cancel()
+	b, err := json.Marshal(req)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := s.request(ctx, http.MethodPost, "/v2/exec", bytes.NewReader(b), "application/json")
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	var result sandbox.ExecResult
+	err = json.NewDecoder(resp.Body).Decode(&result)
+	return &result, err
+}
 
 var _ sandbox.Provider = (*SandboxClient)(nil)

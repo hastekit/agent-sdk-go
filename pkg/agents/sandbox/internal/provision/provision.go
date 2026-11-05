@@ -1,5 +1,6 @@
-// Package daemonprovider contains configuration helpers for daemon-backed providers.
-package daemonprovider
+// Package provision contains configuration helpers for providers that create
+// their own containers.
+package provision
 
 import (
 	"crypto/sha256"
@@ -13,14 +14,19 @@ const ManagedKey = "hastekit.managed"
 const ManagedValue = "sandbox-sdk"
 const FingerprintKey = "hastekit.configuration"
 
+// StartupScriptKey holds a profile's startup script on the resource it created. A
+// reference carries no profile, and this makes it a creation setting like the rest,
+// so a changed script does not reach existing compute.
+const StartupScriptKey = "hastekit.startup-script"
+
 func Validate(req sandbox.CreateRequest) error {
 	if req.Profile == "" || req.Session.Namespace == "" || req.Session.SessionID == "" {
 		return fmt.Errorf("sandbox profile, namespace, and session are required")
 	}
 	if req.TTL != 0 {
-		return fmt.Errorf("%w: configure daemon idle lifetime in the image environment; provider TTL is unsupported", sandbox.ErrUnsupported)
+		return fmt.Errorf("%w: provider TTL is unsupported; use the provider's IdleTimeout and MaxLifetime", sandbox.ErrUnsupported)
 	}
-	_, err := sandbox.ValidateExec(sandbox.ExecRequest{Argv: []string{"daemon"}, Env: req.Env})
+	_, err := sandbox.ValidateExec(sandbox.ExecRequest{Argv: []string{"sandbox"}, Env: req.Env})
 	return err
 }
 

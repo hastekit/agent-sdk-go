@@ -1,4 +1,5 @@
-// Package docker provisions daemon-backed sandboxes through the Docker Engine API.
+// Package docker provisions sandboxes through the Docker Engine API and runs
+// commands in them with its exec API. Nothing of ours runs inside the container.
 package docker
 
 import (
@@ -7,8 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"net/http"
-	"net/netip"
 	"sort"
 	"strconv"
 	"strings"
@@ -16,7 +15,8 @@ import (
 
 	"github.com/containerd/errdefs"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/sandbox"
-	"github.com/hastekit/agent-sdk-go/pkg/agents/sandbox/internal/daemonprovider"
+	"github.com/hastekit/agent-sdk-go/pkg/agents/sandbox/internal/execsandbox"
+	"github.com/hastekit/agent-sdk-go/pkg/agents/sandbox/internal/provision"
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/network"
 	"github.com/moby/moby/client"
@@ -29,6 +29,12 @@ type Engine interface {
 	ContainerInspect(context.Context, string, client.ContainerInspectOptions) (client.ContainerInspectResult, error)
 	ContainerStart(context.Context, string, client.ContainerStartOptions) (client.ContainerStartResult, error)
 	ContainerRemove(context.Context, string, client.ContainerRemoveOptions) (client.ContainerRemoveResult, error)
+	ContainerList(context.Context, client.ContainerListOptions) (client.ContainerListResult, error)
+	ContainerStop(context.Context, string, client.ContainerStopOptions) (client.ContainerStopResult, error)
+	ContainerStatPath(context.Context, string, client.ContainerStatPathOptions) (client.ContainerStatPathResult, error)
+	ExecCreate(context.Context, string, client.ExecCreateOptions) (client.ExecCreateResult, error)
+	ExecAttach(context.Context, string, client.ExecAttachOptions) (client.ExecAttachResult, error)
+	ExecInspect(context.Context, string, client.ExecInspectOptions) (client.ExecInspectResult, error)
 	ImageInspect(context.Context, string, ...client.ImageInspectOption) (client.ImageInspectResult, error)
 	ImagePull(context.Context, string, client.ImagePullOptions) (client.ImagePullResponse, error)
 }
@@ -41,63 +47,74 @@ const (
 	PullNever     PullPolicy = "never"
 )
 
-// Profile configures the daemon container using native Docker API types.
-// Config.Image is required. The default entrypoint is sandbox-daemon.
+// Profile configures the container using native Docker API types. Config.Image
+// is required, and the image must provide a POSIX shell and the tools listed in
+// the README. The default entrypoint only keeps the container running; one that
+// replaces it must too.
 type Profile struct {
 	Config           container.Config
 	HostConfig       container.HostConfig
 	NetworkingConfig network.NetworkingConfig
 	PullPolicy       PullPolicy
 	RegistryAuth     string // Docker's base64-encoded registry authentication, never stored in labels/state.
+	// StartupScript runs in sh each time a container starts, which includes being
+	// started again after going idle, so it has to be safe to run again. It is
+	// stored in a label, so keep secrets out of it. It shares ReadyTimeout, and a
+	// container whose script fails is not used.
+	StartupScript string
 }
 
 type Config struct {
-	Client         Engine // nil creates an official client using Docker environment variables.
-	Profiles       map[string]Profile
-	DaemonPort     int           // defaults to 8080
-	ReadyTimeout   time.Duration // includes image pull, startup, and daemon readiness; defaults to two minutes.
-	HTTPClient     *http.Client  // daemon transport, independent of the Engine client
-	PublishAddress string        // default 127.0.0.1, used for automatic daemon port publishing
-	DaemonHost     string        // default 127.0.0.1, reachable host for published ports
+	Client        Engine // nil creates an official client using Docker environment variables.
+	Profiles      map[string]Profile
+	ReadyTimeout  time.Duration // includes image pull, startup and the startup script; defaults to two minutes.
+	PublishedHost string        // default 127.0.0.1, reachable host for published service ports
+	// IdleTimeout stops a running container after this long without activity. It
+	// defaults to 15 minutes, and a negative value leaves stopping to the caller,
+	// through StopIdle. Every provider sharing an engine sweeps its containers,
+	// so the shortest timeout among them wins.
+	IdleTimeout time.Duration
+	// MaxLifetime stops a container this long after it started no matter what,
+	// which bounds its lifetime when no provider is left to notice it is idle.
+	// Connect starts it again. Defaults to 24 hours.
+	MaxLifetime time.Duration
 	// Configure runs on an isolated profile copy. Use it for session-specific
 	// bind mounts, volumes, networking or resources. Name and ownership labels
 	// are assigned afterwards. It must produce stable configuration for reuse.
 	Configure func(context.Context, sandbox.CreateRequest, *client.ContainerCreateOptions) error
-	// Endpoint overrides published-port routing. With this set the provider does
-	// not automatically publish the daemon port. The callback must resolve every
-	// requested service port, including DaemonPort, to an address reachable here.
+	// Endpoint overrides published-port routing for service ports requested
+	// through sandbox.EndpointResolver.
 	Endpoint func(context.Context, container.InspectResponse, int) (string, error)
 }
 
 type Provider struct {
-	cfg    Config
-	engine Engine
-	close  func() error
+	cfg        Config
+	engine     Engine
+	close      func() error
+	stopSweep  context.CancelFunc
+	sweepEnded chan struct{}
 }
 
 func New(cfg Config) (*Provider, error) {
-	if cfg.DaemonPort == 0 {
-		cfg.DaemonPort = 8080
-	}
-	if cfg.DaemonPort < 1 || cfg.DaemonPort > 65535 {
-		return nil, fmt.Errorf("invalid daemon port")
-	}
 	if cfg.ReadyTimeout == 0 {
 		cfg.ReadyTimeout = 2 * time.Minute
 	}
 	if cfg.ReadyTimeout < 0 {
 		return nil, fmt.Errorf("negative readiness timeout")
 	}
-	if cfg.PublishAddress == "" {
-		cfg.PublishAddress = "127.0.0.1"
+	if cfg.PublishedHost == "" {
+		cfg.PublishedHost = "127.0.0.1"
 	}
-	if _, err := netip.ParseAddr(cfg.PublishAddress); err != nil {
-		return nil, fmt.Errorf("invalid publish address: %w", err)
+	if cfg.IdleTimeout == 0 {
+		cfg.IdleTimeout = 15 * time.Minute
 	}
-	if cfg.DaemonHost == "" {
-		cfg.DaemonHost = "127.0.0.1"
+	if cfg.MaxLifetime == 0 {
+		cfg.MaxLifetime = 24 * time.Hour
 	}
-	profiles, err := daemonprovider.Clone(cfg.Profiles)
+	if cfg.MaxLifetime < 0 {
+		return nil, fmt.Errorf("negative max lifetime")
+	}
+	profiles, err := provision.Clone(cfg.Profiles)
 	if err != nil {
 		return nil, err
 	}
@@ -120,12 +137,22 @@ func New(cfg Config) (*Provider, error) {
 		}
 		p.engine, p.close = engine, engine.Close
 	}
+	if cfg.IdleTimeout > 0 {
+		var ctx context.Context
+		ctx, p.stopSweep = context.WithCancel(context.Background())
+		p.sweepEnded = make(chan struct{})
+		go p.sweep(ctx)
+	}
 	return p, nil
 }
 
-// Close closes only the internally constructed Engine client. Injected clients
-// and the daemon HTTP transport remain owned by their caller.
+// Close stops the idle sweep and closes only the internally constructed Engine
+// client. An injected client remains owned by its caller.
 func (p *Provider) Close() error {
+	if p.stopSweep != nil {
+		p.stopSweep()
+		<-p.sweepEnded
+	}
 	if p.close != nil {
 		return p.close()
 	}
@@ -137,7 +164,7 @@ func (p *Provider) options(ctx context.Context, req sandbox.CreateRequest) (clie
 	if !ok {
 		return client.ContainerCreateOptions{}, profile, fmt.Errorf("unknown docker profile %q", req.Profile)
 	}
-	profile, err := daemonprovider.Clone(profile)
+	profile, err := provision.Clone(profile)
 	if err != nil {
 		return client.ContainerCreateOptions{}, profile, err
 	}
@@ -146,7 +173,7 @@ func (p *Provider) options(ctx context.Context, req sandbox.CreateRequest) (clie
 		options.Config.WorkingDir = "/workspace"
 	}
 	if len(options.Config.Entrypoint) == 0 {
-		options.Config.Entrypoint = []string{"sandbox-daemon"}
+		options.Config.Entrypoint = []string{"sleep", strconv.FormatInt(int64((p.cfg.MaxLifetime+time.Second-1)/time.Second), 10)}
 	}
 	env := map[string]string{}
 	for _, entry := range options.Config.Env {
@@ -159,7 +186,7 @@ func (p *Provider) options(ctx context.Context, req sandbox.CreateRequest) (clie
 	for key, value := range req.Env {
 		env[key] = value
 	}
-	env["SANDBOX_ROOT"], env["SANDBOX_PORT"] = options.Config.WorkingDir, strconv.Itoa(p.cfg.DaemonPort)
+	env["SANDBOX_ROOT"] = options.Config.WorkingDir
 	options.Config.Env = nil
 	for key, value := range env {
 		options.Config.Env = append(options.Config.Env, key+"="+value)
@@ -176,38 +203,31 @@ func (p *Provider) options(ctx context.Context, req sandbox.CreateRequest) (clie
 	if options.HostConfig == nil {
 		options.HostConfig = &container.HostConfig{}
 	}
+	// PID 1 reaps what commands leave behind and passes on the stop signal.
+	if options.HostConfig.Init == nil {
+		init := true
+		options.HostConfig.Init = &init
+	}
 	options.Name = "hastekit-" + sandbox.ResourceID(req.Session)
-	port := network.MustParsePort(strconv.Itoa(p.cfg.DaemonPort) + "/tcp")
-	if options.Config.ExposedPorts == nil {
-		options.Config.ExposedPorts = network.PortSet{}
-	}
-	options.Config.ExposedPorts[port] = struct{}{}
-	if p.cfg.Endpoint == nil {
-		if options.HostConfig.NetworkMode == "host" || options.HostConfig.NetworkMode == "none" {
-			return options, profile, fmt.Errorf("host/none networking requires an Endpoint callback")
-		}
-		if options.HostConfig.PortBindings == nil {
-			options.HostConfig.PortBindings = network.PortMap{}
-		}
-		if len(options.HostConfig.PortBindings[port]) == 0 {
-			options.HostConfig.PortBindings[port] = []network.PortBinding{{HostIP: netip.MustParseAddr(p.cfg.PublishAddress)}}
-		}
-	}
 	if options.Config.Labels == nil {
 		options.Config.Labels = map[string]string{}
 	}
-	delete(options.Config.Labels, daemonprovider.FingerprintKey)
-	options.Config.Labels[daemonprovider.ManagedKey] = daemonprovider.ManagedValue
-	fingerprint, err := daemonprovider.Fingerprint(req, options)
+	delete(options.Config.Labels, provision.FingerprintKey)
+	options.Config.Labels[provision.ManagedKey] = provision.ManagedValue
+	delete(options.Config.Labels, provision.StartupScriptKey)
+	if profile.StartupScript != "" {
+		options.Config.Labels[provision.StartupScriptKey] = profile.StartupScript
+	}
+	fingerprint, err := provision.Fingerprint(req, options)
 	if err != nil {
 		return options, profile, err
 	}
-	options.Config.Labels[daemonprovider.FingerprintKey] = fingerprint
+	options.Config.Labels[provision.FingerprintKey] = fingerprint
 	return options, profile, nil
 }
 
 func (p *Provider) Create(ctx context.Context, req sandbox.CreateRequest) (sandbox.Sandbox, error) {
-	if err := daemonprovider.Validate(req); err != nil {
+	if err := provision.Validate(req); err != nil {
 		return nil, err
 	}
 	ctx, cancel := context.WithTimeout(ctx, p.cfg.ReadyTimeout)
@@ -226,7 +246,7 @@ func (p *Provider) Create(ctx context.Context, req sandbox.CreateRequest) (sandb
 			return nil, errors.Join(mapError(err), mapError(lookupErr))
 		}
 		config := existing.Container.Config
-		if config == nil || config.Labels[daemonprovider.ManagedKey] != daemonprovider.ManagedValue || config.Labels[daemonprovider.FingerprintKey] != options.Config.Labels[daemonprovider.FingerprintKey] {
+		if config == nil || config.Labels[provision.ManagedKey] != provision.ManagedValue || config.Labels[provision.FingerprintKey] != options.Config.Labels[provision.FingerprintKey] {
 			return nil, fmt.Errorf("%w: named container has different configuration", sandbox.ErrConflict)
 		}
 		return p.Connect(ctx, sandbox.Reference{Provider: "docker", ID: existing.Container.ID})
@@ -303,7 +323,7 @@ func (p *Provider) Connect(ctx context.Context, ref sandbox.Reference) (sandbox.
 			return nil, mapError(err)
 		}
 		info := inspected.Container
-		if info.ID != ref.ID || info.Config == nil || info.Config.Labels[daemonprovider.ManagedKey] != daemonprovider.ManagedValue {
+		if info.ID != ref.ID || info.Config == nil || info.Config.Labels[provision.ManagedKey] != provision.ManagedValue {
 			return nil, fmt.Errorf("%w: container identity or ownership mismatch", sandbox.ErrConflict)
 		}
 		if info.State == nil {
@@ -313,18 +333,18 @@ func (p *Provider) Connect(ctx context.Context, ref sandbox.Reference) (sandbox.
 			return nil, fmt.Errorf("%w: container is %s", sandbox.ErrConflict, info.State.Status)
 		}
 		if info.State.Running && !info.State.Restarting {
-			endpoint, err := p.endpoint(ctx, info, p.cfg.DaemonPort)
-			if err != nil {
-				return nil, err
+			result := &runtime{Sandbox: execsandbox.New(execsandbox.Config{Reference: ref, Runner: &runner{engine: p.engine, id: ref.ID}, Root: info.Config.WorkingDir}), provider: p}
+			if started {
+				if err := result.Startup(ctx, info.Config.Labels[provision.StartupScriptKey], p.cfg.ReadyTimeout); err != nil {
+					// Left running, it would look ready to the next Connect, which would
+					// skip the script.
+					cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+					defer cancel()
+					_, stopErr := p.engine.ContainerStop(cleanup, ref.ID, client.ContainerStopOptions{})
+					return nil, errors.Join(err, mapError(stopErr))
+				}
 			}
-			daemon, err := sandbox.NewDaemonSandbox(sandbox.DaemonConfig{Reference: ref, Endpoint: endpoint, Client: p.cfg.HTTPClient})
-			if err != nil {
-				return nil, err
-			}
-			if err := daemon.WaitReady(ctx); err != nil {
-				return nil, err
-			}
-			return &runtime{DaemonSandbox: daemon, provider: p}, nil
+			return result, nil
 		}
 		if !started && !info.State.Restarting {
 			_, err := p.engine.ContainerStart(ctx, ref.ID, client.ContainerStartOptions{})
@@ -353,7 +373,7 @@ func (p *Provider) endpoint(ctx context.Context, info container.InspectResponse,
 	if info.NetworkSettings != nil {
 		bindings := info.NetworkSettings.Ports[network.MustParsePort(strconv.Itoa(port)+"/tcp")]
 		if len(bindings) > 0 && bindings[0].HostPort != "" {
-			return "http://" + net.JoinHostPort(p.cfg.DaemonHost, bindings[0].HostPort), nil
+			return "http://" + net.JoinHostPort(p.cfg.PublishedHost, bindings[0].HostPort), nil
 		}
 	}
 	return "", fmt.Errorf("%w: port %d is not published; configure port bindings or Endpoint", sandbox.ErrUnsupported, port)
@@ -370,7 +390,7 @@ func (p *Provider) Delete(ctx context.Context, ref sandbox.Reference) error {
 }
 
 type runtime struct {
-	*sandbox.DaemonSandbox
+	*execsandbox.Sandbox
 	provider *Provider
 }
 

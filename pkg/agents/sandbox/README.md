@@ -1,6 +1,6 @@
 # Sandbox execution
 
-The SDK includes a standalone daemon and a reusable Docker base image. See the
+The SDK includes a reusable Docker base image. See the
 [image guide](../../../deployments/sandbox/README.md) for building, configuring,
 extending, and publishing it.
 
@@ -10,12 +10,13 @@ All backends implement one contract:
 Tool → Acquire(run.State)
          reference present → Provider.Connect
          reference absent  → Provider.Create
-      → Exec / Files
+      → Exec
       → StateUpdates → next tool call and persisted run.State
 
-Backend: Docker/Kubernetes → HasteKit daemon
-         E2B               → envd
-         Daytona           → toolbox
+Backend: Docker     → Engine exec
+         Kubernetes → API server exec
+         E2B        → envd
+         Daytona    → toolbox
 ```
 
 `Provider` owns infrastructure, readiness, routing, and authentication.
@@ -58,8 +59,17 @@ from metadata or retrying creation.
 
 `NewBashTool` calls `Exec` with `[]string{"bash", "-c", code}`. Working directory
 is explicit in the optional `workdir` argument. `cd` affects that invocation only.
-The configured image/template must provide Bash. FileSystem accepts binary readers
-and streams; for example, `sb.Files().Write(ctx, "uploads/report.pdf", reader)`.
+The configured image/template must provide Bash.
+
+A sandbox only runs commands. The file tools use `sandbox.ReadFile`, `WriteFile` and
+`RemoveFile`, which are built on `Exec` and so work on any backend. They need a POSIX
+`sh` with `base64`, `cat`, `mkdir`, `mv`, `readlink`, `rm`, `rmdir`, `tr` and `wc`.
+Paths are confined to the sandbox's default working directory, including through
+symlinks, which scopes these helpers but not a shell. Content is base64 inside each
+command, since arguments cannot hold NUL and JSON transports rewrite invalid UTF-8.
+`ReadFile` returns at most 3 MB. `WriteFile` publishes atomically and takes one
+command per 48 KiB, so it suits what a model writes, not large files: mount those,
+or have a command fetch them from inside the sandbox.
 
 Provider imports are under `github.com/hastekit/agent-sdk-go/pkg/agents/sandbox/providers`.
 E2B profiles select a template, Daytona profiles select a snapshot, and SDK
@@ -69,13 +79,17 @@ does not change tools.
 Standalone SDK implementations:
 
 - [`providers/docker`](providers/docker/README.md): official Docker Engine client,
-  configurable mounts/networks/resources, image pulling and daemon port routing.
+  configurable mounts/networks/resources, image pulling, and commands and files
+  over the Engine's exec API with nothing of ours in the container.
 - [`providers/k8s`](providers/k8s/README.md): client-go, native pod templates,
-  application-managed PVC mounts and configurable daemon routing.
+  application-managed PVC mounts, and commands and files over the API server's
+  exec subresource with nothing of ours in the pod.
 
-Both accept injected clients and session-specific configuration callbacks. They
-require an image serving the daemon protocol and do not depend on gateway paths
-or service configuration. Docker references retain immutable container IDs;
+Both accept injected clients and session-specific configuration callbacks, and
+do not depend on gateway paths or service configuration. Images need a POSIX shell
+and common tools, and a profile's `StartupScript` runs setup when a sandbox starts;
+E2B templates and Daytona snapshots have their own start commands for that. Docker
+references retain immutable container IDs;
 Kubernetes references retain namespace, pod name and UID.
 
 ## Gateway integration
@@ -114,24 +128,22 @@ explicitly launches a shell. Nonzero exit codes are results, not transport error
 Zero timeout selects 60 seconds. Context cancellation stops waiting; remote process
 termination depends on the provider. Do not retry commands blindly.
 
-| Behavior | HasteKit daemon | E2B | Daytona |
-| --- | --- | --- | --- |
-| Exec transport | Native argv over HTTP | Native argv through envd Connect RPC | Toolbox command API with literal argument quoting |
-| Output | Separate streams | Separate streams | Combined in stdout, `OutputCombined=true` |
-| Timeout | Kills process group, exit 124 | Cancels stream and attempts native PID kill | Sent to toolbox in seconds |
-| Files | Binary HTTP stream | Native multipart upload and binary download | Native raw upload and binary download |
-| Lifetime | Configured daemon idle timeout | Pauses TTL seconds after creation or the latest reconnect | Deleted after a wall-clock TTL rounded up to minutes |
+| Behavior | Docker | Kubernetes | E2B | Daytona |
+| --- | --- | --- | --- | --- |
+| Exec transport | Native argv through Engine exec | Native argv through API server exec, sent over stdin | Native argv through envd Connect RPC | Toolbox command API with literal argument quoting |
+| Output | Separate streams | Separate streams | Separate streams | Combined in stdout, `OutputCombined=true` |
+| Timeout | Kills process group from inside the container, exit 124 | Kills process group from inside the container, exit 124 | Cancels stream and attempts native PID kill | Sent to toolbox in seconds |
+| Lifetime | Stopped by the provider after `IdleTimeout`, and by itself after `MaxLifetime` | Deleted by the provider after `IdleTimeout`, and by Kubernetes after `MaxLifetime` | Pauses TTL seconds after creation or the latest reconnect | Deleted after a wall-clock TTL rounded up to minutes |
 
-HasteKit tracks active requests so a long command or upload does not trigger its
-idle shutdown. E2B and HasteKit cap output at 4 MiB per stream and flag truncation.
+Neither idle sweep touches a sandbox while a command is running. Docker, Kubernetes
+and E2B cap output at 4 MiB per stream and flag truncation. Docker and Kubernetes
+kill a command that produces more than 64 MiB in total, with exit 137.
 Daytona JSON responses are limited to 16 MiB; oversized responses fail decoding.
-The model-facing read tool allows at most 4 MiB of UTF-8 text; `FileSystem` transfers
-arbitrary binary data. HasteKit writes publish atomically and confine paths with
-`os.Root`, including symlink traversal.
+The model-facing read tool allows at most 3 MB of UTF-8 text.
 
 Compute is created during the first sandbox tool execution, not when an attachment is staged in
 application storage. Docker/Kubernetes can mount the existing session workspace.
-Cloud providers need supported provider storage or a copy through `Files().Write`;
+Cloud providers need supported provider storage or a command that fetches the file;
 an application S3/EFS folder does not automatically become a cloud sandbox mount.
 The gateway's coding tool still requires mounted worktrees and service endpoint
 access; that application-specific tool is not a portable replacement for Exec.
@@ -144,19 +156,26 @@ The next acquisition can create fresh compute. E2B sandboxes pause when their TT
 runs out, keeping files and processes, and reconnecting resumes a paused sandbox
 or extends a running one for another TTL. E2B keeps paused sandboxes until they
 are deleted: call the E2B provider's `DeletePaused` periodically with your
-retention period. Daytona can start stopped or archived sandboxes; a Daytona TTL
-deletes the sandbox, so leave it unset for sessions that should resume.
+retention period. Docker stops idle containers and reconnecting starts them again,
+keeping files and installed packages but not processes. Pods cannot be stopped, so
+Kubernetes deletes idle ones, keeping only what is on a volume, and the session's
+next sandbox call fails until its state is cleared. Daytona can start stopped or
+archived sandboxes; a Daytona TTL deletes the sandbox, so leave it unset for
+sessions that should resume.
 
 State is persisted at the normal run/tool-result boundaries, not transactionally
 with provider creation. A crash or cancellation between these operations can
 orphan compute. Provider conflict recovery reduces duplicates where supported,
 but does not provide exactly-once creation or execution.
 
-This is a breaking migration: rebuild the daemon image and deploy SDK/gateway
-together. The old lifecycle endpoints, text file protocol, `/exec/bash`, legacy
-manager, and shell result types are removed. Gateway routes are now
+This is a breaking migration: rebuild the image and deploy SDK/gateway together.
+The daemon, its port and its idle timeout are gone: any image with a shell works,
+and `pods/exec` access replaces routing to pods. Pods and containers created with
+the daemon keep working over exec until they end. The old lifecycle endpoints, text
+file protocol, `/exec/bash`, legacy manager, and shell result types are removed.
+Gateway routes are now
 `POST /api/sandbox/` for creation and `GET`/`DELETE /api/sandbox/{provider}/{id}`
-for reconnect/deletion, with `/v2/exec` and `/v2/files` suffixes for runtime
+for reconnect/deletion, with a `/v2/exec` suffix for runtime
 operations. Saved agent configs must replace `docker_image` with a configured
 `profile`. Drain old compute resources; new references do not adopt old
 session-named containers. Mounted session data remains in its existing location.

@@ -20,7 +20,6 @@ func response(body []byte) *http.Response {
 	return &http.Response{StatusCode: 200, Body: io.NopCloser(bytes.NewReader(body)), Header: make(http.Header)}
 }
 func TestLifecycleExecAndBinaryFiles(t *testing.T) {
-	payload := []byte{0, 255, 128, 10}
 	deletes := 0
 	client := &http.Client{Transport: transport(func(r *http.Request) (*http.Response, error) {
 		if r.Header.Get("Authorization") != "Bearer secret" {
@@ -47,22 +46,6 @@ func TestLifecycleExecAndBinaryFiles(t *testing.T) {
 				t.Fatal(b)
 			}
 			return response([]byte(`{"exitCode":3,"result":"combined"}`)), nil
-		case "/toolbox/abc/files/upload-v2":
-			b, _ := io.ReadAll(r.Body)
-			if !bytes.Equal(b, payload) || r.Header.Get("Content-Type") != "application/octet-stream" {
-				t.Fatal("invalid native upload")
-			}
-			return response(nil), nil
-		case "/toolbox/abc/files/download":
-			if r.URL.Query().Get("path") != "a b.bin" {
-				t.Fatal(r.URL)
-			}
-			return response(payload), nil
-		case "/toolbox/abc/files":
-			if r.Method != "DELETE" {
-				t.Fatal(r.Method)
-			}
-			return response(nil), nil
 		default:
 			t.Fatalf("unexpected request %s", r.URL)
 			return nil, nil
@@ -87,21 +70,6 @@ func TestLifecycleExecAndBinaryFiles(t *testing.T) {
 	}
 	if !result.OutputCombined || result.Stdout != "combined" || result.ExitCode != 3 {
 		t.Fatal(result)
-	}
-	if err := s.Files().Write(ctx, "a b.bin", bytes.NewReader(payload)); err != nil {
-		t.Fatal(err)
-	}
-	r, err := s.Files().Read(ctx, "a b.bin")
-	if err != nil {
-		t.Fatal(err)
-	}
-	b, _ := io.ReadAll(r)
-	r.Close()
-	if !bytes.Equal(b, payload) {
-		t.Fatal(b)
-	}
-	if err := s.Files().Remove(ctx, "a b.bin"); err != nil {
-		t.Fatal(err)
 	}
 	if err := p.Delete(ctx, s.Reference()); err != nil {
 		t.Fatal(err)

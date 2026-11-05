@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/sandbox"
-	"io"
 	"net/http"
 )
 
@@ -95,43 +94,5 @@ func NewSandboxHandler(provider sandbox.Provider) http.Handler {
 		}
 		respond(w, result)
 	})
-	files := func(w http.ResponseWriter, r *http.Request) {
-		name := r.URL.Query().Get("path")
-		if name == "" {
-			http.Error(w, "path is required", 400)
-			return
-		}
-		s, err := resolve(r)
-		if err != nil {
-			fail(w, err)
-			return
-		}
-		switch r.Method {
-		case "GET":
-			reader, err := s.Files().Read(r.Context(), name)
-			if err != nil {
-				fail(w, err)
-				return
-			}
-			defer reader.Close()
-			w.Header().Set("Content-Type", "application/octet-stream")
-			_, _ = io.Copy(w, reader)
-		case "PUT":
-			if err := s.Files().Write(r.Context(), name, r.Body); err != nil {
-				fail(w, err)
-				return
-			}
-			w.WriteHeader(204)
-		case "DELETE":
-			if err := s.Files().Remove(r.Context(), name); err != nil {
-				fail(w, err)
-				return
-			}
-			w.WriteHeader(204)
-		}
-	}
-	for _, method := range []string{"GET", "PUT", "DELETE"} {
-		mux.HandleFunc(method+" /{provider}/{id}/v2/files", files)
-	}
 	return mux
 }

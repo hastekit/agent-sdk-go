@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"strings"
 	"time"
 )
@@ -47,7 +46,6 @@ type Provider interface {
 type Sandbox interface {
 	Reference() Reference
 	Exec(context.Context, ExecRequest) (*ExecResult, error)
-	Files() FileSystem
 }
 
 // ExecRequest runs an argument vector without implicit shell interpolation.
@@ -71,14 +69,6 @@ type ExecResult struct {
 	Stderr         string `json:"stderr"`
 	ExitCode       int    `json:"exit_code"`
 	DurationMilli  int64  `json:"duration_ms"`
-}
-
-// FileSystem transfers bytes, not model-visible text. Callers close returned readers.
-// Relative paths resolve against the provider's workspace. Write creates parents.
-type FileSystem interface {
-	Read(context.Context, string) (io.ReadCloser, error)
-	Write(context.Context, string, io.Reader) error
-	Remove(context.Context, string) error
 }
 
 // EndpointResolver is optional access to a service running inside the sandbox.

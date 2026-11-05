@@ -10,7 +10,7 @@ import (
 const StateKey = "sandbox_reference"
 
 // State records resource identity and the scope in which it may be reused.
-// Credentials, daemon addresses, and creation environment values are excluded.
+// Credentials, network addresses, and creation environment values are excluded.
 type State struct {
 	Reference Reference  `json:"reference"`
 	Session   SessionKey `json:"session"`

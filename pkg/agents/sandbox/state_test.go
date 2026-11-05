@@ -1,31 +1,19 @@
 package sandbox
 
 import (
-	"bytes"
 	"context"
 	"errors"
-	"io"
 	"maps"
 	"strings"
 	"testing"
 )
 
-type stateRuntime struct{ data []byte }
+type stateRuntime struct{}
 
 func (s *stateRuntime) Reference() Reference { return Reference{Provider: "test", ID: "runtime"} }
 func (s *stateRuntime) Exec(context.Context, ExecRequest) (*ExecResult, error) {
 	return &ExecResult{Stdout: "out", ExitCode: 7}, nil
 }
-func (s *stateRuntime) Files() FileSystem { return s }
-func (s *stateRuntime) Read(context.Context, string) (io.ReadCloser, error) {
-	return io.NopCloser(bytes.NewReader(s.data)), nil
-}
-func (s *stateRuntime) Write(_ context.Context, _ string, r io.Reader) error {
-	var err error
-	s.data, err = io.ReadAll(r)
-	return err
-}
-func (s *stateRuntime) Remove(context.Context, string) error { s.data = nil; return nil }
 
 type stateProvider struct {
 	runtime *stateRuntime
@@ -74,22 +62,6 @@ func TestConversationStateInProcessProvider(t *testing.T) {
 	result, err := s.Exec(ctx, ExecRequest{Argv: []string{"true"}})
 	if err != nil || result.ExitCode != 7 {
 		t.Fatalf("%+v %v", result, err)
-	}
-	data := []byte{0, 255, 128, 10}
-	if err := s.Files().Write(ctx, "a b.bin", bytes.NewReader(data)); err != nil {
-		t.Fatal(err)
-	}
-	r, err := s.Files().Read(ctx, "a b.bin")
-	if err != nil {
-		t.Fatal(err)
-	}
-	got, _ := io.ReadAll(r)
-	r.Close()
-	if !bytes.Equal(got, data) {
-		t.Fatal("binary file changed")
-	}
-	if err := s.Files().Remove(ctx, "a b.bin"); err != nil {
-		t.Fatal(err)
 	}
 	if err := provider.Delete(ctx, s.Reference()); err != nil {
 		t.Fatal(err)

@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"mime/multipart"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -234,7 +233,7 @@ func (p *Provider) wrap(i info, expires time.Time) (sandbox.Sandbox, error) {
 		_, err := p.connect(ctx, i.ID, d)
 		return err
 	}
-	return &runtime{ref: sandbox.Reference{Provider: "e2b", ID: i.ID}, api: api, user: p.config.User, extend: extend, expires: expires}, nil
+	return &runtime{ref: sandbox.Reference{Provider: "e2b", ID: i.ID}, api: api, extend: extend, expires: expires}, nil
 }
 
 // seconds rounds up, so a sandbox never gets less time than it asked for.
@@ -243,9 +242,8 @@ func seconds(d time.Duration) int64 {
 }
 
 type runtime struct {
-	ref  sandbox.Reference
-	api  *httpapi.Client
-	user string
+	ref sandbox.Reference
+	api *httpapi.Client
 
 	// extend goes through the control API, which envd's credentials cannot
 	// reach. expires is when the sandbox pauses at the earliest.
@@ -270,7 +268,6 @@ func (s *runtime) keepFor(ctx context.Context, d time.Duration) error {
 }
 
 func (s *runtime) Reference() sandbox.Reference { return s.ref }
-func (s *runtime) Files() sandbox.FileSystem    { return s }
 func frame(data []byte) []byte {
 	b := make([]byte, 5+len(data))
 	binary.BigEndian.PutUint32(b[1:5], uint32(len(data)))
@@ -382,39 +379,6 @@ func (s *runtime) Exec(ctx context.Context, req sandbox.ExecRequest) (*sandbox.E
 			}
 		}
 	}
-}
-func (s *runtime) filePath(path string) string {
-	return "/files?path=" + url.QueryEscape(path) + "&username=" + url.QueryEscape(s.user)
-}
-func (s *runtime) Read(ctx context.Context, path string) (io.ReadCloser, error) {
-	r, err := s.api.Do(ctx, "GET", s.filePath(path), nil, "")
-	if err != nil {
-		return nil, err
-	}
-	return r.Body, nil
-}
-func (s *runtime) Write(ctx context.Context, path string, content io.Reader) error {
-	// Multipart is envd's native upload protocol. MultiReader streams the file
-	// without a buffering goroutine or holding its content in memory.
-	var envelope bytes.Buffer
-	writer := multipart.NewWriter(&envelope)
-	if _, err := writer.CreateFormFile("file", path); err != nil {
-		return err
-	}
-	header := append([]byte(nil), envelope.Bytes()...)
-	envelope.Reset()
-	if err := writer.Close(); err != nil {
-		return err
-	}
-	body := io.MultiReader(bytes.NewReader(header), content, bytes.NewReader(envelope.Bytes()))
-	r, err := s.api.Do(ctx, "POST", s.filePath(path), body, writer.FormDataContentType())
-	if err != nil {
-		return err
-	}
-	return r.Body.Close()
-}
-func (s *runtime) Remove(ctx context.Context, path string) error {
-	return s.api.JSON(ctx, "POST", "/filesystem.Filesystem/Remove", map[string]string{"path": path}, nil)
 }
 
 var _ sandbox.Provider = (*Provider)(nil)

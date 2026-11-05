@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"time"
@@ -207,7 +206,6 @@ type runtime struct {
 }
 
 func (s *runtime) Reference() sandbox.Reference { return s.ref }
-func (s *runtime) Files() sandbox.FileSystem    { return s }
 func (s *runtime) Exec(ctx context.Context, req sandbox.ExecRequest) (*sandbox.ExecResult, error) {
 	timeout, err := sandbox.ValidateExec(req)
 	if err != nil {
@@ -225,26 +223,6 @@ func (s *runtime) Exec(ctx context.Context, req sandbox.ExecRequest) (*sandbox.E
 		return nil, err
 	}
 	return &sandbox.ExecResult{Stdout: result.Result, ExitCode: result.ExitCode, OutputCombined: true, DurationMilli: time.Since(start).Milliseconds()}, nil
-}
-
-func (s *runtime) Read(ctx context.Context, path string) (io.ReadCloser, error) {
-	r, err := s.api.Do(ctx, "GET", "/files/download?path="+url.QueryEscape(path), nil, "")
-	if err != nil {
-		return nil, err
-	}
-	return r.Body, nil
-}
-
-func (s *runtime) Write(ctx context.Context, path string, content io.Reader) error {
-	r, err := s.api.Do(ctx, "POST", "/files/upload-v2?path="+url.QueryEscape(path), content, "application/octet-stream")
-	if err != nil {
-		return err
-	}
-	return r.Body.Close()
-}
-
-func (s *runtime) Remove(ctx context.Context, path string) error {
-	return s.api.JSON(ctx, "DELETE", "/files?path="+url.QueryEscape(path), nil, nil)
 }
 
 var _ sandbox.Provider = (*Provider)(nil)
