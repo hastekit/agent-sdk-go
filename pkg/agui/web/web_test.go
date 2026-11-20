@@ -238,3 +238,44 @@ func TestAttachmentsOnlyUnderAPIPrefix(t *testing.T) {
 		require.Equal(t, http.StatusNotFound, result.Code)
 	}
 }
+
+// Collection roots answer with or without a trailing slash. Without the bare
+// routes, ServeMux redirected /attachments, /mcp and /a2a to a path missing
+// APIPrefix, and a client following the redirect dropped the upload's POST body.
+func TestCollectionRootsWithoutTrailingSlash(t *testing.T) {
+	store, err := attachments.NewFileStore(t.TempDir(), attachments.FileStoreConfig{})
+	require.NoError(t, err)
+	defer store.Close()
+	h := Handler(registry{"Helper": agents.NewAgent(&agents.AgentOptions{Name: "Helper"})},
+		agui.WithAttachmentStore(store), agui.WithMCPStore(mcpclient.NewMemoryStore()))
+	bodies := map[string][]string{}
+	for _, slash := range []string{"", "/"} {
+		var body bytes.Buffer
+		form := multipart.NewWriter(&body)
+		file, err := form.CreateFormFile("file", "notes.txt")
+		require.NoError(t, err)
+		_, err = io.WriteString(file, "attachment content")
+		require.NoError(t, err)
+		require.NoError(t, form.WriteField("session_id", "thread"))
+		require.NoError(t, form.Close())
+		req := httptest.NewRequest(http.MethodPost, APIPrefix+"/attachments"+slash, &body)
+		req.Header.Set("Content-Type", form.FormDataContentType())
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		require.Equal(t, http.StatusCreated, w.Code, "POST /attachments%s: %s", slash, w.Body.String())
+		var saved attachments.HTTPFile
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &saved))
+		require.Equal(t, "notes.txt", saved.OriginalFilename)
+
+		for _, root := range []string{"/mcp", "/a2a"} {
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, APIPrefix+root+slash, nil))
+			require.Equal(t, http.StatusOK, w.Code, "GET %s%s: %s", root, slash, w.Body.String())
+			bodies[root] = append(bodies[root], w.Body.String())
+		}
+	}
+	for root, got := range bodies {
+		require.Equal(t, got[0], got[1], root)
+	}
+	require.Contains(t, bodies["/a2a"][0], `"Helper"`)
+}

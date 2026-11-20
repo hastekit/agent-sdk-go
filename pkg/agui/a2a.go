@@ -45,7 +45,9 @@ type a2aRoutes struct {
 
 func (o options) mountA2A(mux *http.ServeMux, registry Registry) {
 	routes := &a2aRoutes{registry: registry, options: o, adapters: map[a2aKey]*agents.A2A{}}
-	mux.Handle("GET /a2a/{$}", o.withNamespace(http.HandlerFunc(routes.directory)))
+	directory := o.withNamespace(http.HandlerFunc(routes.directory))
+	mux.Handle("GET /a2a", directory)
+	mux.Handle("GET /a2a/{$}", directory)
 	mux.Handle("GET /a2a/{agent}/.well-known/agent-card.json", o.withNamespace(http.HandlerFunc(routes.card)))
 	mux.Handle("POST /a2a/{agent}", o.withNamespace(http.HandlerFunc(routes.invoke)))
 	mux.Handle("POST /a2a/{agent}/{$}", o.withNamespace(http.HandlerFunc(routes.invoke)))

@@ -91,8 +91,8 @@ type HTTPFile struct {
 	Size             int64  `json:"size"`
 }
 
-// NewHTTPHandler serves POST /attachments/ (multipart fields "file" and "session_id")
-// and GET /attachments/{uuid}, relative to an /api/agui mount. Strip that prefix
+// NewHTTPHandler serves POST /attachments (multipart fields "file" and "session_id";
+// the trailing slash is optional) and GET /attachments/{uuid}, relative to an /api/agui mount. Strip that prefix
 // before passing requests to this handler. Mount behind application authentication. UUID
 // downloads require ReferenceStore and authorize within the supplied namespace.
 // namespaceOf reports the namespace a request may read and write, from whatever
@@ -120,7 +120,7 @@ func NewHTTPHandler(store UploadStore, maxBytes int64, namespaceOf func(*http.Re
 		}
 		http.Error(w, http.StatusText(status), status)
 	}
-	mux.HandleFunc("POST /attachments/{$}", func(w http.ResponseWriter, r *http.Request) {
+	upload := func(w http.ResponseWriter, r *http.Request) {
 		namespace, err := namespaceOf(r)
 		if err != nil {
 			fail(w, err)
@@ -192,7 +192,11 @@ func NewHTTPHandler(store UploadStore, maxBytes int64, namespaceOf func(*http.Re
 		w.Header().Set("Location", URL(ref))
 		w.WriteHeader(http.StatusCreated)
 		_ = json.NewEncoder(w).Encode(HTTPFile{FileID: FileID(ref), URL: URL(ref), Filename: d.StoredFilename, OriginalFilename: d.Filename, MediaType: d.MediaType, Size: d.Size})
-	})
+	}
+	// Register both spellings: without the bare one, ServeMux answers
+	// /attachments with a redirect, and clients following it drop the POST body.
+	mux.HandleFunc("POST /attachments", upload)
+	mux.HandleFunc("POST /attachments/{$}", upload)
 	mux.HandleFunc("GET /attachments/{id}", func(w http.ResponseWriter, r *http.Request) {
 		namespace, err := namespaceOf(r)
 		if err != nil {

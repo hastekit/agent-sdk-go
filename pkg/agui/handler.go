@@ -143,7 +143,7 @@ func buildOptions(opts []Option) options {
 // NewHandler exposes every agent registered on the client over the
 // AG-UI protocol:
 //
-//	GET  /a2a/                                    → A2A agent directory
+//	GET  /a2a                                     → A2A agent directory (trailing slash optional)
 //	GET  /a2a/{agent}/.well-known/agent-card.json  → A2A discovery card
 //	POST /a2a/{agent}                            → A2A 1.0 JSON-RPC (including SSE)
 //	GET  /agents                                  → {"agents": ["name", ...]}
@@ -202,8 +202,10 @@ func NewHandler(registry Registry, opts ...Option) http.Handler {
 	if o.attachmentStore != nil {
 		// Uploads and downloads live under this handler's namespace, the same
 		// one every run it starts stores and reads attachments under.
-		mux.Handle("/attachments/", o.withNamespace(attachments.NewHTTPHandler(o.attachmentStore, o.attachmentMaxBytes,
-			func(r *http.Request) (string, error) { return requestNamespace(r), nil })))
+		h := o.withNamespace(attachments.NewHTTPHandler(o.attachmentStore, o.attachmentMaxBytes,
+			func(r *http.Request) (string, error) { return requestNamespace(r), nil }))
+		mux.Handle("/attachments", h)
+		mux.Handle("/attachments/", h)
 	}
 
 	if o.routineService != nil {

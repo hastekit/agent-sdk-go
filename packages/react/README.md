@@ -354,7 +354,7 @@ are sent when the run has paused.
 ## MCP servers
 
 When the server has an MCP store, the client loads the user's MCP servers from
-`GET /mcp/` on mount. The list is not scoped to an agent. Global servers are the
+`GET /mcp` on mount. The list is not scoped to an agent. Global servers are the
 developer's: always on and read-only. The user's own servers are on unless
 turned off. Use `mcpServers`, `loadingMCPServers`, `mcpServersError`, and
 `refreshMCPServers()` for the list. A server without an MCP store returns an

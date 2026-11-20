@@ -70,7 +70,7 @@ func TestNamespaceResolverErrorsRejectEveryEndpoint(t *testing.T) {
 		{"GET", "/agents"}, {"POST", "/agents/Helper/run"}, {"POST", "/agents/Helper/stop"},
 		{"GET", "/agents/Helper/threads"}, {"GET", "/agents/Helper/threads/t/messages"},
 		{"GET", "/agents/Helper/threads/t/stream"}, {"GET", "/agents/Helper/runs"},
-		{"POST", "/attachments/"}, {"GET", "/attachments/file"},
+		{"POST", "/attachments"}, {"POST", "/attachments/"}, {"GET", "/attachments/file"},
 	} {
 		w := httptest.NewRecorder()
 		before := calls

@@ -77,7 +77,7 @@ export async function uploadAttachment(file: File, sessionId: string): Promise<U
   if (file.size > 20 * 1024 * 1024) throw new Error("Files must be 20 MiB or smaller.");
   const body = new FormData(); body.append("file", file);
   body.append("session_id", sessionId);
-  const response = await fetch(`${API}/attachments/`, { method: "POST", body });
+  const response = await fetch(`${API}/attachments`, { method: "POST", body });
   if (!response.ok) throw new Error(`Upload failed (${response.status}). Please try again.`);
   return response.json();
 }
@@ -224,7 +224,7 @@ export function isGlobalMCPServer(server: MCPServerInfo): boolean {
 }
 
 export async function fetchMCPServers(): Promise<MCPServerInfo[]> {
-  const r = await fetch(`${API}/mcp/`);
+  const r = await fetch(`${API}/mcp`);
   if (r.status === 404) return []; // no MCP store configured
   if (!r.ok) throw new Error(`MCP servers → ${r.status}`);
   return (await r.json()) ?? [];

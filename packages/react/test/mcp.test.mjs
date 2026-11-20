@@ -12,7 +12,7 @@ test("MCP transport lists, saves, removes and builds OAuth URLs", async () => {
     fetch: async (url, init) => {
       requests.push([init.method ?? "GET", url, init.body ?? null]);
       assert.equal(init.headers.get("Authorization"), "Bearer test");
-      if (url.endsWith("/mcp/"))
+      if (url.endsWith("/mcp"))
         return Response.json([
           { name: "docs", readOnly: true, oauth: false },
           {

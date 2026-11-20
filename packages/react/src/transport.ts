@@ -185,7 +185,7 @@ export function createAGUITransport(
       async list(signal) {
         let response: Response;
         try {
-          response = await request(`${base}/mcp/`, { signal });
+          response = await request(`${base}/mcp`, { signal });
         } catch (error) {
           if (error instanceof HTTPError && error.status === 404) return [];
           throw error;
@@ -349,7 +349,7 @@ export function createAGUITransport(
       const body = new FormData();
       body.append("file", file);
       body.append("session_id", sessionId);
-      const r = await request(`${base}/attachments/`, {
+      const r = await request(`${base}/attachments`, {
         method: "POST",
         body,
         signal,

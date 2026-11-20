@@ -64,7 +64,8 @@ test("attachment uploads preserve session IDs without JSON content headers", asy
   const file = new File(["hello"], "hello.txt", { type: "text/plain" });
   const client = createAGUITransport({
     headers: { "Content-Type": "application/json" },
-    fetch: async (_url, init) => {
+    fetch: async (url, init) => {
+      assert.equal(url, "/api/agui/attachments");
       assert.equal(init.headers.has("Content-Type"), false);
       assert.equal(init.body.get("session_id"), "session");
       assert.equal(init.body.get("file").name, "hello.txt");
