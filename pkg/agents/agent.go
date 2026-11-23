@@ -48,9 +48,8 @@ type Agent struct {
 	skillClient          SkillClient
 	clientTools          ClientToolOptions
 
-	// version and fromFactory identify an agent built by an AgentFactory; see Ref.
-	version     string
-	fromFactory bool
+	// spec is the stored spec a factory built this agent from, and nil otherwise.
+	spec *AgentSpec
 
 	// background waits on the tasks this agent's tools start, and is nil where
 	// nothing can wait — see BackgroundRunner and ErrBackgroundUnsupported.
@@ -70,9 +69,7 @@ type AgentOptions struct {
 	Instruction SystemPromptProvider
 	Parameters  responses.Parameters
 
-	Name string
-	// Version pins a factory-built agent's configuration; see AgentFactory.
-	Version  string
+	Name     string
 	LLM      llm.Provider
 	Output   map[string]any
 	Tools    []Tool
@@ -116,6 +113,9 @@ type AgentOptions struct {
 	// Note this is not the same as MaxLoops=1, which still executes the first
 	// round of tools and then fails the run with "exceeded maximum loops".
 	SingleTurn bool
+
+	// Spec is the stored spec an AgentFactory built these options from; durable runtimes run it by spec.
+	Spec *AgentSpec
 }
 
 func NewAgent(opts *AgentOptions) *Agent {
@@ -186,7 +186,7 @@ func NewAgent(opts *AgentOptions) *Agent {
 
 	agent := &Agent{
 		Name:                 opts.Name,
-		version:              opts.Version,
+		spec:                 opts.Spec,
 		output:               opts.Output,
 		history:              conversationHistory,
 		instruction:          instruction,
@@ -335,11 +335,15 @@ func (e *Agent) SingleTurn() bool {
 	return e.singleTurn
 }
 
-// Ref names the agent and the configuration version it was built from.
-func (e *Agent) Ref() AgentRef { return AgentRef{Name: e.Name, Version: e.version} }
+// Spec is the stored spec an AgentFactory built this agent from, or nil for an agent built in code.
+func (e *Agent) Spec() *AgentSpec { return e.spec }
 
-// FactoryBuilt reports whether the agent came from an AgentFactory, so durable runtimes run it by ref.
-func (e *Agent) FactoryBuilt() bool { return e.fromFactory }
+func (e *Agent) specVersion() string {
+	if e.spec == nil {
+		return ""
+	}
+	return e.spec.Version
+}
 
 // StreamBroker returns the broker the agent streams through, for callers
 // that need the run's channel directly — rejoining a stream in flight, or
@@ -1006,7 +1010,7 @@ func (e *Agent) ExecuteWithRun(ctx context.Context, in *AgentInput, run *history
 						ToolCall: &ToolCall{
 							FunctionCallMessage: &toolCall,
 							AgentName:           e.Name,
-							AgentVersion:        e.version,
+							AgentVersion:        e.specVersion(),
 							Namespace:           in.Namespace,
 							SessionID:           in.SessionID,
 							ThreadID:            in.ThreadID,

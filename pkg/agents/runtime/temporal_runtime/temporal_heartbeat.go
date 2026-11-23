@@ -13,7 +13,7 @@ import (
 const heartbeatActivitySuffix = "_StreamHeartbeatActivity"
 
 // startHeartbeatActivity schedules one activity and joins its cancellation before stream closure.
-func startHeartbeatActivity(workflowCtx workflow.Context, prefix string, ref *agents.AgentRef, broker agents.StreamBroker, channel string) func() {
+func startHeartbeatActivity(workflowCtx workflow.Context, prefix string, broker agents.StreamBroker, channel string) func() {
 	// Disabled streaming has no heartbeat activity; every configured broker owns its lifecycle.
 	if broker == nil || channel == "" {
 		return func() {}
@@ -32,7 +32,7 @@ func startHeartbeatActivity(workflowCtx workflow.Context, prefix string, ref *ag
 		WaitForCancellation: true,
 		RetryPolicy:         &temporal.RetryPolicy{InitialInterval: time.Second, MaximumInterval: 5 * time.Second},
 	})
-	future := executeActivity(ctx, ref, prefix+heartbeatActivitySuffix, channel)
+	future := workflow.ExecuteActivity(ctx, prefix+heartbeatActivitySuffix, channel)
 
 	// A disconnected context lets cleanup finish even when the workflow itself was cancelled.
 	stopped := false

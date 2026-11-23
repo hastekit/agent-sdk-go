@@ -26,42 +26,36 @@ func factoryUserInput(text string) *agents.AgentInput {
 }
 
 // whoamiFactory serves who@1, whose tool echoes the amg_id gateway value.
-func whoamiFactory() (*testutil.MapFactory, agents.AgentRef) {
-	persistence := history.NewInMemoryConversationPersistence()
-	store := testutil.NewMapFactory()
-	ref := agents.AgentRef{Name: "who", Version: "1"}
-	store.Put(ref, func() *agents.AgentOptions {
-		return (&AgentConfig{
-			Name: "who", LLM: testutil.EchoProvider{}, Instruction: NewPrompt("call:whoami"),
-			Tools:   []Tool{testutil.NewGatewayContextTool("whoami", "amg_id")},
-			History: history.NewConversationManager(persistence),
-		}).Options()
-	})
-	return store, ref
+func whoamiFactory() (*AgentFactory, AgentRef) {
+	store := testutil.NewSpecStore()
+	store.Put(testutil.Spec("who", "1", "call:whoami", "whoami"))
+	factory := store.Factory(history.NewConversationManager(history.NewInMemoryConversationPersistence()),
+		testutil.NewGatewayContextTool("whoami", "amg_id"))
+	return factory, AgentRef{Name: "who", Version: "1"}
 }
 
 func TestTemporalRuntime_RegistersOneFactoryBeforeServing(t *testing.T) {
 	broker := streambroker.NewMemoryStreamBroker()
 	rt := &TemporalRuntime{TemporalRuntime: temporal_runtime.NewTemporalRuntime(nil, broker), broker: broker}
-	store, ref := whoamiFactory()
+	factory, ref := whoamiFactory()
 
 	_, err := rt.BuildAgent(t.Context(), ref)
 	require.Error(t, err, "no factory yet")
 	require.Error(t, rt.RegisterAgentFactory(nil))
-	require.NoError(t, rt.RegisterAgentFactory(store))
-	require.Error(t, rt.RegisterAgentFactory(store), "one factory per runtime")
+	require.Error(t, rt.RegisterAgentFactory(&AgentFactory{Load: factory.Load, Models: factory.Models}), "Temporal needs history")
+	require.NoError(t, rt.RegisterAgentFactory(factory))
+	require.Error(t, rt.RegisterAgentFactory(factory), "one factory per runtime")
 
 	agent, err := rt.BuildAgent(t.Context(), ref)
 	require.NoError(t, err)
-	assert.True(t, agent.FactoryBuilt())
-	assert.Equal(t, ref, agent.Ref())
+	assert.Equal(t, ref, agent.Spec().Ref())
 	assert.Same(t, broker, agent.StreamBroker())
 
 	// A factory alone is enough to serve.
 	_, _, finish, err := rt.lifecycle.begin(t.Context())
 	require.NoError(t, err)
 	assert.NotNil(t, rt.lifecycle.servingFactory())
-	require.Error(t, rt.RegisterAgentFactory(store), "registration closes once serving starts")
+	require.Error(t, rt.RegisterAgentFactory(factory), "registration closes once serving starts")
 	finish()
 }
 
@@ -76,8 +70,8 @@ func TestTemporalRuntime_ServesFactoryAgentsAlongsideStaticOnes(t *testing.T) {
 
 	static, err := NewAgent(&AgentConfig{Name: "static", LLM: testutil.EchoProvider{}, Instruction: NewPrompt("static agent")}, WithRuntime(rt))
 	require.NoError(t, err)
-	store, ref := whoamiFactory()
-	require.NoError(t, rt.RegisterAgentFactory(store))
+	factory, ref := whoamiFactory()
+	require.NoError(t, rt.RegisterAgentFactory(factory))
 
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
 	defer cancel()

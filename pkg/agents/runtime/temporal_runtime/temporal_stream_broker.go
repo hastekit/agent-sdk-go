@@ -81,7 +81,6 @@ func (s *TemporalStreamBroker) WaitToolResult(ctx context.Context, channel, call
 type TemporalStreamBrokerProxy struct {
 	workflowCtx   workflow.Context
 	prefix        string
-	ref           *agents.AgentRef
 	wrappedBroker agents.StreamBroker
 }
 
@@ -127,7 +126,7 @@ func (p *TemporalStreamBrokerProxy) IsActive(ctx context.Context, channel string
 
 func (p *TemporalStreamBrokerProxy) IsStopped(ctx context.Context, channel string) (bool, error) {
 	var stopped bool
-	err := executeActivity(p.workflowCtx, p.ref, p.prefix+"_IsStoppedActivity", channel).Get(p.workflowCtx, &stopped)
+	err := workflow.ExecuteActivity(p.workflowCtx, p.prefix+"_IsStoppedActivity", channel).Get(p.workflowCtx, &stopped)
 	if err != nil {
 		return false, err
 	}
@@ -173,13 +172,13 @@ func (p *TemporalStreamBrokerProxy) WaitToolResult(_ context.Context, channel, c
 	options.StartToCloseTimeout = timeout + 2*time.Minute
 	options.HeartbeatTimeout = 3 * toolResultHeartbeat
 	var wait toolResultWait
-	err := executeActivity(workflow.WithActivityOptions(p.workflowCtx, options), p.ref, p.prefix+"_WaitToolResultActivity", channel, callID, timeout).Get(p.workflowCtx, &wait)
+	err := workflow.ExecuteActivity(workflow.WithActivityOptions(p.workflowCtx, options), p.prefix+"_WaitToolResultActivity", channel, callID, timeout).Get(p.workflowCtx, &wait)
 	return wait.Result, wait.Found, err
 }
 
 func (p *TemporalStreamBrokerProxy) DrainMessages(ctx context.Context, channel string) ([]messages.Message, error) {
 	var msgs []messages.Message
-	err := executeActivity(p.workflowCtx, p.ref, p.prefix+"_DrainMessagesActivity", channel).Get(p.workflowCtx, &msgs)
+	err := workflow.ExecuteActivity(p.workflowCtx, p.prefix+"_DrainMessagesActivity", channel).Get(p.workflowCtx, &msgs)
 	if err != nil {
 		return nil, err
 	}
@@ -188,5 +187,5 @@ func (p *TemporalStreamBrokerProxy) DrainMessages(ctx context.Context, channel s
 
 // StartHeartbeat owns a dedicated Temporal activity for the execution's stream.
 func (p *TemporalStreamBrokerProxy) StartHeartbeat(_ context.Context, channel string) func() {
-	return startHeartbeatActivity(p.workflowCtx, p.prefix, p.ref, p.wrappedBroker, channel)
+	return startHeartbeatActivity(p.workflowCtx, p.prefix, p.wrappedBroker, channel)
 }

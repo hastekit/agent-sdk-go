@@ -3,6 +3,8 @@ package temporal_runtime_test
 import (
 	"context"
 	"encoding/json"
+	"slices"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -11,7 +13,6 @@ import (
 	"github.com/hastekit/agent-sdk-go/pkg/agents/history"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/history/summariser"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/messages"
-	"github.com/hastekit/agent-sdk-go/pkg/agents/prompts"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/runtime/temporal_runtime"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/streambroker"
 	"github.com/hastekit/agent-sdk-go/pkg/gateway"
@@ -26,42 +27,41 @@ import (
 	"go.temporal.io/sdk/workflow"
 )
 
-var sharedPersistence = history.NewInMemoryConversationPersistence()
-
-func factoryConfig(name, prompt string, tools []agents.Tool, handoffs ...*agents.Handoff) func() *agents.AgentOptions {
-	return func() *agents.AgentOptions {
-		return &agents.AgentOptions{
-			Name:        name,
-			LLM:         testutil.EchoProvider{},
-			Instruction: prompts.New(prompt),
-			History:     history.NewConversationManager(sharedPersistence),
-			Tools:       tools,
-			Handoffs:    handoffs,
-		}
-	}
-}
-
 func factoryInput(text string) *agents.AgentInput {
 	return &agents.AgentInput{Namespace: "ns", ThreadID: "thread-" + text, Message: messages.New("user", []responses.InputMessageUnion{{
 		OfEasyInput: &responses.EasyMessage{Role: constants.RoleUser, Content: responses.EasyInputContentUnion{OfString: utils.Ptr(text)}},
 	}})}
 }
 
-// newFactoryEnv registers one factory worker's workflows and activities, as Serve does.
-func newFactoryEnv(suite *testsuite.WorkflowTestSuite, worker *temporal_runtime.FactoryAgentWorkflow) *testsuite.TestWorkflowEnvironment {
+func newHistory() *history.CommonConversationManager {
+	return history.NewConversationManager(history.NewInMemoryConversationPersistence())
+}
+
+func newFactoryWorker(t *testing.T, factory *agents.AgentFactory) *temporal_runtime.FactoryAgentWorkflow {
+	t.Helper()
+	worker, err := temporal_runtime.NewFactoryAgentWorkflow(factory, streambroker.NewMemoryStreamBroker())
+	require.NoError(t, err)
+	return worker
+}
+
+// newFactoryEnv registers one factory worker's workflows and activities, as Serve does,
+// leaving out the workflow named stub so a test can register its own.
+func newFactoryEnv(suite *testsuite.WorkflowTestSuite, worker *temporal_runtime.FactoryAgentWorkflow, stub ...string) *testsuite.TestWorkflowEnvironment {
 	env := suite.NewTestWorkflowEnvironment()
 	for name, fn := range worker.GetActivities() {
 		env.RegisterActivityWithOptions(fn, activity.RegisterOptions{Name: name})
 	}
 	for name, fn := range worker.GetWorkflows() {
-		env.RegisterWorkflowWithOptions(fn, workflow.RegisterOptions{Name: name})
+		if !slices.Contains(stub, name) {
+			env.RegisterWorkflowWithOptions(fn, workflow.RegisterOptions{Name: name})
+		}
 	}
 	return env
 }
 
-func runFactory(t *testing.T, env *testsuite.TestWorkflowEnvironment, ref agents.AgentRef, in *agents.AgentInput) *agents.AgentOutput {
+func runSpec(t *testing.T, env *testsuite.TestWorkflowEnvironment, spec agents.AgentSpec, in *agents.AgentInput) *agents.AgentOutput {
 	t.Helper()
-	env.ExecuteWorkflow(temporal_runtime.FactoryAgentWorkflowName, ref, in)
+	env.ExecuteWorkflow(temporal_runtime.FactoryAgentWorkflowName, &spec, in)
 	require.True(t, env.IsWorkflowCompleted())
 	require.NoError(t, env.GetWorkflowError())
 	var out agents.AgentOutput
@@ -69,49 +69,62 @@ func runFactory(t *testing.T, env *testsuite.TestWorkflowEnvironment, ref agents
 	return &out
 }
 
-// One worker, registered before any agent exists: an agent added later runs, a new
-// version applies from the next run, and an old ref still builds its own version.
-func TestFactoryWorkflow_ServesAgentsAddedAfterTheWorkerStarted(t *testing.T) {
-	var suite testsuite.WorkflowTestSuite
-	store := testutil.NewMapFactory()
-	worker := temporal_runtime.NewFactoryAgentWorkflow(store, streambroker.NewMemoryStreamBroker())
-
-	v1 := agents.AgentRef{Name: "an3", Version: "1"}
-	store.Put(v1, factoryConfig("an3", "v1 call:lookup", []agents.Tool{testutil.NewTextTool("lookup", "found-v1")}))
-	out := runFactory(t, newFactoryEnv(&suite, worker), v1, factoryInput("first"))
-	assert.Equal(t, "v1 call:lookup | found-v1", out.Text())
-
-	v2 := agents.AgentRef{Name: "an3", Version: "2"}
-	store.Put(v2, factoryConfig("an3", "v2 call:search", []agents.Tool{testutil.NewTextTool("search", "found-v2")}))
-	out = runFactory(t, newFactoryEnv(&suite, worker), v2, factoryInput("second"))
-	assert.Equal(t, "v2 call:search | found-v2", out.Text())
-
-	out = runFactory(t, newFactoryEnv(&suite, worker), v1, factoryInput("third"))
-	assert.Equal(t, "v1 call:lookup | found-v1", out.Text(), "a ref keeps building its own version")
-}
-
-func TestFactoryWorkflow_HandsOffBetweenFactoryAgents(t *testing.T) {
-	var suite testsuite.WorkflowTestSuite
-	store := testutil.NewMapFactory()
-	root := agents.AgentRef{Name: "an3", Version: "4"}
-	store.Put(root, factoryConfig("an3", "root handoff:billing", nil, &agents.Handoff{Name: "billing", Description: "bills", Version: "9"}))
-	// The specialist can hand back, so the graph is a cycle.
-	store.Put(agents.AgentRef{Name: "billing", Version: "9"}, factoryConfig("billing", "billing@9 call:invoice",
-		[]agents.Tool{testutil.NewTextTool("invoice", "invoice-77")}, &agents.Handoff{Name: "an3", Description: "back", Version: "4"}))
-
-	worker := temporal_runtime.NewFactoryAgentWorkflow(store, streambroker.NewMemoryStreamBroker())
-	out := runFactory(t, newFactoryEnv(&suite, worker), root, factoryInput("bill me"))
-	assert.Equal(t, "billing@9 call:invoice | invoice-77", out.Text(), "the specialist's own tool runs through the shared tool activity")
-}
-
-func TestFactoryWorkflow_FailsFastForAnUnknownRef(t *testing.T) {
-	var suite testsuite.WorkflowTestSuite
-	worker := temporal_runtime.NewFactoryAgentWorkflow(testutil.NewMapFactory(), streambroker.NewMemoryStreamBroker())
-	env := newFactoryEnv(&suite, worker)
-	env.ExecuteWorkflow(temporal_runtime.FactoryAgentWorkflowName, agents.AgentRef{Name: "ghost", Version: "1"}, factoryInput("x"))
+func runSpecError(t *testing.T, env *testsuite.TestWorkflowEnvironment, spec agents.AgentSpec) error {
+	t.Helper()
+	env.ExecuteWorkflow(temporal_runtime.FactoryAgentWorkflowName, &spec, factoryInput("x"))
 	require.True(t, env.IsWorkflowCompleted())
 	require.Error(t, env.GetWorkflowError())
-	assert.Contains(t, env.GetWorkflowError().Error(), "agent not found")
+	return env.GetWorkflowError()
+}
+
+// One worker, started before any spec exists, runs whatever spec a run starts with,
+// and never asks the store for it: the spec is the workflow's input.
+func TestFactoryWorkflow_RunsTheSpecItStartsWith(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	store := testutil.NewSpecStore()
+	worker := newFactoryWorker(t, store.Factory(newHistory(), testutil.NewTextTool("lookup", "found"), testutil.NewTextTool("search", "searched")))
+
+	out := runSpec(t, newFactoryEnv(&suite, worker), testutil.Spec("an3", "1", "v1 call:lookup", "lookup"), factoryInput("first"))
+	assert.Equal(t, "v1 call:lookup | found", out.Text())
+
+	out = runSpec(t, newFactoryEnv(&suite, worker), testutil.Spec("an3", "2", "v2 call:search", "search"), factoryInput("second"))
+	assert.Equal(t, "v2 call:search | searched", out.Text())
+	assert.Zero(t, store.Loads(agents.AgentRef{Name: "an3", Version: "1"}))
+}
+
+// A handoff loads its target in an activity when the model hands off, so a cycle is fine.
+func TestFactoryWorkflow_LoadsHandoffTargetsWhenUsed(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	store := testutil.NewSpecStore()
+	billing := testutil.Spec("billing", "9", "billing@9 call:invoice", "invoice")
+	billing.Handoffs = []agents.HandoffSpec{{Name: "an3", Version: "4", Description: "back"}}
+	store.Put(billing)
+	root := testutil.Spec("an3", "4", "root handoff:billing")
+	root.Handoffs = []agents.HandoffSpec{{Name: "billing", Version: "9", Description: "bills"}}
+	store.Put(root)
+
+	worker := newFactoryWorker(t, store.Factory(newHistory(), testutil.NewTextTool("invoice", "invoice-77")))
+	out := runSpec(t, newFactoryEnv(&suite, worker), root, factoryInput("bill me"))
+	assert.True(t, strings.HasPrefix(out.Text(), "billing@9 call:invoice"), "the specialist answers")
+	assert.True(t, strings.HasSuffix(out.Text(), "| invoice-77"), "its tool runs through the shared tool activity")
+	assert.Equal(t, 1, store.Loads(billing.Ref()))
+	assert.Zero(t, store.Loads(root.Ref()), "the root came with the run")
+}
+
+// Specs the worker cannot serve fail the run instead of retrying.
+func TestFactoryWorkflow_FailsFastForSpecsItCannotRun(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	worker := newFactoryWorker(t, testutil.NewSpecStore().Factory(newHistory()))
+
+	orphan := testutil.Spec("an3", "1", "handoff:ghost")
+	orphan.Handoffs = []agents.HandoffSpec{{Name: "ghost", Version: "1"}}
+	assert.ErrorContains(t, runSpecError(t, newFactoryEnv(&suite, worker), orphan), "agent not found")
+
+	assert.ErrorContains(t, runSpecError(t, newFactoryEnv(&suite, worker), testutil.Spec("an3", "1", "x", "deleted_tool")), "unknown tool")
+
+	unknownModel := testutil.Spec("an3", "1", "x")
+	unknownModel.Model = "Nobody/none"
+	assert.ErrorContains(t, runSpecError(t, newFactoryEnv(&suite, worker), unknownModel), "unknown model")
 }
 
 // headerWriter collects what a propagator writes, to hand the test environment as a header.
@@ -124,18 +137,15 @@ func TestFactoryWorkflow_CarriesGatewayContextToActivities(t *testing.T) {
 	var suite testsuite.WorkflowTestSuite
 	propagator := temporal_runtime.NewProviderConfigKeyPropagator()
 	suite.SetContextPropagators([]workflow.ContextPropagator{propagator})
-
-	store := testutil.NewMapFactory()
-	ref := agents.AgentRef{Name: "an3", Version: "1"}
-	store.Put(ref, factoryConfig("an3", "call:whoami", []agents.Tool{testutil.NewGatewayContextTool("whoami", "amg_id")}))
-	env := newFactoryEnv(&suite, temporal_runtime.NewFactoryAgentWorkflow(store, streambroker.NewMemoryStreamBroker()))
+	worker := newFactoryWorker(t, testutil.NewSpecStore().Factory(newHistory(), testutil.NewGatewayContextTool("whoami", "amg_id")))
+	env := newFactoryEnv(&suite, worker)
 
 	header := headerWriter{}
 	callerCtx := gateway.AddContext(context.Background(), map[string]string{"amg_id": "amg-42"})
 	require.NoError(t, propagator.Inject(callerCtx, header))
 	env.SetHeader(&commonpb.Header{Fields: header})
 
-	out := runFactory(t, env, ref, factoryInput("who"))
+	out := runSpec(t, env, testutil.Spec("an3", "1", "call:whoami", "whoami"), factoryInput("who"))
 	assert.Equal(t, "call:whoami | amg_id=amg-42", out.Text())
 }
 
@@ -169,42 +179,42 @@ func TestPropagator_RoundTripsKeyAndGatewayContext(t *testing.T) {
 	assert.Empty(t, empty, "nothing is written when there is nothing to carry")
 }
 
-// The task's wait runs on the tool agent's ref; a woken run enters at the owner's pinned ref.
-func TestFactoryBackgroundWorkflow_WaitsOnTheToolAgentAndWakesTheOwner(t *testing.T) {
+// A factory agent's background task waits in the shared background workflow,
+// and the run its result wakes starts from the spec the task began under.
+func TestFactoryBackgroundTask_WakesTheAgentWithItsSpec(t *testing.T) {
 	var suite testsuite.WorkflowTestSuite
-	store := testutil.NewMapFactory()
-	owner := agents.AgentRef{Name: "an3", Version: "1"}
-	indexer := agents.AgentRef{Name: "indexer", Version: "2"}
-	store.Put(owner, factoryConfig("an3", "owner", nil))
-	store.Put(indexer, factoryConfig("indexer", "indexer", []agents.Tool{testutil.NewBackgroundTool("index", "task-1", "started", "indexed 9 docs")}))
-	worker := temporal_runtime.NewFactoryAgentWorkflow(store, streambroker.NewMemoryStreamBroker())
+	worker := newFactoryWorker(t, testutil.NewSpecStore().Factory(newHistory(), testutil.NewBackgroundTool("index", "task-1", "started", "indexed 9 docs")))
+	spec := testutil.Spec("indexer", "2", "call:index", "index")
 
-	env := suite.NewTestWorkflowEnvironment()
-	for name, fn := range worker.GetActivities() {
-		env.RegisterActivityWithOptions(fn, activity.RegisterOptions{Name: name})
-	}
-	env.RegisterWorkflowWithOptions(worker.ExecuteBackgroundTask, workflow.RegisterOptions{Name: temporal_runtime.FactoryBackgroundTaskWorkflowName})
-	var ranRef agents.AgentRef
-	var ranWith *agents.AgentInput
-	env.RegisterWorkflowWithOptions(func(_ workflow.Context, ref agents.AgentRef, in *agents.AgentInput) (*agents.AgentOutput, error) {
-		ranRef, ranWith = ref, in
+	// The run starts the task's workflow with its spec.
+	env := newFactoryEnv(&suite, worker, temporal_runtime.FactoryBackgroundTaskWorkflowName)
+	var started *temporal_runtime.BackgroundTaskInput
+	env.RegisterWorkflowWithOptions(func(_ workflow.Context, in *temporal_runtime.BackgroundTaskInput) error {
+		started = in
+		return nil
+	}, workflow.RegisterOptions{Name: temporal_runtime.FactoryBackgroundTaskWorkflowName})
+	in := factoryInput("index")
+	in.StreamID = "thread-stream"
+	runSpec(t, env, spec, in)
+	require.NotNil(t, started)
+	assert.Equal(t, &spec, started.Spec)
+
+	// The task's workflow awaits the real tool, then wakes the agent from that spec.
+	env = newFactoryEnv(&suite, worker, temporal_runtime.FactoryAgentWorkflowName)
+	var wokeSpec *agents.AgentSpec
+	var wokeWith *agents.AgentInput
+	env.RegisterWorkflowWithOptions(func(_ workflow.Context, spec *agents.AgentSpec, in *agents.AgentInput) (*agents.AgentOutput, error) {
+		wokeSpec, wokeWith = spec, in
 		return &agents.AgentOutput{}, nil
 	}, workflow.RegisterOptions{Name: temporal_runtime.FactoryAgentWorkflowName})
-
-	env.ExecuteWorkflow(temporal_runtime.FactoryBackgroundTaskWorkflowName, &temporal_runtime.FactoryBackgroundTaskInput{
-		Owner: owner, ToolAgent: indexer, ToolKey: "index",
-		Ref: agents.BackgroundTaskRef{TaskID: "task-1", CallID: "call_index", ToolName: "index", AgentName: "an3",
-			Namespace: "ns", ThreadID: "thread-1", TaskStreamID: "task-stream", ThreadStreamID: "thread-stream"},
-	})
+	env.ExecuteWorkflow(temporal_runtime.FactoryBackgroundTaskWorkflowName, started)
 	require.True(t, env.IsWorkflowCompleted())
 	require.NoError(t, env.GetWorkflowError())
-	assert.Equal(t, owner, ranRef, "the run the result starts is pinned to the owner's version")
-	require.NotNil(t, ranWith)
-	assert.Equal(t, "thread-stream", ranWith.StreamID)
-	data, err := json.Marshal(ranWith.Message)
+	assert.Equal(t, &spec, wokeSpec)
+	require.NotNil(t, wokeWith)
+	data, err := json.Marshal(wokeWith.Message)
 	require.NoError(t, err)
-	assert.Contains(t, string(data), "indexed 9 docs", "the tool agent's real tool was awaited")
-	assert.NotZero(t, store.Builds(indexer))
+	assert.Contains(t, string(data), "indexed 9 docs")
 }
 
 type countingSummarizer struct {
@@ -224,19 +234,15 @@ func (f *countingFilter) Filter(_ context.Context, msgs []messages.Message, _ st
 	return msgs
 }
 
-// The summarizer and filter live on the worker; the decision comes back through a local activity.
-func TestFactoryWorkflow_RunsTheWorkersSummarizerAndFilter(t *testing.T) {
+// The worker's history settings apply to every factory agent.
+func TestFactoryWorkflow_UsesTheWorkersSummarizerAndFilter(t *testing.T) {
 	var suite testsuite.WorkflowTestSuite
 	summarizer := &countingSummarizer{HistorySummarizer: summariser.NewSlidingWindowHistorySummarizer(&summariser.SlidingWindowHistorySummarizerOptions{KeepCount: 2})}
 	filter := &countingFilter{}
-	store := testutil.NewMapFactory()
-	ref := agents.AgentRef{Name: "an3", Version: "1"}
-	store.Put(ref, func() *agents.AgentOptions {
-		o := factoryConfig("an3", "call:lookup", []agents.Tool{testutil.NewTextTool("lookup", "found")})()
-		o.History = history.NewConversationManager(sharedPersistence, history.WithSummarizer(summarizer), history.WithMessageFilter(filter))
-		return o
-	})
-	out := runFactory(t, newFactoryEnv(&suite, temporal_runtime.NewFactoryAgentWorkflow(store, streambroker.NewMemoryStreamBroker())), ref, factoryInput("summarize"))
+	h := history.NewConversationManager(history.NewInMemoryConversationPersistence(), history.WithSummarizer(summarizer), history.WithMessageFilter(filter))
+	worker := newFactoryWorker(t, testutil.NewSpecStore().Factory(h, testutil.NewTextTool("lookup", "found")))
+
+	out := runSpec(t, newFactoryEnv(&suite, worker), testutil.Spec("an3", "1", "call:lookup", "lookup"), factoryInput("summarize"))
 	assert.Equal(t, "call:lookup | found", out.Text())
 	assert.NotZero(t, summarizer.decisions.Load())
 	assert.NotZero(t, filter.calls.Load())

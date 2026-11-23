@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
+	"github.com/hastekit/agent-sdk-go/pkg/agents/agentfactory"
 )
 
 // LocalRuntime executes the agent in a goroutine. The agent itself
@@ -21,7 +22,7 @@ type LocalRuntime struct {
 	broker agents.StreamBroker
 
 	mu      sync.RWMutex
-	factory agents.AgentFactory
+	factory *agents.AgentFactory
 }
 
 var _ agents.FactoryRuntime = (*LocalRuntime)(nil)
@@ -62,21 +63,21 @@ func (r *LocalRuntime) StreamBroker() agents.StreamBroker { return r.broker }
 // RegisterAgent is a no-op because local execution needs no worker registration.
 func (r *LocalRuntime) RegisterAgent(options *agents.AgentOptions) error { return nil }
 
-// RegisterAgentFactory installs the factory BuildAgent uses; builds are cached by ref.
-func (r *LocalRuntime) RegisterAgentFactory(factory agents.AgentFactory) error {
-	if factory == nil {
-		return errors.New("agent factory is nil")
+// RegisterAgentFactory installs the factory BuildAgent loads and builds agents with.
+func (r *LocalRuntime) RegisterAgentFactory(factory *agents.AgentFactory) error {
+	if err := factory.Validate(); err != nil {
+		return err
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.factory != nil {
 		return errors.New("an agent factory is already registered")
 	}
-	r.factory = agents.NewCachedAgentFactory(factory, 0)
+	r.factory = factory
 	return nil
 }
 
-// BuildAgent builds ref and its handoff targets, bound to this runtime and its broker.
+// BuildAgent loads ref and builds it, bound to this runtime and its broker.
 func (r *LocalRuntime) BuildAgent(ctx context.Context, ref agents.AgentRef) (*agents.Agent, error) {
 	r.mu.RLock()
 	factory := r.factory
@@ -84,7 +85,7 @@ func (r *LocalRuntime) BuildAgent(ctx context.Context, ref agents.AgentRef) (*ag
 	if factory == nil {
 		return nil, errors.New("no agent factory registered")
 	}
-	return agents.NewFactoryAgent(ctx, factory, ref, func(options *agents.AgentOptions) {
+	return agentfactory.Build(ctx, factory, ref, func(options *agents.AgentOptions) {
 		options.Runtime = r
 		options.StreamBroker = r.broker
 	})

@@ -33,9 +33,9 @@ func (r *TemporalRuntime) Run(ctx context.Context, agent *agents.Agent, in *agen
 	options := client.StartWorkflowOptions{TaskQueue: "AgentWorkflowTaskQueue", ID: in.StreamID}
 	var run client.WorkflowRun
 	var err error
-	if agent.FactoryBuilt() {
-		// Factory agents share one workflow type and pin the ref they start with.
-		run, err = r.client.ExecuteWorkflow(ctx, options, FactoryAgentWorkflowName, agent.Ref(), in)
+	if spec := agent.Spec(); spec != nil {
+		// Factory agents share one workflow type and carry their spec, so the run keeps it.
+		run, err = r.client.ExecuteWorkflow(ctx, options, FactoryAgentWorkflowName, spec, in)
 	} else {
 		run, err = r.client.ExecuteWorkflow(ctx, options, agent.Name+"_AgentWorkflow", in)
 	}

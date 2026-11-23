@@ -29,6 +29,8 @@ type BackgroundTaskInput struct {
 	AgentName string                   `json:"agent_name"`
 	ToolName  string                   `json:"tool_name"`
 	Ref       agents.BackgroundTaskRef `json:"ref"`
+	// Spec is set for a factory agent, which is re-run from the spec it started with.
+	Spec *agents.AgentSpec `json:"spec,omitempty"`
 }
 
 // backgroundWorkflowID keeps a task's workflow to one execution. Two runs that
@@ -49,6 +51,7 @@ func backgroundWorkflowID(agentName string, ref agents.BackgroundTaskRef) string
 type TemporalBackgroundRunner struct {
 	workflowCtx workflow.Context
 	agentName   string
+	spec        *agents.AgentSpec
 }
 
 var _ agents.BackgroundRunner = (*TemporalBackgroundRunner)(nil)
@@ -65,7 +68,7 @@ func (r *TemporalBackgroundRunner) StartTask(_ context.Context, tool agents.Back
 	toolName := namer.BackgroundActivityName()
 
 	ctx := workflow.WithChildOptions(r.workflowCtx, workflow.ChildWorkflowOptions{
-		WorkflowID: backgroundWorkflowID(r.agentName, ref),
+		WorkflowID: backgroundWorkflowID(r.owner(), ref),
 		// The run that started the task is about to finish and must not take
 		// the wait down with it.
 		ParentClosePolicy: enums.PARENT_CLOSE_POLICY_ABANDON,
@@ -77,12 +80,21 @@ func (r *TemporalBackgroundRunner) StartTask(_ context.Context, tool agents.Back
 		AgentName: r.agentName,
 		ToolName:  toolName,
 		Ref:       ref,
+		Spec:      r.spec,
 	})
 
 	// Wait for the child to have started, not to have finished. A parent that
 	// completes before Temporal has recorded the child simply never starts it,
 	// which is exactly the silent loss this whole path exists to avoid.
 	return child.GetChildWorkflowExecution().Get(ctx, nil)
+}
+
+// owner scopes task workflow ids: the agent's name, which for factory agents is the spec's.
+func (r *TemporalBackgroundRunner) owner() string {
+	if r.spec != nil {
+		return r.spec.Name
+	}
+	return r.agentName
 }
 
 // BackgroundTaskWorkflow waits for one task and delivers its outcome.
@@ -99,29 +111,8 @@ func NewBackgroundTaskWorkflow(agentName string, broker agents.StreamBroker) *Ba
 }
 
 func (w *BackgroundTaskWorkflow) Execute(ctx workflow.Context, in *BackgroundTaskInput) error {
-	return runBackgroundTask(ctx, w.broker, backgroundTaskSteps{
-		prefix: w.agentName,
-		await: func(ctx workflow.Context) workflow.Future {
-			return workflow.ExecuteActivity(ctx, in.ToolName+awaitTaskActivitySuffix, in.Ref)
-		},
-		run: func(ctx workflow.Context, input *agents.AgentInput) workflow.ChildWorkflowFuture {
-			return workflow.ExecuteChildWorkflow(ctx, in.AgentName+"_AgentWorkflow", input)
-		},
-	}, in.Ref)
-}
-
-// backgroundTaskSteps is what differs between registered and factory background workflows.
-type backgroundTaskSteps struct {
-	prefix string
-	ref    *agents.AgentRef
-	await  func(ctx workflow.Context) workflow.Future
-	run    func(ctx workflow.Context, in *agents.AgentInput) workflow.ChildWorkflowFuture
-}
-
-func runBackgroundTask(ctx workflow.Context, broker agents.StreamBroker, steps backgroundTaskSteps, ref agents.BackgroundTaskRef) error {
 	// A background task owns retention for its separate stream until its wait finishes.
-	heartbeat := &TemporalStreamBrokerProxy{workflowCtx: ctx, prefix: steps.prefix, ref: steps.ref, wrappedBroker: broker}
-	stopHeartbeat := heartbeat.StartHeartbeat(context.Background(), ref.TaskStreamID)
+	stopHeartbeat := NewTemporalStreamBrokerProxy(ctx, w.agentName, w.broker).StartHeartbeat(context.Background(), in.Ref.TaskStreamID)
 	defer stopHeartbeat()
 
 	awaitCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
@@ -129,7 +120,8 @@ func runBackgroundTask(ctx workflow.Context, broker agents.StreamBroker, steps b
 	})
 
 	var result agents.BackgroundResult
-	awaitErr := steps.await(awaitCtx).Get(awaitCtx, &result)
+	awaitErr := workflow.ExecuteActivity(awaitCtx,
+		in.ToolName+awaitTaskActivitySuffix, in.Ref).Get(awaitCtx, &result)
 
 	shortCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
 		StartToCloseTimeout: 30 * time.Second,
@@ -140,7 +132,8 @@ func runBackgroundTask(ctx workflow.Context, broker agents.StreamBroker, steps b
 
 	// Close first: a client watching the task sees it end when it ends, not
 	// when the agent has finished reacting to it.
-	if err := executeActivity(shortCtx, steps.ref, steps.prefix+closeTaskStreamActivityName, ref).Get(shortCtx, nil); err != nil {
+	if err := workflow.ExecuteActivity(shortCtx,
+		w.agentName+closeTaskStreamActivityName, in.Ref).Get(shortCtx, nil); err != nil {
 		return err
 	}
 
@@ -152,8 +145,8 @@ func runBackgroundTask(ctx workflow.Context, broker agents.StreamBroker, steps b
 	}
 
 	var decision DeliverTaskOutput
-	if err := executeActivity(shortCtx, steps.ref, steps.prefix+deliverTaskActivityName, &DeliverTaskInput{
-		Ref:       ref,
+	if err := workflow.ExecuteActivity(shortCtx, w.agentName+deliverTaskActivityName, &DeliverTaskInput{
+		Ref:       in.Ref,
 		Result:    result,
 		AwaitFail: awaitMessage,
 	}).Get(shortCtx, &decision); err != nil {
@@ -170,20 +163,26 @@ func runBackgroundTask(ctx workflow.Context, broker agents.StreamBroker, steps b
 	// agent so it can react — as a child, so the wait is not holding a worker
 	// slot while the model works.
 	runCtx := workflow.WithChildOptions(ctx, workflow.ChildWorkflowOptions{
-		WorkflowID:        ref.ThreadStreamID,
+		WorkflowID:        in.Ref.ThreadStreamID,
 		ParentClosePolicy: enums.PARENT_CLOSE_POLICY_ABANDON,
 	})
-	run := steps.run(runCtx, &agents.AgentInput{
-		Namespace:   ref.Namespace,
-		ThreadID:    ref.ThreadID,
-		SessionID:   ref.SessionID,
-		StreamID:    ref.ThreadStreamID,
-		RunContext:  ref.RunContext,
-		Skills:      ref.Skills,
-		MCP:         ref.MCP,
-		ClientTools: ref.ClientTools,
+	input := &agents.AgentInput{
+		Namespace:   in.Ref.Namespace,
+		ThreadID:    in.Ref.ThreadID,
+		SessionID:   in.Ref.SessionID,
+		StreamID:    in.Ref.ThreadStreamID,
+		RunContext:  in.Ref.RunContext,
+		Skills:      in.Ref.Skills,
+		MCP:         in.Ref.MCP,
+		ClientTools: in.Ref.ClientTools,
 		Message:     decision.Message,
-	})
+	}
+	var run workflow.ChildWorkflowFuture
+	if in.Spec != nil {
+		run = workflow.ExecuteChildWorkflow(runCtx, FactoryAgentWorkflowName, in.Spec, input)
+	} else {
+		run = workflow.ExecuteChildWorkflow(runCtx, in.AgentName+"_AgentWorkflow", input)
+	}
 	return run.GetChildWorkflowExecution().Get(runCtx, nil)
 }
 

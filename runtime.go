@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
+	"github.com/hastekit/agent-sdk-go/pkg/agents/agentfactory"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/runtime/restate_runtime"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/runtime/temporal_runtime"
 	restate "github.com/restatedev/sdk-go"
@@ -72,15 +73,25 @@ func (r *TemporalRuntime) RegisterAgent(options *agents.AgentOptions) error {
 	return r.lifecycle.register(options)
 }
 
-// RegisterAgentFactory serves agents built at runtime by ref. Register it before Serve;
-// agents the factory adds later need no worker restart.
-func (r *TemporalRuntime) RegisterAgentFactory(factory agents.AgentFactory) error {
+// RegisterAgentFactory serves agents built from stored specs. Register it before Serve;
+// specs stored later need no worker restart.
+func (r *TemporalRuntime) RegisterAgentFactory(factory *agents.AgentFactory) error {
+	if _, err := temporal_runtime.NewFactoryAgentWorkflow(factory, r.broker); err != nil {
+		return err
+	}
 	return r.lifecycle.registerFactory(factory)
 }
 
-// BuildAgent builds ref with the registered factory; its runs start the shared factory workflow.
+// BuildAgent loads ref and builds it; its runs start the shared factory workflow with the spec.
 func (r *TemporalRuntime) BuildAgent(ctx context.Context, ref agents.AgentRef) (*agents.Agent, error) {
-	return r.lifecycle.buildAgent(ctx, ref, r, r.broker)
+	factory := r.lifecycle.servingFactory()
+	if factory == nil {
+		return nil, fmt.Errorf("no agent factory registered")
+	}
+	return agentfactory.Build(ctx, factory, ref, func(options *agents.AgentOptions) {
+		options.Runtime = r
+		options.StreamBroker = r.broker
+	})
 }
 
 // Serve runs the worker until ctx ends or startup fails. The caller owns the
@@ -96,7 +107,10 @@ func (r *TemporalRuntime) Serve(ctx context.Context) error {
 	}
 	w := worker.New(r.client, "AgentWorkflowTaskQueue", worker.Options{})
 	if factory := r.lifecycle.servingFactory(); factory != nil {
-		factoryWorkflow := temporal_runtime.NewFactoryAgentWorkflow(factory, r.broker)
+		factoryWorkflow, err := temporal_runtime.NewFactoryAgentWorkflow(factory, r.broker)
+		if err != nil {
+			return err
+		}
 		for name, fn := range factoryWorkflow.GetActivities() {
 			w.RegisterActivityWithOptions(fn, activity.RegisterOptions{Name: name})
 		}
@@ -209,17 +223,14 @@ func (r *RestateRuntime) Close() error { r.lifecycle.close(); return nil }
 type runtimeLifecycle struct {
 	mu      sync.Mutex
 	configs map[string]*agents.AgentOptions
-	factory agents.AgentFactory
+	factory *agents.AgentFactory
 	cancel  context.CancelFunc
 	done    chan struct{}
 	closed  bool
 }
 
-// registerFactory installs the one factory a runtime serves; builds are cached by ref.
-func (r *runtimeLifecycle) registerFactory(factory agents.AgentFactory) error {
-	if factory == nil {
-		return fmt.Errorf("agent factory is nil")
-	}
+// registerFactory installs the one factory a runtime serves.
+func (r *runtimeLifecycle) registerFactory(factory *agents.AgentFactory) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.closed || r.cancel != nil {
@@ -228,27 +239,15 @@ func (r *runtimeLifecycle) registerFactory(factory agents.AgentFactory) error {
 	if r.factory != nil {
 		return fmt.Errorf("an agent factory is already registered")
 	}
-	r.factory = agents.NewCachedAgentFactory(factory, 0)
+	r.factory = factory
 	return nil
 }
 
 // servingFactory is the registered factory; it cannot change once Serve has begun.
-func (r *runtimeLifecycle) servingFactory() agents.AgentFactory {
+func (r *runtimeLifecycle) servingFactory() *agents.AgentFactory {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.factory
-}
-
-// buildAgent builds ref with the registered factory, bound to runtime.
-func (r *runtimeLifecycle) buildAgent(ctx context.Context, ref agents.AgentRef, runtime agents.Runtime, broker agents.StreamBroker) (*agents.Agent, error) {
-	factory := r.servingFactory()
-	if factory == nil {
-		return nil, fmt.Errorf("no agent factory registered")
-	}
-	return agents.NewFactoryAgent(ctx, factory, ref, func(options *agents.AgentOptions) {
-		options.Runtime = runtime
-		options.StreamBroker = broker
-	})
 }
 
 // register stores the validated configuration resolved by NewAgent. Registration

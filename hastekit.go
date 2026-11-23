@@ -13,12 +13,18 @@ import (
 type Agent = agents.Agent
 type ModelParameters = responses.Parameters
 
-// AgentRef names one immutable version of a factory-built agent.
+// AgentRef names one version of a stored agent; an empty Version means the latest.
 type AgentRef = agents.AgentRef
 
-// AgentFactory builds agents from stored configuration; register one with a runtime's RegisterAgentFactory.
+// AgentSpec is an agent as data, the shape a store keeps and a durable run carries.
+type AgentSpec = agents.AgentSpec
+type HandoffSpec = agents.HandoffSpec
+
+// AgentFactory builds agents from stored specs; register one with a runtime's RegisterAgentFactory.
 type AgentFactory = agents.AgentFactory
-type AgentFactoryFunc = agents.AgentFactoryFunc
+
+// ErrAgentNotFound is what an AgentFactory's Load wraps for an unknown ref.
+var ErrAgentNotFound = agents.ErrAgentNotFound
 
 // AgentMiddleware wraps agent operations. Embed agents.NoopMiddleware and
 // override the Wrap methods relevant to your implementation. The root
@@ -59,9 +65,6 @@ type AgentConfig struct {
 	// retrieval. Embed agents.NoopMiddleware and override selected methods.
 	Middlewares []agents.Middleware
 }
-
-// Options returns the agent options this configuration describes, for an AgentFactory to return.
-func (ac *AgentConfig) Options() *agents.AgentOptions { return ac.toAgentOptions() }
 
 func (ac *AgentConfig) toAgentOptions() *agents.AgentOptions {
 	return &agents.AgentOptions{

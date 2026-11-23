@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
+	"github.com/hastekit/agent-sdk-go/pkg/agents/history"
 	"github.com/hastekit/agent-sdk-go/pkg/gateway"
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm"
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/constants"
@@ -118,40 +119,72 @@ func (t *FuncTool) Execute(ctx context.Context, call *agents.ToolCall) (*agents.
 	}}, nil
 }
 
-// MapFactory is an AgentFactory over versioned builders, safe to change while serving.
-type MapFactory struct {
-	mu       sync.Mutex
-	builders map[agents.AgentRef]func() *agents.AgentOptions
-	builds   map[agents.AgentRef]int
+// EchoModel is the model id Models resolves to EchoProvider.
+const EchoModel = "Test/echo"
+
+// Models resolves model ids from a map; it is an agents.ModelResolver.
+type Models map[string]llm.Provider
+
+// EchoModels resolves EchoModel only.
+func EchoModels() Models { return Models{EchoModel: EchoProvider{}} }
+
+func (m Models) ResolveModel(id string) (llm.Provider, error) {
+	provider, ok := m[id]
+	if !ok {
+		return nil, fmt.Errorf("unknown model %q", id)
+	}
+	return provider, nil
 }
 
-func NewMapFactory() *MapFactory {
-	return &MapFactory{builders: map[agents.AgentRef]func() *agents.AgentOptions{}, builds: map[agents.AgentRef]int{}}
+// SpecStore is a versioned spec table, safe to change while serving. An empty version loads the latest.
+type SpecStore struct {
+	mu     sync.Mutex
+	specs  map[agents.AgentRef]agents.AgentSpec
+	latest map[string]string
+	loads  map[agents.AgentRef]int
 }
 
-// Put stores the builder for ref, replacing any earlier one.
-func (f *MapFactory) Put(ref agents.AgentRef, build func() *agents.AgentOptions) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.builders[ref] = build
+func NewSpecStore() *SpecStore {
+	return &SpecStore{specs: map[agents.AgentRef]agents.AgentSpec{}, latest: map[string]string{}, loads: map[agents.AgentRef]int{}}
 }
 
-func (f *MapFactory) Build(_ context.Context, ref agents.AgentRef) (*agents.AgentOptions, error) {
-	f.mu.Lock()
-	build, ok := f.builders[ref]
-	f.builds[ref]++
-	f.mu.Unlock()
+// Put stores spec and makes it its agent's latest version.
+func (s *SpecStore) Put(spec agents.AgentSpec) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.specs[spec.Ref()] = spec
+	s.latest[spec.Name] = spec.Version
+}
+
+func (s *SpecStore) Load(_ context.Context, ref agents.AgentRef) (*agents.AgentSpec, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.loads[ref]++
+	if ref.Version == "" {
+		ref.Version = s.latest[ref.Name]
+	}
+	spec, ok := s.specs[ref]
 	if !ok {
 		return nil, fmt.Errorf("%w: %s", agents.ErrAgentNotFound, ref)
 	}
-	return build(), nil
+	return &spec, nil
 }
 
-// Builds reports how often ref was built.
-func (f *MapFactory) Builds(ref agents.AgentRef) int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.builds[ref]
+// Loads reports how often ref was asked for.
+func (s *SpecStore) Loads(ref agents.AgentRef) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.loads[ref]
+}
+
+// Factory returns a factory over the store with the echo model, tools and history.
+func (s *SpecStore) Factory(h *history.CommonConversationManager, tools ...agents.Tool) *agents.AgentFactory {
+	return &agents.AgentFactory{Load: s.Load, Models: EchoModels(), Tools: tools, History: h}
+}
+
+// Spec is a spec on the echo model.
+func Spec(name, version, instruction string, tools ...string) agents.AgentSpec {
+	return agents.AgentSpec{Name: name, Version: version, Model: EchoModel, Instruction: instruction, Tools: tools}
 }
 
 // BackgroundTool starts task TaskID when called and reports Result when awaited.

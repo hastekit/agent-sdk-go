@@ -3,7 +3,6 @@ package temporal_runtime
 import (
 	"context"
 
-	"github.com/hastekit/agent-sdk-go/pkg/agents"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/history"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/messages"
 	"go.temporal.io/sdk/workflow"
@@ -33,7 +32,6 @@ func (t *TemporalMessageFilter) Filter(ctx context.Context, msgs []messages.Mess
 type TemporalMessageFilterProxy struct {
 	workflowCtx workflow.Context
 	prefix      string
-	ref         *agents.AgentRef
 }
 
 func NewTemporalMessageFilterProxy(workflowCtx workflow.Context, prefix string) history.MessageFilter {
@@ -45,7 +43,7 @@ func NewTemporalMessageFilterProxy(workflowCtx workflow.Context, prefix string) 
 
 func (t *TemporalMessageFilterProxy) Filter(ctx context.Context, msgs []messages.Message, agentID string) []messages.Message {
 	var result []messages.Message
-	err := executeActivity(t.workflowCtx, t.ref, t.prefix+"_MessageFilterActivity", msgs, agentID).Get(t.workflowCtx, &result)
+	err := workflow.ExecuteActivity(t.workflowCtx, t.prefix+"_MessageFilterActivity", msgs, agentID).Get(t.workflowCtx, &result)
 	if err != nil {
 		// Best-effort: keep the unfiltered bundles on activity failure.
 		return msgs

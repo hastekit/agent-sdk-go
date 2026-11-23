@@ -24,7 +24,6 @@ func (p *TemporalPrompt) GetPrompt(ctx context.Context, deps *agents.Dependencie
 type TemporalPromptProxy struct {
 	workflowCtx workflow.Context
 	prefix      string
-	ref         *agents.AgentRef
 }
 
 func NewTemporalPromptProxy(workflowCtx workflow.Context, prefix string) agents.SystemPromptProvider {
@@ -36,7 +35,7 @@ func NewTemporalPromptProxy(workflowCtx workflow.Context, prefix string) agents.
 
 func (p *TemporalPromptProxy) GetPrompt(ctx context.Context, deps *agents.Dependencies) (string, error) {
 	var prompt string
-	err := executeActivity(p.workflowCtx, p.ref, p.prefix+"_GetPromptActivity", deps).Get(p.workflowCtx, &prompt)
+	err := workflow.ExecuteActivity(p.workflowCtx, p.prefix+"_GetPromptActivity", deps).Get(p.workflowCtx, &prompt)
 	if err != nil {
 		return "", err
 	}

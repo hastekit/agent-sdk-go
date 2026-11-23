@@ -55,10 +55,6 @@ type TemporalToolProxy struct {
 	workflowCtx workflow.Context
 	prefix      string
 	wrappedTool agents.Tool
-
-	// ref and toolKey route a factory agent's tool through the shared tool activity.
-	ref     *agents.AgentRef
-	toolKey string
 }
 
 // NewTemporalToolProxy wraps a tool for the workflow, keeping whichever
@@ -76,12 +72,8 @@ func NewTemporalToolProxy(workflowCtx workflow.Context, prefix string, wrappedTo
 }
 
 func (t *TemporalToolProxy) Execute(ctx context.Context, params *agents.ToolCall) (*agents.ToolCallResponse, error) {
-	args := []any{params}
-	if t.ref != nil {
-		args = []any{t.toolKey, params}
-	}
 	var output *agents.ToolCallResponse
-	err := executeActivity(t.workflowCtx, t.ref, t.prefix+"_ExecuteToolActivity", args...).Get(t.workflowCtx, &output)
+	err := workflow.ExecuteActivity(t.workflowCtx, t.prefix+"_ExecuteToolActivity", params).Get(t.workflowCtx, &output)
 	if err != nil {
 		return nil, err
 	}

@@ -1526,30 +1526,31 @@ serving in one process with signal-driven shutdown.
 #### Agents built from stored configuration
 
 When agents are defined by data (a database row per version) rather than Go code,
-register an `AgentFactory` instead of each agent. The Temporal worker then runs one
-shared workflow keyed by `AgentRef{Name, Version}`, so agents created or edited after
-`Serve` starts need no restart. Restate does not support factories yet.
+store them as `AgentSpec`s and register one `AgentFactory` instead of each agent.
+A spec holds only names: a `Provider/model` id, the instruction, tool names, and
+handoffs to other stored agents. The factory pairs your loader with what those
+names mean on the worker: the LLM client (and its keys), the tools, and history.
+Restate does not support factories yet.
 
 ```go
-rt.RegisterAgentFactory(hastekit.AgentFactoryFunc(func(ctx context.Context, ref hastekit.AgentRef) (*agents.AgentOptions, error) {
-    row, err := db.LoadAgent(ctx, ref.Name, ref.Version) // return agents.ErrAgentNotFound for unknown refs
-    if err != nil { return nil, err }
-    return (&hastekit.AgentConfig{Name: ref.Name, LLM: client.Model(row.Model), Instruction: hastekit.NewPrompt(row.Prompt), History: hist}).Options(), nil
-}))
+rt.RegisterAgentFactory(&hastekit.AgentFactory{
+    Load:    db.LoadAgentSpec, // func(ctx, AgentRef) (*AgentSpec, error); wrap ErrAgentNotFound
+    Models:  llmClient,        // resolves spec.Model; keys never leave the worker
+    Tools:   []hastekit.Tool{searchTool, ticketTool},
+    History: history,
+})
 go rt.Serve(ctx)
 
-agent, err := rt.BuildAgent(ctx, hastekit.AgentRef{Name: "support", Version: "7"})
+agent, err := rt.BuildAgent(ctx, hastekit.AgentRef{Name: "support"}) // empty Version: latest
 out, err := agent.Run(ctx, input)
 ```
 
-A ref must always build the same agent: publish a new version instead of editing
-one. A run pins the ref it started with, and its shape (tools, handoffs, limits)
-is journaled when it starts, so an in-flight run replays on its own version after
-a restart. Handoff targets are refs too (`agents.Handoff{Name, Version}`). Only
-the ref and the usual `AgentInput` enter the workflow; credentials stay in the
-factory. The local runtime accepts the same factory, so the builder does not
-change when you move to Temporal. Under Temporal, values set with `gateway.AddContext`
-reach every activity. See the [agent factory example](examples/agents/16_agent_factory/main.go).
+Under Temporal every factory agent runs on one shared workflow, started with the
+spec itself, so agents stored after `Serve` starts need no restart, and a run
+keeps the spec it started with through restarts and replays. A handoff target is
+loaded when the handoff happens, in a journaled activity. The local runtime takes
+the same factory. Under Temporal, values set with `gateway.AddContext` reach every
+activity. See the [agent factory example](examples/agents/16_agent_factory/main.go).
 
 ## Documentation
 

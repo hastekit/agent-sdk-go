@@ -14,9 +14,7 @@ type HandoffTarget interface {
 type Handoff struct {
 	Name        string
 	Description string
-	// Version picks the factory-built target's configuration when Agent is nil.
-	Version string        `json:"version,omitempty"`
-	Agent   HandoffTarget `json:"-"`
+	Agent       HandoffTarget `json:"-"`
 }
 
 func NewHandoff(name string, desc string, agent *Agent) *Handoff {
