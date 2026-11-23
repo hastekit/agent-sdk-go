@@ -13,12 +13,11 @@ type MutableMCPServerConfigStore interface {
 	Delete(ctx context.Context, namespace, name string) error
 }
 
-// Store decorates a source with immutable inline definitions.
-// Copies share the backing persistence, but never share mutable inline configurations.
+// Store validates every write before it reaches its source, so a definition
+// passes the same checks whatever persistence backs it. For server definitions
+// written in code, use NewInlineStore.
 type Store struct {
 	source MCPServerConfigStore
-	inline []ServerConfig
-	err    error
 }
 
 // NewStore adapts a custom source, such as a database-backed config store.
@@ -40,62 +39,17 @@ func NewFileStore(path string) (*Store, error) {
 	return NewStore(source), nil
 }
 
-// WithMCPServerConfig returns a copy with additional inline configurations.
-// Inline definitions override the same scope/name in the source and cannot be edited through HTTP.
-// Invalid inline values are reported on listing, just like invalid database records.
-func (s *Store) WithMCPServerConfig(configs []ServerConfig) *Store {
-	// Clone both existing and added definitions so caller mutations cannot change this view.
-	result := &Store{source: s.source, err: s.err}
-	for _, group := range [][]ServerConfig{s.inline, configs} {
-		for _, config := range group {
-			copy, err := cloneServerConfig(config)
-			if err == nil {
-				err = validateServerConfig(copy)
-			}
-			if err != nil {
-				result.err = err
-				return result
-			}
-			result.inline = append(result.inline, copy)
-		}
-	}
-	return result
-}
-
-// ListServerConfigs merges a fresh source snapshot with this view's inline definitions.
+// ListServerConfigs returns a fresh snapshot of the source, ordered by scope and name.
 func (s *Store) ListServerConfigs(ctx context.Context, namespace string, runContext map[string]any) ([]ServerConfig, error) {
-	// Fail before exposing a partial catalog when inline configuration is invalid.
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if s.err != nil {
-		return nil, s.err
+	if s.source == nil {
+		return nil, nil
 	}
-	var configs []ServerConfig
-	if s.source != nil {
-		var err error
-		configs, err = s.source.ListServerConfigs(ctx, namespace, runContext)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	// Preserve duplicate source records for catalog validation; only explicit overlays replace them.
-	for _, inline := range s.inline {
-		if inline.Namespace != "" && inline.Namespace != namespace {
-			continue
-		}
-		filtered := make([]ServerConfig, 0, len(configs)+1)
-		for _, config := range configs {
-			if config.Namespace != inline.Namespace || config.Name != inline.Name {
-				filtered = append(filtered, config)
-			}
-		}
-		copy, err := cloneServerConfig(inline)
-		if err != nil {
-			return nil, err
-		}
-		configs = append(filtered, copy)
+	configs, err := s.source.ListServerConfigs(ctx, namespace, runContext)
+	if err != nil {
+		return nil, err
 	}
 	sortServerConfigs(configs)
 	return configs, nil
@@ -103,13 +57,8 @@ func (s *Store) ListServerConfigs(ctx context.Context, namespace string, runCont
 
 var ErrReadOnlyConfig = errors.New("MCP configuration is read-only")
 
-// writable rejects inline edits and sources that do not implement persistence.
-func (s *Store) writable(namespace, name string) (MutableMCPServerConfigStore, error) {
-	for _, config := range s.inline {
-		if config.Namespace == namespace && config.Name == name {
-			return nil, ErrReadOnlyConfig
-		}
-	}
+// writable rejects sources that do not implement persistence.
+func (s *Store) writable() (MutableMCPServerConfigStore, error) {
 	source, ok := s.source.(MutableMCPServerConfigStore)
 	if !ok {
 		return nil, ErrReadOnlyConfig
@@ -125,16 +74,16 @@ func (s *Store) Put(ctx context.Context, namespace string, config ServerConfig) 
 		return err
 	}
 
-	source, err := s.writable(namespace, config.Name)
+	source, err := s.writable()
 	if err != nil {
 		return err
 	}
 	return source.Put(ctx, namespace, config)
 }
 
-// Delete removes a persisted definition without changing inline configurations.
+// Delete removes a persisted definition.
 func (s *Store) Delete(ctx context.Context, namespace, name string) error {
-	source, err := s.writable(namespace, name)
+	source, err := s.writable()
 	if err != nil {
 		return err
 	}

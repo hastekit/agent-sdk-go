@@ -51,9 +51,9 @@ func TestCallToolDirect_CancellationReachesServer(t *testing.T) {
 		httpSrv.Close()
 	}()
 
-	client := mcpclient.NewClient(mcpclient.NewMemoryStore().WithMCPServerConfig([]mcpclient.ServerConfig{{Name: "cancel",
+	client := mcpclient.NewClient(mcpclient.NewInlineStore(mcpclient.ServerConfig{Name: "cancel",
 		Endpoint:  httpSrv.URL,
-		Transport: "streamable-http"}}))
+		Transport: "streamable-http"}))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

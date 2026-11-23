@@ -91,24 +91,37 @@ func TestClientGlobalPrecedenceSelectionAndExecution(t *testing.T) {
 	require.NoError(t, store.Put(t.Context(), "bob", catalogConfig("bob", "https://down.invalid/mcp")))
 	client := NewClient(store)
 
-	// User configuration cannot replace a global destination or re-enable its excluded tools.
+	// User configuration cannot replace a global destination or re-enable its excluded
+	// tools, and a run narrows only the user's own server: the global keeps every
+	// configured tool even when the run tries to exclude them all.
 	input := &agents.AgentInput{Namespace: "alice", MCP: agents.MCPSelection{
-		Tools: map[string]agents.MCPToolSelection{"docs": {Include: []string{"read", "hidden"}}, "private": {Exclude: []string{"write", "hidden"}}},
+		Tools: map[string]agents.MCPToolSelection{"docs": {Exclude: []string{"*"}}, "private": {Exclude: []string{"write", "hidden"}}},
 	}}
 	statuses, tools, err := client.ListTools(t.Context(), input.Namespace, input.RunContext, input.MCP)
 	require.NoError(t, err)
-	require.Len(t, statuses, 2)
-	require.Len(t, tools, 2)
-	require.Equal(t, 1, statuses[0].ToolCount)
-	require.Equal(t, "docs__read", tools[0].GetToolDescriptor().ToolUnion.OfFunction.Name)
+	require.Equal(t, []agents.ConnectorStatus{agents.ConnectedConnectorStatus("docs", 2), agents.ConnectedConnectorStatus("private", 1)}, statuses)
+	byName := map[string]agents.Tool{}
+	for _, tool := range tools {
+		byName[tool.GetToolDescriptor().ToolUnion.OfFunction.Name] = tool
+	}
+	require.Len(t, byName, 3)
+	for _, name := range []string{"docs__read", "docs__write", "private__read"} {
+		require.Contains(t, byName, name)
+	}
+	docsRead := byName["docs__read"]
 	call := &agents.ToolCall{Namespace: "alice", FunctionCallMessage: &responses.FunctionCallMessage{Name: "docs__read", Arguments: "{}"}}
-	output, err := tools[0].Execute(t.Context(), call)
+	output, err := docsRead.Execute(t.Context(), call)
 	require.NoError(t, err)
 	require.Contains(t, *output.Output.OfString, "global")
 
+	// An include list naming nothing the global serves does not empty it either.
+	statuses, _, err = client.ListTools(t.Context(), "alice", nil, agents.MCPSelection{Tools: map[string]agents.MCPToolSelection{"docs": {Include: []string{"missing"}}}})
+	require.NoError(t, err)
+	require.Equal(t, agents.ConnectedConnectorStatus("docs", 2), statuses[0])
+
 	// Global tools resolve for the execution namespace, including through durable execution.
 	call.Namespace = "bob"
-	output, err = client.CallTool(t.Context(), tools[0].GetToolDescriptor(), call)
+	output, err = client.CallTool(t.Context(), docsRead.GetToolDescriptor(), call)
 	require.NoError(t, err)
 	require.Contains(t, *output.Output.OfString, "global")
 	statuses, tools, err = client.ListTools(t.Context(), "alice", nil, agents.MCPSelection{Disable: []string{"docs", "private"}})

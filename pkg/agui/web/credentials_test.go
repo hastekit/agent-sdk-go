@@ -27,10 +27,10 @@ func TestMCPCredentialsThroughWebHandler(t *testing.T) {
 	require.NoError(t, err)
 
 	// OAuth settings are available to HTTP routes before any agent discovery.
-	configs := mcpclient.NewMemoryStore().WithMCPServerConfig([]mcpclient.ServerConfig{{
+	configs := mcpclient.NewInlineStore(mcpclient.ServerConfig{
 		Name: "gmail", Endpoint: "https://mcp.example/gmail",
 		Authorization: &mcpclient.OAuthConfig{ClientID: "client", RedirectURL: callbackURL, AuthURL: "https://accounts.example/authorize", TokenURL: tokenServer.URL},
-	}})
+	})
 
 	// Use the same resolver as chat and verify it receives the matched server exactly once.
 	resolutions := 0

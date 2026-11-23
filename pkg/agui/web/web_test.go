@@ -132,7 +132,7 @@ func TestHandlerSkillStore(t *testing.T) {
 	require.NoError(t, err)
 	for _, enabled := range []bool{true, false} {
 		t.Run(fmt.Sprint(enabled), func(t *testing.T) {
-			var configured skills.Store
+			var configured skills.MutableStore
 			if enabled {
 				configured = store
 			}

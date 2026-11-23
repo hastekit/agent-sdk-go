@@ -24,10 +24,10 @@ func TestMCPMetaTemplatesInsideActivity(t *testing.T) {
 	})
 	hs := httptest.NewServer(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, nil))
 	t.Cleanup(func() { hs.CloseClientConnections(); hs.Close() })
-	client := mcpclient.NewClient(mcpclient.NewMemoryStore().WithMCPServerConfig([]mcpclient.ServerConfig{{Name: t.Name(),
+	client := mcpclient.NewClient(mcpclient.NewInlineStore(mcpclient.ServerConfig{Name: t.Name(),
 		Endpoint:  hs.URL,
 		Transport: mcpclient.TransportStreamableHTTP,
-		Meta:      map[string]any{"thread_id": "{{thread_id}}", "run_id": "{{run_id}}"}}}))
+		Meta:      map[string]any{"thread_id": "{{thread_id}}", "run_id": "{{run_id}}"}}))
 	wrapper := temporal_runtime.NewTemporalMCPClient(client, nil)
 	var suite testsuite.WorkflowTestSuite
 	env := suite.NewTestActivityEnvironment()

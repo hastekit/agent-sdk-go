@@ -9,12 +9,14 @@ OPENAI_API_KEY=... go run ./examples/agents/15_dynamic_skills -serve
 
 The agent's `SkillClient` combines two kinds of skills, the same way MCP servers work:
 
-- **Global skills** belong to the developer and are configured per agent with
-  `skills.NewClient(store).WithGlobalSkills(sources...)`. This example uses a
-  folder (`skills.NewDirSource`) and `teamSkills`, a custom `skills.Source` whose
-  `List` and `Read` could call your database, object store, or HTTP service.
-  Globals are always on, and users cannot turn them off or replace them.
-- **User skills** are the ones each namespace uploads to the shared `Store`
+- **Global skills** belong to the developer and live in a store's empty
+  namespace. Each agent reads its own stores with
+  `skills.NewClient(store, builtins...)`. This example uses a folder
+  (`skills.NewDirStore`) and `teamSkills`, a custom read-only `skills.Store`
+  whose `List` and `Get` could call your database, object store, or HTTP service.
+  Globals are always on, and users cannot turn them off or replace them. To give
+  an agent only some skills, wrap its stores in `skills.Filter`.
+- **User skills** are the ones each namespace uploads to the shared `MutableStore`
   (`./data/skills` by default; pass `-skill-store /path` to change it). They are
   on unless the run disables them, and cannot reuse a global skill's name.
 

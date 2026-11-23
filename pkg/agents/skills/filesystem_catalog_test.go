@@ -1,6 +1,7 @@
 package skills
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -60,7 +61,7 @@ func TestFilesystemCatalogLoadsEmbeddedFolders(t *testing.T) {
 func TestFilesystemCatalogReadStripsFrontmatter(t *testing.T) {
 	registry := newRegistry(t, skillFS())
 
-	body, err := registry.read("pdf")
+	body, err := readFrom(registry, "pdf", "")
 	if err != nil {
 		t.Fatalf("Read: %v", err)
 	}
@@ -75,7 +76,7 @@ func TestFilesystemCatalogReadStripsFrontmatter(t *testing.T) {
 func TestFilesystemCatalogReadFileServesBundledResources(t *testing.T) {
 	registry := newRegistry(t, skillFS())
 
-	content, err := registry.readFile("pdf", "references/forms.md")
+	content, err := readFrom(registry, "pdf", "references/forms.md")
 	if err != nil {
 		t.Fatalf("ReadFile: %v", err)
 	}
@@ -89,22 +90,28 @@ func TestFilesystemCatalogReadFileRejectsEscapes(t *testing.T) {
 
 	// Both of these resolve outside the pdf folder; neither may be served.
 	for _, file := range []string{"../invoice/SKILL.md", "/etc/passwd"} {
-		if _, err := registry.readFile("pdf", file); err == nil {
+		if _, err := readFrom(registry, "pdf", file); err == nil {
 			t.Errorf("ReadFile(%q) succeeded, want refusal", file)
 		}
 	}
 }
 
-func TestFilesystemCatalogUnknownSkillListsWhatExists(t *testing.T) {
+// An unknown skill is ErrNotFound, so a client can look for it in its other catalogs.
+func TestFilesystemCatalogUnknownSkillIsNotFound(t *testing.T) {
 	registry := newRegistry(t, skillFS())
 
-	_, err := registry.read("spreadsheet")
-	if err == nil {
-		t.Fatal("Read of an unknown skill succeeded")
+	if _, err := registry.bundle("spreadsheet"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("bundle of an unknown skill = %v, want ErrNotFound", err)
 	}
-	if !strings.Contains(err.Error(), "pdf") {
-		t.Errorf("error does not name the available skills: %v", err)
+}
+
+// readFrom reads a file from a skill's bundle the way a Client does.
+func readFrom(registry *filesystemCatalog, name, file string) (string, error) {
+	bundle, err := registry.bundle(name)
+	if err != nil {
+		return "", err
 	}
+	return readBundle(bundle, file)
 }
 
 func TestFilesystemCatalogRejectsMalformedSkills(t *testing.T) {
@@ -148,7 +155,7 @@ func TestFilesystemCatalogTreatsNestedSkillFilesAsResources(t *testing.T) {
 		t.Errorf("resources = %v", outer.Resources)
 	}
 
-	content, err := registry.readFile("outer", "templates/SKILL.md")
+	content, err := readFrom(registry, "outer", "templates/SKILL.md")
 	if err != nil || content != "---\nname: <name>\n---\ntemplate\n" {
 		t.Errorf("ReadFile = %q, %v", content, err)
 	}
@@ -175,7 +182,7 @@ func TestFilesystemCatalogFromDirReadsSkillsOffDisk(t *testing.T) {
 		t.Errorf("file location = %q, want %q", changelog.FileLocation, want)
 	}
 
-	body, err := registry.read("changelog")
+	body, err := readFrom(registry, "changelog", "")
 	if err != nil {
 		t.Fatalf("Read: %v", err)
 	}
@@ -183,7 +190,7 @@ func TestFilesystemCatalogFromDirReadsSkillsOffDisk(t *testing.T) {
 		t.Errorf("body = %q", body)
 	}
 
-	style, err := registry.readFile("changelog", "references/style.md")
+	style, err := readFrom(registry, "changelog", "references/style.md")
 	if err != nil {
 		t.Fatalf("ReadFile: %v", err)
 	}

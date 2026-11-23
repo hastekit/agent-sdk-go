@@ -29,14 +29,14 @@ func main() {
 
 	model := client.Model("OpenAI/gpt-4.1-mini")
 
-	mcpClient := mcpclient.NewClient(mcpclient.NewMemoryStore().WithMCPServerConfig([]mcpclient.ServerConfig{{Name: "users",
+	mcpClient := mcpclient.NewClient(mcpclient.NewInlineStore(mcpclient.ServerConfig{Name: "users",
 		Endpoint: "http://localhost:9001/sse",
 		Headers: map[string]string{
 			"token": "your-token",
 		},
 		ToolFilter:            mcpclient.ToolFilter{Include: []string{"list_users"}},
 		ApprovalRequiredTools: []string{"list_users"},
-		Transport:             "sse"}}))
+		Transport:             "sse"}))
 
 	agent := hastekit.MustNewAgent(&hastekit.AgentConfig{
 		Name:        "Hello world agent",

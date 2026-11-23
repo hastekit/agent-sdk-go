@@ -54,11 +54,12 @@ func TestUserTemplatesRejectedAtEveryConfigurationBoundary(t *testing.T) {
 			}
 			require.Zero(t, custom.writes, "validation must happen before custom persistence")
 
-			// Inline definitions, existing files, and custom store reads cannot bypass validation.
+			// Inline definitions cannot carry a user's namespace; existing files and
+			// custom store reads cannot bypass validation.
 			config.Namespace = "alice"
-			inline := NewMemoryStore().WithMCPServerConfig([]ServerConfig{config})
+			inline := NewInlineStore(config)
 			_, err = inline.ListServerConfigs(t.Context(), "alice", nil)
-			require.ErrorContains(t, err, "cannot contain templates")
+			require.ErrorContains(t, err, "must be global")
 			// Persisted user records never connect; they fail only their own connector.
 			custom.config = config
 			path := filepath.Join(t.TempDir(), "unsafe.json")

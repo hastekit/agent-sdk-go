@@ -17,11 +17,11 @@ and authenticated namespace. There is no registration map to keep synchronized,
 and connecting an account does not require listing tools first.
 
 ```go
-configs, err := mcpclient.NewFileStore("./data/mcp-config.json")
+configs, err := mcpclient.NewFileStore("./data/mcp-config.json") // users' connectors
 if err != nil {
     return err
 }
-configs = configs.WithMCPServerConfig([]mcpclient.ServerConfig{{
+builtins := mcpclient.NewInlineStore(mcpclient.ServerConfig{
     Name: "gmail",
     Endpoint: "https://gmailmcp.googleapis.com/mcp/v1",
     Transport: mcpclient.TransportStreamableHTTP,
@@ -35,7 +35,7 @@ configs = configs.WithMCPServerConfig([]mcpclient.ServerConfig{{
         Scopes: []string{"https://www.googleapis.com/auth/gmail.readonly"},
         AuthCodeParams: map[string]string{"prompt": "consent"},
     },
-}})
+})
 
 // Share token refresh coordination between agent execution and browser callbacks.
 tokens, err := mcpclient.NewFileCredentialStore("./data/mcp-credentials")
@@ -49,21 +49,24 @@ provider, err := mcpclient.NewOAuthCredentialProvider(mcpclient.OAuthCredentialP
 if err != nil {
     return err
 }
-client := mcpclient.NewClient(configs).WithCredentials(provider)
+client := mcpclient.NewClient(configs, builtins).WithCredentials(provider)
 ```
 
-Give `client` to the agent's `MCPClient` option, then mount the config store:
+Give `client` to the agent's `MCPClient` option, then mount the config stores.
+`WithReadOnlyStores` lets the handler find Gmail's OAuth settings in `builtins`
+without ever writing to it:
 
 ```go
 handler := web.Handler(registry,
     agui.WithNamespaceResolver(authenticatedNamespace),
-    agui.WithMCPStore(configs, mcpclient.WithOAuth(provider)),
+    agui.WithMCPStore(configs, mcpclient.WithOAuth(provider), mcpclient.WithReadOnlyStores(builtins)),
 )
 ```
 
 Use the same authenticated namespace for agent runs and HTTP requests. For the
 standalone handler, use `NewHandler(configs, WithNamespaceResolver(...),
-WithOAuth(provider))` and mount it with `http.StripPrefix`.
+WithOAuth(provider), WithReadOnlyStores(builtins))` and mount it with
+`http.StripPrefix`.
 
 Visit `/api/agui/mcp/gmail/connect`. The handler resolves Gmail's OAuth config,
 creates expiring browser-bound state and an S256 PKCE challenge, then redirects

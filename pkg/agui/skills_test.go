@@ -108,14 +108,13 @@ func TestSkillStoreManagementUsesResolvedNamespace(t *testing.T) {
 func TestUploadsCannotReuseAnyAgentsGlobalSkillName(t *testing.T) {
 	store, err := skills.NewFileStore(t.TempDir())
 	require.NoError(t, err)
-	base := skills.NewClient(store)
-	reviewGlobals, err := skills.NewBundleSource(skillBundle("review", "Developer review"))
+	reviewGlobals, err := skills.NewInlineStore(skillBundle("review", "Developer review"))
 	require.NoError(t, err)
-	styleGlobals, err := skills.NewBundleSource(skillBundle("style", "Developer style"))
+	styleGlobals, err := skills.NewInlineStore(skillBundle("style", "Developer style"))
 	require.NoError(t, err)
 	registry := skillAgents{
-		"reviewer": agents.NewAgent(&agents.AgentOptions{Name: "reviewer", SkillClient: base.WithGlobalSkills(reviewGlobals)}),
-		"writer":   agents.NewAgent(&agents.AgentOptions{Name: "writer", SkillClient: base.WithGlobalSkills(styleGlobals)}),
+		"reviewer": agents.NewAgent(&agents.AgentOptions{Name: "reviewer", SkillClient: skills.NewClient(store, reviewGlobals)}),
+		"writer":   agents.NewAgent(&agents.AgentOptions{Name: "writer", SkillClient: skills.NewClient(store, styleGlobals)}),
 	}
 	handler := NewHandler(registry, WithSkillStore(store), WithNamespaceResolver(func(*http.Request) (string, error) { return "tenant", nil }))
 	upload := func(method, path, name string) int {

@@ -1,33 +1,34 @@
 # MCP configuration stores
 
 All MCP servers are defined by `ServerConfig`. The client accepts one or more
-stores; there is no separate constructor for code-defined servers.
+stores, and servers written in code are one more store.
 
 ```go
-store, err := mcpclient.NewFileStore("./data/mcp-config.json")
+store, err := mcpclient.NewFileStore("./data/mcp-config.json") // users' connectors
 if err != nil {
     return err
 }
 
-// Add developer-owned definitions without modifying the file or the original view.
-store = store.WithMCPServerConfig([]mcpclient.ServerConfig{{
+// Developer-owned definitions, kept out of the file.
+builtins := mcpclient.NewInlineStore(mcpclient.ServerConfig{
     Name:       "docs",
     Endpoint:   "https://example.com/mcp",
     Transport:  mcpclient.TransportStreamableHTTP,
     ToolPrefix: "docs__",
-}})
-client := mcpclient.NewClient(store)
+})
+client := mcpclient.NewClient(store, builtins)
 
 agent := hastekit.MustNewAgent(&hastekit.AgentConfig{
     Name: "Assistant", LLM: model, MCPClient: client,
 })
 ```
 
-Use `NewMemoryStore()` for process-local persistence. `NewStore(databaseStore)`
-adds inline configuration support to a custom database source. Chaining
-`WithMCPServerConfig` returns a new view each time; inline maps and slices are
-copied, while the backing persistence is shared. Inline values override the same
-namespace/name in that view and are read-only through HTTP.
+`NewInlineStore(configs...)` copies its definitions and serves them as globals:
+each must leave `Namespace` empty, and an invalid one is reported when the store
+is listed. It never accepts writes. Use `NewMemoryStore()` for process-local
+persistence and `NewStore(databaseStore)` to validate writes before they reach a
+custom database source. A server defined in two stores is a duplicate, never an
+override, so move a definition rather than shadowing it.
 
 ## Store contract and ownership
 
@@ -46,6 +47,31 @@ owned by the requested namespace. An empty namespace lists globals only.
 - `NewClient(storeA, storeB)` reads both sources. Duplicate global definitions are
   errors; precedence between different sources is not implicit. Invalid or
   duplicate user-owned records fail only their own connector (see below).
+- `Filter(store, servers, options...)` lists only the servers a store's map
+  names, each narrowed by its `ToolFilter`, so agents can share one catalog and
+  each take part of it. Names match global and user-owned servers alike.
+
+  ```go
+  client := NewClient(Filter(shared, map[string]ToolFilter{
+      "docs":   {},                                              // a global, all its tools
+      "github": {Include: []string{"get_issue", "search_issues"}}, // only these
+      "gmail":  {Include: []string{"search"}},                   // each user's own gmail
+  }))
+  ```
+
+  Users' servers the map does not name are dropped. Users pick their own names,
+  so pass `KeepUserServers()` for an agent that should keep whatever servers
+  users add; named ones are still narrowed. A kept global wins over a user's
+  server with the same name, as usual.
+
+  Tool names are original server names, before any prefix. A tool filter narrows
+  the server's own `ServerConfig.ToolFilter` and cannot restore a tool it
+  excludes; per-run `MCPSelection.Tools` narrows further. The filter also applies
+  when tools are called, so a server or tool left out is neither listed nor
+  callable. Unknown server names are ignored. A global left out does not shadow a
+  kept user server with the same name; OAuth grants stay bound to the global
+  definition. The filtered store is read-only: give `NewHandler` the unfiltered
+  store so users manage their servers there and every global name stays reserved.
 - `Put(ctx, namespace, config)` and `Delete(ctx, namespace, name)` form the optional
   `MutableMCPServerConfigStore` interface. Put uses its namespace argument rather
   than trusting `config.Namespace`.
@@ -67,7 +93,7 @@ The file format is a JSON array of `ServerConfig` values:
 ```go
 statuses, tools, err := client.ListTools(ctx, namespace, runContext)
 
-// The optional selection narrows availability for this run.
+// The optional selection narrows the namespace's own servers for this run.
 statuses, tools, err = client.ListTools(ctx, namespace, runContext, agents.MCPSelection{
     Disable: []string{"archive"},
     Tools: map[string]agents.MCPToolSelection{
@@ -77,11 +103,14 @@ statuses, tools, err = client.ListTools(ctx, namespace, runContext, agents.MCPSe
 ```
 
 Agents pass `AgentInput.MCP` automatically. AG-UI accepts the same selection in
-`forwardedProps.mcp`. Global servers are always enabled and cannot be disabled.
-Namespace-owned servers are enabled by default, including newly added servers,
-unless their names appear in Disable, the same rule as skills. Tool selection narrows the configured filter; it cannot restore
-a tool excluded by `ServerConfig.ToolFilter`. Names are the original server tool
-names before prefixes. An empty Include selects all tools and Exclude wins.
+`forwardedProps.mcp`. Global servers are mandatory: a run can neither disable
+them nor narrow their tools, so their names are ignored in both `Disable` and
+`Tools`, the same rule as global skills. Narrow a global server for an agent with
+`ServerConfig.ToolFilter` or `Filter` instead. Namespace-owned servers are
+enabled by default, including newly added servers, unless their names appear in
+Disable. Tool selection narrows a namespace server's configured filter; it cannot
+restore a tool excluded by `ServerConfig.ToolFilter`. Names are the original
+server tool names before prefixes. An empty Include selects all tools and Exclude wins.
 
 An individual connection/authentication failure becomes a connector status so
 other connectors remain usable. Store failures, invalid global definitions, and
@@ -123,14 +152,17 @@ mux.Handle("/mcp/", http.StripPrefix("/mcp", handler))
 | `GET /mcp/{server}/callback` | Validate state/PKCE, exchange code, persist tokens |
 
 OAuth routes require `WithOAuth`. All routes require a trusted namespace resolver;
-without one, requests are forbidden. Global and inline configurations are
+without one, requests are forbidden. Writes go to the store passed to
+`NewHandler`; stores added with `WithReadOnlyStores`, such as an `InlineStore`,
+are listed, reserve their names, and serve OAuth connect, but are never written.
+Global configurations, and user configurations a read-only store supplies, are
 read-only. User HTTP writes allow remote MCP transports, not local process
 commands or environment variables. Read-only custom stores support listing but
 reject writes. Applications own user authentication.
 
 Namespace-owned definitions cannot contain `{{` template delimiters, including
 in headers or nested metadata. Registration rejects them before persistence;
-file loading, inline definitions, and client discovery validate the same rule.
+file loading and client discovery validate the same rule.
 Only developer-owned global definitions can resolve templates against run context.
 Literal user-supplied headers and metadata remain supported.
 

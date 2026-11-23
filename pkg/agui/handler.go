@@ -36,7 +36,7 @@ type options struct {
 	a2aBaseURL         string
 	a2aHandlerOptions  func(agentName, namespace string) []a2asrv.RequestHandlerOption
 	a2aAuthorizer      agents.A2AAuthorizer
-	skillStore         skills.Store
+	skillStore         skills.MutableStore
 	attachmentStore    attachments.UploadStore
 	attachmentMaxBytes int64
 	mcpStore           mcpclient.MCPServerConfigStore
@@ -68,7 +68,9 @@ func WithRoutines(service *routines.Service, schedulers ...routines.Scheduler) O
 // per agent in code, are always on, and never appear here; uploads cannot reuse
 // a registered agent's global skill name. Protect management routes with
 // application authorization middleware.
-func WithSkillStore(store skills.Store) Option { return func(o *options) { o.skillStore = store } }
+func WithSkillStore(store skills.MutableStore) Option {
+	return func(o *options) { o.skillStore = store }
+}
 
 // WithAttachmentStore enables upload/download endpoints and owned file references.
 // Give the same store to the agent's middleware.NewAttachmentMiddleware, which resolves
@@ -79,8 +81,9 @@ func WithAttachmentStore(store attachments.UploadStore) Option {
 }
 
 // WithMCPStore mounts connector management and OAuth routes under /mcp.
-// Pass the same config store and optional OAuth provider used by the agent client.
-// The handler always uses AG-UI's authenticated namespace resolver.
+// Pass the writable config store and the agent client's OAuth provider, plus
+// mcpclient.WithReadOnlyStores for the client's other stores, such as an
+// InlineStore. The handler always uses AG-UI's authenticated namespace resolver.
 func WithMCPStore(store mcpclient.MCPServerConfigStore, handlerOptions ...mcpclient.HandlerOption) Option {
 	return func(o *options) { o.mcpStore = store; o.mcpOptions = handlerOptions }
 }
@@ -155,7 +158,7 @@ func buildOptions(opts []Option) options {
 //
 // The caller's own skills are not scoped to an agent: /skills manages them,
 // and every agent using the store can read them. An agent's built-in skills
-// are configured in code, so /agents/{agent}/skills lists them per agent. Runs turn them off with
+// are configured by the server, so /agents/{agent}/skills lists them per agent. Runs turn them off with
 // forwardedProps.skills.disable; an agent's global skills are always on.
 //
 // The run endpoint accepts the canonical AG-UI RunAgentInput body and
@@ -844,7 +847,7 @@ func collectHeaders(headers http.Header) map[string]string {
 	return out
 }
 
-// BuiltInSkill is one of an agent's developer-owned skills: configured in code,
+// BuiltInSkill is one of an agent's developer-owned skills: configured by the server,
 // always on, and never managed through /skills.
 type BuiltInSkill struct {
 	Name        string `json:"name"`

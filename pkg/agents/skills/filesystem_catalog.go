@@ -135,57 +135,24 @@ func (r *filesystemCatalog) get(name string) (agents.Skill, bool) {
 	return agents.Skill{}, false
 }
 
-// Read returns the named skill's instructions — the SKILL.md body with the
-// frontmatter stripped, since the model already has the name and description
-// from the prompt.
-func (r *filesystemCatalog) read(name string) (string, error) {
+// bundle reads the named skill's folder: SKILL.md and every bundled resource,
+// keyed by path relative to the folder, so nothing outside it is reachable. An
+// unknown name is ErrNotFound, so a client can look for it in another catalog.
+func (r *filesystemCatalog) bundle(name string) (Bundle, error) {
 	entry, ok := r.entries[name]
+	skill, _ := r.get(name)
 	if !ok {
-		return "", r.unknownSkill(name)
+		return Bundle{}, ErrNotFound
 	}
-
-	data, err := fs.ReadFile(entry.source.fsys, path.Join(entry.dir, agents.SkillFileName))
-	if err != nil {
-		return "", err
+	files := map[string][]byte{}
+	for _, file := range append([]string{agents.SkillFileName}, skill.Resources...) {
+		data, err := fs.ReadFile(entry.source.fsys, path.Join(entry.dir, file))
+		if err != nil {
+			return Bundle{}, err
+		}
+		files[file] = data
 	}
-
-	_, body, err := parseSkillFrontmatter(data)
-	if err != nil {
-		return "", err
-	}
-
-	return body, nil
-}
-
-// ReadFile returns one of the skill's bundled resources, named relative to the
-// skill folder. Only files the skill actually bundles are reachable: a
-// traversing path resolves inside the folder first and then has to match a
-// known resource, so it cannot reach another skill or the rest of the
-// filesystem the skills were read from.
-func (r *filesystemCatalog) readFile(name, file string) (string, error) {
-	skill, ok := r.get(name)
-	if !ok {
-		return "", r.unknownSkill(name)
-	}
-
-	// Resolving against "/" collapses any ".." before it can escape, so the
-	// result is always a path inside the skill folder.
-	rel := strings.TrimPrefix(path.Clean("/"+strings.TrimSpace(file)), "/")
-	if rel == "" || rel == "." {
-		return "", fmt.Errorf("no file given for skill %q", name)
-	}
-
-	if rel != agents.SkillFileName && !slices.Contains(skill.Resources, rel) {
-		return "", fmt.Errorf("skill %q has no file %q; it bundles: %s", name, rel, resourceList(skill))
-	}
-
-	entry := r.entries[name]
-	data, err := fs.ReadFile(entry.source.fsys, path.Join(entry.dir, rel))
-	if err != nil {
-		return "", err
-	}
-
-	return string(data), nil
+	return Bundle{Files: files}, nil
 }
 
 func (r *filesystemCatalog) load(source skillSource, dir string) (agents.Skill, error) {
@@ -257,17 +224,6 @@ func listResources(fsys fs.FS, dir string) ([]string, error) {
 	return resources, nil
 }
 
-func (r *filesystemCatalog) unknownSkill(name string) error {
-	names := make([]string, 0, len(r.skills))
-	for _, skill := range r.skills {
-		names = append(names, skill.Name)
-	}
-	if len(names) == 0 {
-		return fmt.Errorf("unknown skill %q: no skills are loaded", name)
-	}
-	return fmt.Errorf("unknown skill %q; available skills: %s", name, strings.Join(names, ", "))
-}
-
 // locate turns a path inside the source into one its author would recognise.
 func (s skillSource) locate(p string) string {
 	if s.root == "" {
@@ -307,11 +263,4 @@ func relTo(dir, p string) (string, error) {
 		return "", fmt.Errorf("%s is not inside %s", p, dir)
 	}
 	return rel, nil
-}
-
-func resourceList(skill agents.Skill) string {
-	if len(skill.Resources) == 0 {
-		return "no files besides " + agents.SkillFileName
-	}
-	return strings.Join(skill.Resources, ", ")
 }

@@ -14,17 +14,19 @@ type SkillClient = agents.SkillClient
 type SkillSelection = agents.SkillSelection
 type ListedSkill = agents.ListedSkill
 
-// SkillSource is a fixed set of developer-owned (global) skills.
-type SkillSource = skills.Source
+// SkillStore lists and reads skills by namespace; its empty namespace holds
+// global (developer-owned) skills — see skills.Store.
+type SkillStore = skills.Store
 
-// NewSkillClient reads users' own skills from a store; add globals with WithGlobalSkills.
+// NewSkillClient reads skills from one or more stores, such as a store of
+// users' uploads and a folder of built-in skills.
 var NewSkillClient = skills.NewClient
 
-// NewDirSkillSource discovers global skills from a folder at run time.
-var NewDirSkillSource = skills.NewDirSource
+// NewDirSkillStore serves a folder of skills as global skills, rediscovered on every listing.
+var NewDirSkillStore = skills.NewDirStore
 
-// NewFSSkillSource supports embed.FS and other io/fs implementations.
-var NewFSSkillSource = skills.NewFSSource
+// NewFSSkillStore supports embed.FS and other io/fs implementations.
+var NewFSSkillStore = skills.NewFSStore
 
-// FilterSkillSource serves only the named skills of a global source.
-var FilterSkillSource = skills.Filter
+// FilterSkillStore lists only the named skills of a store, global or users' own.
+var FilterSkillStore = skills.Filter

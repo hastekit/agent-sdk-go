@@ -39,11 +39,11 @@ func oauthTestKey(name, tokenURL string) string {
 	return OAuthCredentialKey(Connector{Name: name, Authorization: oauthTestConfig(tokenURL)})
 }
 
-func oauthTestStore(tokenURL string) *Store {
-	return NewMemoryStore().WithMCPServerConfig([]ServerConfig{
-		{Name: "gmail", Endpoint: "https://gmail.example/mcp", Authorization: oauthTestConfig(tokenURL)},
-		{Name: "calendar", Endpoint: "https://gmail.example/mcp", Authorization: oauthTestConfig(tokenURL)},
-	})
+func oauthTestStore(tokenURL string) *InlineStore {
+	return NewInlineStore(
+		ServerConfig{Name: "gmail", Endpoint: "https://gmail.example/mcp", Authorization: oauthTestConfig(tokenURL)},
+		ServerConfig{Name: "calendar", Endpoint: "https://gmail.example/mcp", Authorization: oauthTestConfig(tokenURL)},
+	)
 }
 
 // Concurrent requests refresh once and persist rotated refresh tokens without changing principal identity.

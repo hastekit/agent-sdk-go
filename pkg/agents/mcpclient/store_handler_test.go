@@ -11,30 +11,33 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestStoreInlineCompositionIsImmutable(t *testing.T) {
-	// Inline values replace matching records in the copy, while the base remains unchanged.
-	base := NewMemoryStore()
-	require.NoError(t, base.Put(t.Context(), "", ServerConfig{Name: "docs", Endpoint: "https://original.example/mcp"}))
+func TestInlineStoreCopiesAndValidatesItsConfigs(t *testing.T) {
+	// Definitions are copied in and out, so no caller mutation reaches the store.
 	configs := []ServerConfig{{Name: "docs", Endpoint: "https://inline.example/mcp", Headers: map[string]string{"key": "original"}}}
-	overlay := base.WithMCPServerConfig(configs)
+	inline := NewInlineStore(configs...)
 	configs[0].Headers["key"] = "mutated"
-	listed, err := overlay.ListServerConfigs(t.Context(), "alice", nil)
+	listed, err := inline.ListServerConfigs(t.Context(), "alice", nil)
 	require.NoError(t, err)
 	require.Equal(t, "original", listed[0].Headers["key"])
 	listed[0].Headers["key"] = "changed again"
-	listed, err = overlay.ListServerConfigs(t.Context(), "alice", nil)
+	listed, err = inline.ListServerConfigs(t.Context(), "", nil)
 	require.NoError(t, err)
 	require.Equal(t, "original", listed[0].Headers["key"])
-	original, err := base.ListServerConfigs(t.Context(), "alice", nil)
-	require.NoError(t, err)
-	require.Equal(t, "https://original.example/mcp", original[0].Endpoint)
 
-	// Derived views see new persisted records but cannot overwrite their own inline definitions.
-	require.NoError(t, overlay.Put(t.Context(), "alice", ServerConfig{Name: "notes", Endpoint: "https://notes.example/mcp"}))
-	original, err = base.ListServerConfigs(t.Context(), "alice", nil)
-	require.NoError(t, err)
-	require.Len(t, original, 2)
-	require.ErrorIs(t, overlay.Delete(t.Context(), "", "docs"), ErrReadOnlyConfig)
+	// Inline definitions are global; a namespace or invalid value fails the listing.
+	for _, bad := range []ServerConfig{
+		{Name: "docs", Namespace: "alice", Endpoint: "https://inline.example/mcp"},
+		{Name: "docs", Transport: "carrier-pigeon"},
+	} {
+		_, err = NewInlineStore(bad).ListServerConfigs(t.Context(), "alice", nil)
+		require.Error(t, err)
+	}
+
+	// A server defined inline and in a persisted store is a duplicate, never an override.
+	persisted := NewMemoryStore()
+	require.NoError(t, persisted.Put(t.Context(), "", ServerConfig{Name: "docs", Endpoint: "https://original.example/mcp"}))
+	_, _, err = NewClient(persisted, inline).ListTools(t.Context(), "alice", nil)
+	require.ErrorContains(t, err, "duplicate global MCP server")
 }
 
 type contextConfigStore struct {
@@ -60,7 +63,7 @@ func TestClientMultipleStoresAndRunContext(t *testing.T) {
 
 	// Duplicate source definitions fail clearly instead of choosing a store by accident.
 	configs := []ServerConfig{{Name: "duplicate", Endpoint: "https://example.com/mcp"}}
-	client = NewClient(NewMemoryStore().WithMCPServerConfig(configs), NewMemoryStore().WithMCPServerConfig(configs))
+	client = NewClient(NewInlineStore(configs...), NewInlineStore(configs...))
 	_, _, err = client.ListTools(t.Context(), "alice", nil)
 	require.ErrorContains(t, err, "duplicate")
 }
@@ -68,11 +71,11 @@ func TestClientMultipleStoresAndRunContext(t *testing.T) {
 func TestHandlerOwnsNamespaceAndProtectsDeveloperConfigs(t *testing.T) {
 	// Use real file persistence so HTTP updates can be verified across store instances.
 	path := t.TempDir() + "/servers.json"
-	base, err := NewFileStore(path)
+	store, err := NewFileStore(path)
 	require.NoError(t, err)
-	store := base.WithMCPServerConfig([]ServerConfig{{Name: "global", Endpoint: "https://global.example/mcp", Headers: map[string]string{"Authorization": "secret-header"}}})
+	builtins := NewInlineStore(ServerConfig{Name: "global", Endpoint: "https://global.example/mcp", Headers: map[string]string{"Authorization": "secret-header"}})
 	require.NoError(t, store.Put(t.Context(), "bob", ServerConfig{Name: "private", Endpoint: "https://bob.example/mcp"}))
-	handler := NewHandler(store, WithNamespaceResolver(func(r *http.Request) (string, error) { return r.Header.Get("Subject"), nil }))
+	handler := NewHandler(store, WithReadOnlyStores(builtins), WithNamespaceResolver(func(r *http.Request) (string, error) { return r.Header.Get("Subject"), nil }))
 	request := func(method, path, subject, body string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(method, path, strings.NewReader(body))
 		req.Header.Set("Subject", subject)
@@ -138,4 +141,46 @@ func TestOAuthHandlerReadsStoreBeforeDiscovery(t *testing.T) {
 	require.Contains(t, response.Header().Get("Location"), "client_id=replacement")
 	require.NoError(t, store.Delete(t.Context(), "alice", "mail"))
 	require.Equal(t, http.StatusNotFound, connect().Code)
+}
+
+// provisionedStore stands in for application-managed records, such as a
+// per-user server the application provisions: listed, but not the user's to edit.
+type provisionedStore struct{}
+
+func (provisionedStore) ListServerConfigs(_ context.Context, namespace string, _ map[string]any) ([]ServerConfig, error) {
+	return []ServerConfig{{Name: "provisioned", Namespace: namespace, Endpoint: "https://provisioned.example/mcp"}}, nil
+}
+
+func TestHandlerNeverWritesReadOnlyStores(t *testing.T) {
+	store := NewMemoryStore()
+	require.NoError(t, store.Put(t.Context(), "alice", ServerConfig{Name: "mine", Endpoint: "https://mine.example/mcp"}))
+	builtins := NewInlineStore(ServerConfig{Name: "docs", Endpoint: "https://docs.example/mcp"})
+	handler := NewHandler(store, WithReadOnlyStores(builtins, provisionedStore{}), WithNamespaceResolver(func(*http.Request) (string, error) { return "alice", nil }))
+	request := func(method, path, body string) *httptest.ResponseRecorder {
+		result := httptest.NewRecorder()
+		handler.ServeHTTP(result, httptest.NewRequest(method, path, strings.NewReader(body)))
+		return result
+	}
+
+	// Every store's servers are listed; only the writable store's own records are editable.
+	response := request("GET", "/", "")
+	require.Equal(t, http.StatusOK, response.Code)
+	var summaries []ConnectorInfo
+	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &summaries))
+	readOnly := map[string]bool{}
+	for _, summary := range summaries {
+		readOnly[summary.Name] = summary.ReadOnly
+	}
+	require.Equal(t, map[string]bool{"docs": true, "mine": false, "provisioned": true}, readOnly)
+
+	// Writes to a read-only store's names are refused and never reach the writable store.
+	for _, name := range []string{"docs", "provisioned"} {
+		require.Equal(t, http.StatusForbidden, request("PUT", "/"+name, `{"endpoint":"https://evil.example/mcp"}`).Code, name)
+		require.Equal(t, http.StatusForbidden, request("DELETE", "/"+name, "").Code, name)
+	}
+	records, err := store.ListServerConfigs(t.Context(), "alice", nil)
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+	require.Equal(t, http.StatusNoContent, request("PUT", "/mine", `{"endpoint":"https://mine.example/v2"}`).Code)
+	require.Equal(t, http.StatusNoContent, request("DELETE", "/mine", "").Code)
 }

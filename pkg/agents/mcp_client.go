@@ -5,8 +5,11 @@ import (
 	"slices"
 )
 
-// MCPSelection selects servers and their original, unprefixed tool names for a run.
-// Global servers are always enabled. Namespace servers are enabled unless disabled.
+// MCPSelection selects a namespace's own servers and their original, unprefixed
+// tool names for a run. Global servers are mandatory: a run can neither disable
+// them nor narrow their tools, so names of global servers are ignored in both
+// Disable and Tools; narrow those with ServerConfig.ToolFilter or
+// mcpclient.Filter instead. Namespace servers are enabled unless disabled.
 // Unknown names are ignored across handoffs. It mirrors SkillSelection.
 // Selection cannot expose tools excluded by the server's configured ToolFilter.
 type MCPSelection struct {
@@ -14,7 +17,8 @@ type MCPSelection struct {
 	Tools   map[string]MCPToolSelection `json:"tools,omitempty"`
 }
 
-// MCPToolSelection narrows a server's tools. An empty Include means all configured tools.
+// MCPToolSelection narrows a namespace-owned server's tools for one run. An
+// empty Include means all configured tools; Exclude wins. Global servers ignore it.
 type MCPToolSelection struct {
 	Include []string `json:"include,omitempty"`
 	Exclude []string `json:"exclude,omitempty"`

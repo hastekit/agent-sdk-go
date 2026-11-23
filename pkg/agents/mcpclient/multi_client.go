@@ -239,7 +239,12 @@ func (c *Client) ListTools(ctx context.Context, namespace string, runContext map
 		var bound []agents.Tool
 		var conflict string
 		claimed := map[string]bool{}
-		selection := selected.Tools[name]
+		// Like Disable, a run narrows only a namespace's own servers: a global
+		// server keeps every tool its configuration allows.
+		var selection agents.MCPToolSelection
+		if config.Namespace != "" {
+			selection = selected.Tools[name]
+		}
 		for _, tool := range listed {
 			descriptor := tool.GetToolDescriptor()
 			if descriptor == nil || descriptor.ToolUnion.OfFunction == nil {

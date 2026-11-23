@@ -21,19 +21,19 @@ func main() {
 	storeDir := flag.String("skill-store", "./data/skills", "directory for users' uploaded skills")
 	flag.Parse()
 
-	// Users' own skills, shared by every agent that uses this store.
+	// Users' own skills, shared by every agent that uses this store. Its empty
+	// namespace could hold global skills too; this example keeps them elsewhere.
 	store, err := skills.NewFileStore(*storeDir)
 	if err != nil {
 		log.Fatal(err)
 	}
-	userSkills := skills.NewClient(store)
 
-	// Developer-owned global skills for this agent: always on, never shadowed by a user's.
-	builtins, err := skills.NewDirSource("./samples/skills/skills")
+	// Developer-owned global skills: always on, never shadowed by a user's.
+	builtins, err := skills.NewDirStore("./samples/skills/skills")
 	if err != nil {
 		log.Fatal(err)
 	}
-	// Implement teamSkills with a database or HTTP-backed catalog and reader.
+	// Implement teamSkills with a database or HTTP-backed store.
 	// List runs at the start of each run, so new skills appear without rebuilding the agent.
 	team := &teamSkills{}
 
@@ -41,7 +41,7 @@ func main() {
 	agent, err := hastekit.NewAgent(&hastekit.AgentConfig{
 		Name: "ReleaseAssistant", LLM: client.Model("OpenAI/gpt-4.1-mini"),
 		Instruction: hastekit.NewPrompt("Help prepare releases. Read relevant skills before answering.", prompts.WithResolver(prompts.DefaultResolvers()...)),
-		SkillClient: userSkills.WithGlobalSkills(builtins, team),
+		SkillClient: skills.NewClient(store, builtins, team),
 	})
 	if err != nil {
 		log.Fatal(err)
@@ -73,28 +73,35 @@ func main() {
 	fmt.Println(result.Text())
 }
 
-// teamSkills is a custom global source; any skills.Source can back an agent's globals.
+// teamSkills is a custom read-only store; any skills.Store can back an agent's skills.
+// It serves global skills, so it answers only for the empty namespace.
 type teamSkills struct{}
 
-func (s *teamSkills) List(ctx context.Context) ([]hastekit.Skill, error) {
-	return []hastekit.Skill{
-		{Name: "release-review", Description: "Review a release before shipping.", Resources: []string{"checklist.md"}},
-		{Name: "writing", Description: "Write concise release notes."},
-	}, ctx.Err()
+var teamBundles = map[string]skills.Bundle{
+	"release-review": {Files: map[string][]byte{
+		"SKILL.md":     []byte("---\nname: release-review\ndescription: Review a release before shipping.\n---\nReview the release using checklist.md. Read it with read_skill before advising the user.\n"),
+		"checklist.md": []byte("Check tests, upgrade notes, rollback steps, and release ownership.\n"),
+	}},
+	"writing": {Files: map[string][]byte{
+		"SKILL.md": []byte("---\nname: writing\ndescription: Write concise release notes.\n---\nUse short sentences. Explain user-visible changes and required migration steps.\n"),
+	}},
 }
 
-func (s *teamSkills) Read(ctx context.Context, name, file string) (string, error) {
-	if err := ctx.Err(); err != nil {
-		return "", err
+func (s *teamSkills) List(ctx context.Context, namespace string, _ skills.ListOptions) (skills.Page, error) {
+	page := skills.Page{Skills: []skills.Metadata{}}
+	if namespace == "" {
+		page.Skills = append(page.Skills,
+			skills.Metadata{Name: "release-review", Description: "Review a release before shipping.", Resources: []string{"checklist.md"}},
+			skills.Metadata{Name: "writing", Description: "Write concise release notes."},
+		)
 	}
-	switch {
-	case name == "release-review" && (file == "" || file == "SKILL.md"):
-		return "Review the release using checklist.md. Read it with read_skill before advising the user.", nil
-	case name == "release-review" && file == "checklist.md":
-		return "Check tests, upgrade notes, rollback steps, and release ownership.", nil
-	case name == "writing" && (file == "" || file == "SKILL.md"):
-		return "Use short sentences. Explain user-visible changes and required migration steps.", nil
-	default:
-		return "", fmt.Errorf("unknown skill or resource: %s/%s", name, file)
+	return page, ctx.Err()
+}
+
+func (s *teamSkills) Get(ctx context.Context, namespace, name string) (skills.Bundle, error) {
+	bundle, ok := teamBundles[name]
+	if namespace != "" || !ok {
+		return skills.Bundle{}, skills.ErrNotFound
 	}
+	return bundle, ctx.Err()
 }

@@ -23,10 +23,10 @@ func TestMCPMetaTemplatesInsideStepBody(t *testing.T) {
 	})
 	hs := httptest.NewServer(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, nil))
 	t.Cleanup(func() { hs.CloseClientConnections(); hs.Close() })
-	client := mcpclient.NewClient(mcpclient.NewMemoryStore().WithMCPServerConfig([]mcpclient.ServerConfig{{Name: t.Name(),
+	client := mcpclient.NewClient(mcpclient.NewInlineStore(mcpclient.ServerConfig{Name: t.Name(),
 		Endpoint:  hs.URL,
 		Transport: mcpclient.TransportStreamableHTTP,
-		Meta:      map[string]any{"thread_id": "{{thread_id}}", "run_id": "{{run_id}}"}}}))
+		Meta:      map[string]any{"thread_id": "{{thread_id}}", "run_id": "{{run_id}}"}}))
 	wrapper := NewRestateMCPClient(nil, client, nil)
 	result, err := wrapper.executeTool(t.Context(), &agents.BaseTool{Name: "echo", MCPServerName: t.Name()}, &agents.ToolCall{
 		ThreadID: "thread", RunContext: map[string]any{"run_id": "run", "thread_id": "thread"},

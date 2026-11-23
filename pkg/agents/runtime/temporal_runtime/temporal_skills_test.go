@@ -17,13 +17,13 @@ import (
 func skillSource(t *testing.T) *skills.Client {
 	t.Helper()
 
-	source, err := skills.NewFSSource(fstest.MapFS{
+	store, err := skills.NewFSStore(fstest.MapFS{
 		"skills/changelog/SKILL.md": &fstest.MapFile{Data: []byte(
 			"---\nname: changelog\ndescription: Write a release changelog entry.\n---\n\nGroup by Added and Fixed.\n")},
 	})
 	require.NoError(t, err)
 
-	return skills.NewClient(nil).WithGlobalSkills(source)
+	return skills.NewClient(store)
 }
 
 // The agent adds the tool that reads its skills itself, so it never appears in
