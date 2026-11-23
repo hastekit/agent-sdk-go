@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/constants"
 	"github.com/hastekit/agent-sdk-go/pkg/genai"
 	"go.opentelemetry.io/otel/attribute"
 )
@@ -127,12 +128,19 @@ func (o *AgentOutput) Text() string {
 	}
 	var b strings.Builder
 	for _, message := range o.Output {
-		if message.OfOutputMessage == nil || message.OfOutputMessage.Content == nil {
-			continue
+		if message.OfOutputMessage != nil && message.OfOutputMessage.Content != nil {
+			for _, content := range *message.OfOutputMessage.Content {
+				if content.OfOutputText != nil {
+					b.WriteString(content.OfOutputText.Text)
+				}
+			}
 		}
-		for _, content := range *message.OfOutputMessage.Content {
-			if content.OfOutputText != nil {
-				b.WriteString(content.OfOutputText.Text)
+		// A durable runtime's JSON result decodes assistant messages into this shape.
+		if easy := message.OfEasyInput; easy != nil && easy.Role == constants.RoleAssistant {
+			for _, content := range easy.Content.OfInputMessageList {
+				if content.OfOutputText != nil {
+					b.WriteString(content.OfOutputText.Text)
+				}
 			}
 		}
 	}

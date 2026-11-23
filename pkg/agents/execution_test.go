@@ -2,12 +2,14 @@ package agents_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
 
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/streambroker"
+	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/constants"
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm/responses"
 	"github.com/stretchr/testify/require"
 )
@@ -152,6 +154,21 @@ func TestResultTextHandlesEmptyAndMixedContent(t *testing.T) {
 		}}},
 	}}
 	require.Equal(t, "hello world", result.Text())
+}
+
+// A durable runtime hands the result back as JSON, which decodes assistant output differently.
+func TestResultTextSurvivesAJSONRoundTrip(t *testing.T) {
+	result := &agents.AgentOutput{Output: []responses.InputMessageUnion{
+		responses.UserMessage("exclude user"),
+		{OfOutputMessage: &responses.OutputMessage{ID: "msg_1", Role: constants.RoleAssistant, Content: &responses.OutputContent{
+			{OfOutputText: &responses.OutputTextContent{Text: "hello world"}},
+		}}},
+	}}
+	data, err := json.Marshal(result)
+	require.NoError(t, err)
+	var decoded agents.AgentOutput
+	require.NoError(t, json.Unmarshal(data, &decoded))
+	require.Equal(t, "hello world", decoded.Text())
 }
 
 func (executionRuntimeFunc) StreamBroker() agents.StreamBroker { return nil }

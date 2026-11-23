@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
+	"github.com/hastekit/agent-sdk-go/pkg/agents/agentfactory"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/runtime/restate_runtime"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/runtime/temporal_runtime"
 	restate "github.com/restatedev/sdk-go"
@@ -72,6 +73,27 @@ func (r *TemporalRuntime) RegisterAgent(options *agents.AgentOptions) error {
 	return r.lifecycle.register(options)
 }
 
+// RegisterAgentFactory serves agents built from stored specs. Register it before Serve;
+// specs stored later need no worker restart.
+func (r *TemporalRuntime) RegisterAgentFactory(factory *agents.AgentFactory) error {
+	if _, err := temporal_runtime.NewFactoryAgentWorkflow(factory, r.broker); err != nil {
+		return err
+	}
+	return r.lifecycle.registerFactory(factory)
+}
+
+// BuildAgent loads ref and builds it; its runs start the shared factory workflow with the spec.
+func (r *TemporalRuntime) BuildAgent(ctx context.Context, ref agents.AgentRef) (*agents.Agent, error) {
+	factory := r.lifecycle.servingFactory()
+	if factory == nil {
+		return nil, fmt.Errorf("no agent factory registered")
+	}
+	return agentfactory.Build(ctx, factory, ref, func(options *agents.AgentOptions) {
+		options.Runtime = r
+		options.StreamBroker = r.broker
+	})
+}
+
 // Serve runs the worker until ctx ends or startup fails. The caller owns the
 // runtime and must Close it after Serve and outstanding executions finish.
 func (r *TemporalRuntime) Serve(ctx context.Context) error {
@@ -84,6 +106,18 @@ func (r *TemporalRuntime) Serve(ctx context.Context) error {
 		return fmt.Errorf("no temporal client available")
 	}
 	w := worker.New(r.client, "AgentWorkflowTaskQueue", worker.Options{})
+	if factory := r.lifecycle.servingFactory(); factory != nil {
+		factoryWorkflow, err := temporal_runtime.NewFactoryAgentWorkflow(factory, r.broker)
+		if err != nil {
+			return err
+		}
+		for name, fn := range factoryWorkflow.GetActivities() {
+			w.RegisterActivityWithOptions(fn, activity.RegisterOptions{Name: name})
+		}
+		for name, fn := range factoryWorkflow.GetWorkflows() {
+			w.RegisterWorkflowWithOptions(fn, workflow.RegisterOptions{Name: name})
+		}
+	}
 	for _, options := range configs {
 		proxy := temporal_runtime.NewTemporalAgent(configs, options, r.broker)
 		for name, fn := range proxy.GetActivities() {
@@ -189,9 +223,31 @@ func (r *RestateRuntime) Close() error { r.lifecycle.close(); return nil }
 type runtimeLifecycle struct {
 	mu      sync.Mutex
 	configs map[string]*agents.AgentOptions
+	factory *agents.AgentFactory
 	cancel  context.CancelFunc
 	done    chan struct{}
 	closed  bool
+}
+
+// registerFactory installs the one factory a runtime serves.
+func (r *runtimeLifecycle) registerFactory(factory *agents.AgentFactory) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed || r.cancel != nil {
+		return fmt.Errorf("runtime is serving or closed")
+	}
+	if r.factory != nil {
+		return fmt.Errorf("an agent factory is already registered")
+	}
+	r.factory = factory
+	return nil
+}
+
+// servingFactory is the registered factory; it cannot change once Serve has begun.
+func (r *runtimeLifecycle) servingFactory() *agents.AgentFactory {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.factory
 }
 
 // register stores the validated configuration resolved by NewAgent. Registration
@@ -224,7 +280,7 @@ func (r *runtimeLifecycle) begin(ctx context.Context) (context.Context, map[stri
 	if r.closed || r.cancel != nil {
 		return nil, nil, nil, fmt.Errorf("runtime is serving or closed")
 	}
-	if len(r.configs) == 0 {
+	if len(r.configs) == 0 && r.factory == nil {
 		return nil, nil, nil, fmt.Errorf("runtime has no registered agents")
 	}
 	ctx, r.cancel = context.WithCancel(ctx)
@@ -255,6 +311,8 @@ func (r *runtimeLifecycle) close() {
 		<-done
 	}
 }
+
+var _ agents.FactoryRuntime = (*TemporalRuntime)(nil)
 
 // StreamBroker returns the broker configured for this runtime.
 func (r *TemporalRuntime) StreamBroker() agents.StreamBroker { return r.broker }

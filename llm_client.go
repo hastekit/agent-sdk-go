@@ -1,6 +1,9 @@
 package sdk
 
 import (
+	"fmt"
+
+	"github.com/hastekit/agent-sdk-go/pkg/agents"
 	"github.com/hastekit/agent-sdk-go/pkg/gateway"
 	"github.com/hastekit/agent-sdk-go/pkg/gateway/llm"
 )
@@ -144,3 +147,13 @@ func (c *LLMClient) Model(id string, opts ...LLMOption) llm.Provider {
 		gateway.WithModel(provider, model),
 	)
 }
+
+// ResolveModel binds a "Provider/model" id, so the client can serve an AgentFactory's specs.
+func (c *LLMClient) ResolveModel(id string) (llm.Provider, error) {
+	if provider, model := llm.ParseModelID(id); provider == "" || model == "" {
+		return nil, fmt.Errorf("model id %q is not Provider/model", id)
+	}
+	return c.Model(id), nil
+}
+
+var _ agents.ModelResolver = (*LLMClient)(nil)

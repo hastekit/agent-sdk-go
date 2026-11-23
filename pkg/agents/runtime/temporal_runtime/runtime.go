@@ -30,10 +30,15 @@ func (r *TemporalRuntime) Run(ctx context.Context, agent *agents.Agent, in *agen
 		in.StreamID = uuid.NewString()
 	}
 
-	run, err := r.client.ExecuteWorkflow(ctx, client.StartWorkflowOptions{
-		TaskQueue: "AgentWorkflowTaskQueue",
-		ID:        in.StreamID,
-	}, agent.Name+"_AgentWorkflow", in)
+	options := client.StartWorkflowOptions{TaskQueue: "AgentWorkflowTaskQueue", ID: in.StreamID}
+	var run client.WorkflowRun
+	var err error
+	if spec := agent.Spec(); spec != nil {
+		// Factory agents share one workflow type and carry their spec, so the run keeps it.
+		run, err = r.client.ExecuteWorkflow(ctx, options, FactoryAgentWorkflowName, spec, in)
+	} else {
+		run, err = r.client.ExecuteWorkflow(ctx, options, agent.Name+"_AgentWorkflow", in)
+	}
 	if err != nil {
 		return nil, err
 	}

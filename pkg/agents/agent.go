@@ -48,6 +48,9 @@ type Agent struct {
 	skillClient          SkillClient
 	clientTools          ClientToolOptions
 
+	// spec is the stored spec a factory built this agent from, and nil otherwise.
+	spec *AgentSpec
+
 	// background waits on the tasks this agent's tools start, and is nil where
 	// nothing can wait — see BackgroundRunner and ErrBackgroundUnsupported.
 	background BackgroundRunner
@@ -110,6 +113,9 @@ type AgentOptions struct {
 	// Note this is not the same as MaxLoops=1, which still executes the first
 	// round of tools and then fails the run with "exceeded maximum loops".
 	SingleTurn bool
+
+	// Spec is the stored spec an AgentFactory built these options from; durable runtimes run it by spec.
+	Spec *AgentSpec
 }
 
 func NewAgent(opts *AgentOptions) *Agent {
@@ -180,6 +186,7 @@ func NewAgent(opts *AgentOptions) *Agent {
 
 	agent := &Agent{
 		Name:                 opts.Name,
+		spec:                 opts.Spec,
 		output:               opts.Output,
 		history:              conversationHistory,
 		instruction:          instruction,
@@ -326,6 +333,16 @@ func (e *Agent) StickyHandoff() bool {
 // before any tool is executed.
 func (e *Agent) SingleTurn() bool {
 	return e.singleTurn
+}
+
+// Spec is the stored spec an AgentFactory built this agent from, or nil for an agent built in code.
+func (e *Agent) Spec() *AgentSpec { return e.spec }
+
+func (e *Agent) specVersion() string {
+	if e.spec == nil {
+		return ""
+	}
+	return e.spec.Version
 }
 
 // StreamBroker returns the broker the agent streams through, for callers
@@ -993,6 +1010,7 @@ func (e *Agent) ExecuteWithRun(ctx context.Context, in *AgentInput, run *history
 						ToolCall: &ToolCall{
 							FunctionCallMessage: &toolCall,
 							AgentName:           e.Name,
+							AgentVersion:        e.specVersion(),
 							Namespace:           in.Namespace,
 							SessionID:           in.SessionID,
 							ThreadID:            in.ThreadID,

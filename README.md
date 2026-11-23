@@ -1523,6 +1523,35 @@ See the [Temporal example](examples/agents/9_temporal_agent/main.go) and
 [Restate example](examples/agents/8_restate_agent/main.go) for worker and HTTP
 serving in one process with signal-driven shutdown.
 
+#### Agents built from stored configuration
+
+When agents are defined by data (a database row per version) rather than Go code,
+store them as `AgentSpec`s and register one `AgentFactory` instead of each agent.
+A spec holds only names: a `Provider/model` id, the instruction, tool names, and
+handoffs to other stored agents. The factory pairs your loader with what those
+names mean on the worker: the LLM client (and its keys), the tools, and history.
+Restate does not support factories yet.
+
+```go
+rt.RegisterAgentFactory(&hastekit.AgentFactory{
+    Load:    db.LoadAgentSpec, // func(ctx, AgentRef) (*AgentSpec, error); wrap ErrAgentNotFound
+    Models:  llmClient,        // resolves spec.Model; keys never leave the worker
+    Tools:   []hastekit.Tool{searchTool, ticketTool},
+    History: history,
+})
+go rt.Serve(ctx)
+
+agent, err := rt.BuildAgent(ctx, hastekit.AgentRef{Name: "support"}) // empty Version: latest
+out, err := agent.Run(ctx, input)
+```
+
+Under Temporal every factory agent runs on one shared workflow, started with the
+spec itself, so agents stored after `Serve` starts need no restart, and a run
+keeps the spec it started with through restarts and replays. A handoff target is
+loaded when the handoff happens, in a journaled activity. The local runtime takes
+the same factory. Under Temporal, values set with `gateway.AddContext` reach every
+activity. See the [agent factory example](examples/agents/16_agent_factory/main.go).
+
 ## Documentation
 
 - **[Full Documentation](https://docs.hastekit.ai/hastekit-sdk/introduction)** - Comprehensive guides and API reference

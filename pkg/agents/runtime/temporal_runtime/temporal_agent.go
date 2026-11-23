@@ -27,67 +27,72 @@ func NewTemporalAgent(configs map[string]*agents.AgentOptions, options *agents.A
 }
 
 func (a *TemporalAgentV2) GetActivities() map[string]interface{} {
-	activities := map[string]interface{}{}
-
-	// One activity owns retention for the whole run, including gaps between model and tool calls.
-	activities[a.options.Name+heartbeatActivitySuffix] = (&streamHeartbeatActivity{broker: a.broker}).Run
+	activities := workerActivities(a.options.Name, a.options, a.broker)
 
 	temporalPrompt := NewTemporalPrompt(a.options.Instruction, agents.PromptMiddlewaresOf(a.options.Middlewares)...)
 	activities[a.options.Name+"_GetPromptActivity"] = temporalPrompt.GetPrompt
 
 	temporalLLM := NewTemporalLLM(a.options.LLM, a.broker, agents.ModelCallMiddlewaresOf(a.options.Middlewares)...)
 	activities[a.options.Name+"_NewStreamingResponsesActivity"] = temporalLLM.NewStreamingResponsesActivity
+	return activities
+}
 
-	temporalConversationPersistence := NewTemporalConversationPersistence(a.options.History.ConversationPersistenceAdapter, agents.HistoryMiddlewaresOf(a.options.Middlewares)...)
-	activities[a.options.Name+"_LoadMessagesActivity"] = temporalConversationPersistence.LoadMessages
-	activities[a.options.Name+"_SaveMessagesActivity"] = temporalConversationPersistence.SaveMessages
-	activities[a.options.Name+"_SaveSummaryActivity"] = temporalConversationPersistence.SaveSummary
+// workerActivities are the activities whose real side is fixed per worker: everything but
+// the prompt and the model. Factory agents share one set of them under one prefix.
+func workerActivities(prefix string, options *agents.AgentOptions, broker agents.StreamBroker) map[string]interface{} {
+	activities := map[string]interface{}{}
 
-	temporalStreamBroker := NewTemporalStreamBroker(a.broker)
-	activities[a.options.Name+"_IsStoppedActivity"] = temporalStreamBroker.IsStopped
-	activities[a.options.Name+"_DrainMessagesActivity"] = temporalStreamBroker.DrainMessages
-	activities[a.options.Name+"_WaitToolResultActivity"] = temporalStreamBroker.WaitToolResult
+	// One activity owns retention for the whole run, including gaps between model and tool calls.
+	activities[prefix+heartbeatActivitySuffix] = (&streamHeartbeatActivity{broker: broker}).Run
 
-	if a.options.History.Summarizer != nil {
-		temporalSummarizer := NewTemporalConversationSummarizer(a.options.History.Summarizer)
-		activities[a.options.Name+"_SummarizerActivity"] = temporalSummarizer.Summarize
+	temporalConversationPersistence := NewTemporalConversationPersistence(options.History.ConversationPersistenceAdapter, agents.HistoryMiddlewaresOf(options.Middlewares)...)
+	activities[prefix+"_LoadMessagesActivity"] = temporalConversationPersistence.LoadMessages
+	activities[prefix+"_SaveMessagesActivity"] = temporalConversationPersistence.SaveMessages
+	activities[prefix+"_SaveSummaryActivity"] = temporalConversationPersistence.SaveSummary
+
+	temporalStreamBroker := NewTemporalStreamBroker(broker)
+	activities[prefix+"_IsStoppedActivity"] = temporalStreamBroker.IsStopped
+	activities[prefix+"_DrainMessagesActivity"] = temporalStreamBroker.DrainMessages
+	activities[prefix+"_WaitToolResultActivity"] = temporalStreamBroker.WaitToolResult
+
+	if options.History.Summarizer != nil {
+		temporalSummarizer := NewTemporalConversationSummarizer(options.History.Summarizer)
+		activities[prefix+"_SummarizerActivity"] = temporalSummarizer.Summarize
 	}
 
-	if a.options.History.MessageFilter != nil {
-		temporalMessageFilter := NewTemporalMessageFilter(a.options.History.MessageFilter)
-		activities[a.options.Name+"_MessageFilterActivity"] = temporalMessageFilter.Filter
+	if options.History.MessageFilter != nil {
+		temporalMessageFilter := NewTemporalMessageFilter(options.History.MessageFilter)
+		activities[prefix+"_MessageFilterActivity"] = temporalMessageFilter.Filter
 	}
 
-	for _, tool := range a.options.Tools {
-		temporalTool := NewTemporalTool(tool, a.broker, agents.ToolCallMiddlewaresOf(a.options.Middlewares)...)
-		activities[getToolName(a.options.Name, tool)+"_ExecuteToolActivity"] = temporalTool.Execute
+	for _, tool := range options.Tools {
+		temporalTool := NewTemporalTool(tool, broker, agents.ToolCallMiddlewaresOf(options.Middlewares)...)
+		activities[getToolName(prefix, tool)+"_ExecuteToolActivity"] = temporalTool.Execute
 
 		// A tool that starts background tasks needs a second activity: the one
 		// the task's own workflow waits in, long after this run is over.
 		if backgroundTool, ok := tool.(agents.BackgroundTool); ok {
-			temporalBackground := NewTemporalBackgroundTask(agents.WrapBackgroundTool(a.options.Name, backgroundTool, agents.ToolCallMiddlewaresOf(a.options.Middlewares)...), a.broker)
-			activities[getToolName(a.options.Name, tool)+awaitTaskActivitySuffix] = temporalBackground.AwaitTask
+			temporalBackground := NewTemporalBackgroundTask(agents.WrapBackgroundTool(options.Name, backgroundTool, agents.ToolCallMiddlewaresOf(options.Middlewares)...), broker)
+			activities[getToolName(prefix, tool)+awaitTaskActivitySuffix] = temporalBackground.AwaitTask
 		}
 	}
 
 	// Closing a task's stream and deciding where its result goes are the same
 	// two steps whichever tool started it, so they are registered per agent.
-	temporalDelivery := NewTemporalBackgroundDelivery(a.broker)
-	activities[a.options.Name+closeTaskStreamActivityName] = temporalDelivery.CloseTaskStream
-	activities[a.options.Name+deliverTaskActivityName] = temporalDelivery.DeliverTask
+	temporalDelivery := NewTemporalBackgroundDelivery(broker)
+	activities[prefix+closeTaskStreamActivityName] = temporalDelivery.CloseTaskStream
+	activities[prefix+deliverTaskActivityName] = temporalDelivery.DeliverTask
 
-	if a.options.MCPClient != nil {
-		temporalMCP := NewTemporalMCPClient(a.options.MCPClient, a.broker, agents.ToolCallMiddlewaresOf(a.options.Middlewares)...)
-		prefix := a.options.Name + "_MCP"
-		activities[prefix+"_ListMCPToolsActivity"] = temporalMCP.ListTools
-		activities[prefix+"_ExecuteMCPToolActivity"] = temporalMCP.ExecuteTool
+	if options.MCPClient != nil {
+		temporalMCP := NewTemporalMCPClient(options.MCPClient, broker, agents.ToolCallMiddlewaresOf(options.Middlewares)...)
+		activities[prefix+"_MCP_ListMCPToolsActivity"] = temporalMCP.ListTools
+		activities[prefix+"_MCP_ExecuteMCPToolActivity"] = temporalMCP.ExecuteTool
 	}
 
-	if a.options.SkillClient != nil {
-		temporalSkills := NewTemporalSkillClient(a.options.SkillClient, a.broker, agents.ToolCallMiddlewaresOf(a.options.Middlewares)...)
-		prefix := a.options.Name + "_Skills"
-		activities[prefix+"_ListSkills"] = temporalSkills.ListSkills
-		activities[prefix+"_ReadSkill"] = temporalSkills.ReadSkill
+	if options.SkillClient != nil {
+		temporalSkills := NewTemporalSkillClient(options.SkillClient, broker, agents.ToolCallMiddlewaresOf(options.Middlewares)...)
+		activities[prefix+"_Skills_ListSkills"] = temporalSkills.ListSkills
+		activities[prefix+"_Skills_ReadSkill"] = temporalSkills.ReadSkill
 	}
 	return activities
 }

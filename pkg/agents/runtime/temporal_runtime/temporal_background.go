@@ -29,6 +29,8 @@ type BackgroundTaskInput struct {
 	AgentName string                   `json:"agent_name"`
 	ToolName  string                   `json:"tool_name"`
 	Ref       agents.BackgroundTaskRef `json:"ref"`
+	// Spec is set for a factory agent, which is re-run from the spec it started with.
+	Spec *agents.AgentSpec `json:"spec,omitempty"`
 }
 
 // backgroundWorkflowID keeps a task's workflow to one execution. Two runs that
@@ -49,6 +51,7 @@ func backgroundWorkflowID(agentName string, ref agents.BackgroundTaskRef) string
 type TemporalBackgroundRunner struct {
 	workflowCtx workflow.Context
 	agentName   string
+	spec        *agents.AgentSpec
 }
 
 var _ agents.BackgroundRunner = (*TemporalBackgroundRunner)(nil)
@@ -65,7 +68,7 @@ func (r *TemporalBackgroundRunner) StartTask(_ context.Context, tool agents.Back
 	toolName := namer.BackgroundActivityName()
 
 	ctx := workflow.WithChildOptions(r.workflowCtx, workflow.ChildWorkflowOptions{
-		WorkflowID: backgroundWorkflowID(r.agentName, ref),
+		WorkflowID: backgroundWorkflowID(r.owner(), ref),
 		// The run that started the task is about to finish and must not take
 		// the wait down with it.
 		ParentClosePolicy: enums.PARENT_CLOSE_POLICY_ABANDON,
@@ -77,12 +80,21 @@ func (r *TemporalBackgroundRunner) StartTask(_ context.Context, tool agents.Back
 		AgentName: r.agentName,
 		ToolName:  toolName,
 		Ref:       ref,
+		Spec:      r.spec,
 	})
 
 	// Wait for the child to have started, not to have finished. A parent that
 	// completes before Temporal has recorded the child simply never starts it,
 	// which is exactly the silent loss this whole path exists to avoid.
 	return child.GetChildWorkflowExecution().Get(ctx, nil)
+}
+
+// owner scopes task workflow ids: the agent's name, which for factory agents is the spec's.
+func (r *TemporalBackgroundRunner) owner() string {
+	if r.spec != nil {
+		return r.spec.Name
+	}
+	return r.agentName
 }
 
 // BackgroundTaskWorkflow waits for one task and delivers its outcome.
@@ -154,7 +166,7 @@ func (w *BackgroundTaskWorkflow) Execute(ctx workflow.Context, in *BackgroundTas
 		WorkflowID:        in.Ref.ThreadStreamID,
 		ParentClosePolicy: enums.PARENT_CLOSE_POLICY_ABANDON,
 	})
-	run := workflow.ExecuteChildWorkflow(runCtx, in.AgentName+"_AgentWorkflow", &agents.AgentInput{
+	input := &agents.AgentInput{
 		Namespace:   in.Ref.Namespace,
 		ThreadID:    in.Ref.ThreadID,
 		SessionID:   in.Ref.SessionID,
@@ -164,7 +176,13 @@ func (w *BackgroundTaskWorkflow) Execute(ctx workflow.Context, in *BackgroundTas
 		MCP:         in.Ref.MCP,
 		ClientTools: in.Ref.ClientTools,
 		Message:     decision.Message,
-	})
+	}
+	var run workflow.ChildWorkflowFuture
+	if in.Spec != nil {
+		run = workflow.ExecuteChildWorkflow(runCtx, FactoryAgentWorkflowName, in.Spec, input)
+	} else {
+		run = workflow.ExecuteChildWorkflow(runCtx, in.AgentName+"_AgentWorkflow", input)
+	}
 	return run.GetChildWorkflowExecution().Get(runCtx, nil)
 }
 
