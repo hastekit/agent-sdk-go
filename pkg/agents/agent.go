@@ -48,6 +48,10 @@ type Agent struct {
 	skillClient          SkillClient
 	clientTools          ClientToolOptions
 
+	// version and fromFactory identify an agent built by an AgentFactory; see Ref.
+	version     string
+	fromFactory bool
+
 	// background waits on the tasks this agent's tools start, and is nil where
 	// nothing can wait — see BackgroundRunner and ErrBackgroundUnsupported.
 	background BackgroundRunner
@@ -66,7 +70,9 @@ type AgentOptions struct {
 	Instruction SystemPromptProvider
 	Parameters  responses.Parameters
 
-	Name     string
+	Name string
+	// Version pins a factory-built agent's configuration; see AgentFactory.
+	Version  string
 	LLM      llm.Provider
 	Output   map[string]any
 	Tools    []Tool
@@ -180,6 +186,7 @@ func NewAgent(opts *AgentOptions) *Agent {
 
 	agent := &Agent{
 		Name:                 opts.Name,
+		version:              opts.Version,
 		output:               opts.Output,
 		history:              conversationHistory,
 		instruction:          instruction,
@@ -327,6 +334,12 @@ func (e *Agent) StickyHandoff() bool {
 func (e *Agent) SingleTurn() bool {
 	return e.singleTurn
 }
+
+// Ref names the agent and the configuration version it was built from.
+func (e *Agent) Ref() AgentRef { return AgentRef{Name: e.Name, Version: e.version} }
+
+// FactoryBuilt reports whether the agent came from an AgentFactory, so durable runtimes run it by ref.
+func (e *Agent) FactoryBuilt() bool { return e.fromFactory }
 
 // StreamBroker returns the broker the agent streams through, for callers
 // that need the run's channel directly — rejoining a stream in flight, or
@@ -993,6 +1006,7 @@ func (e *Agent) ExecuteWithRun(ctx context.Context, in *AgentInput, run *history
 						ToolCall: &ToolCall{
 							FunctionCallMessage: &toolCall,
 							AgentName:           e.Name,
+							AgentVersion:        e.version,
 							Namespace:           in.Namespace,
 							SessionID:           in.SessionID,
 							ThreadID:            in.ThreadID,

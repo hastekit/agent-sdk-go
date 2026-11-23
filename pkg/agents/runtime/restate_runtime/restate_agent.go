@@ -38,6 +38,7 @@ func (w *AgentWorkflow) Run(restateCtx restate.WorkflowContext, input *WorkflowI
 		streamID = restate.Key(restateCtx)
 	}
 
+	restateCtx = withGatewayContext(restateCtx, input.ProviderConfigKey, input.GatewayContext)
 	agent := w.newRestateAgentProxy(restateCtx, agentOptions, input.ProviderConfigKey, streamID)
 
 	// The proxy agent receives the broker via AgentOptions and publishes

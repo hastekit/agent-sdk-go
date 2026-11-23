@@ -99,8 +99,29 @@ func NewBackgroundTaskWorkflow(agentName string, broker agents.StreamBroker) *Ba
 }
 
 func (w *BackgroundTaskWorkflow) Execute(ctx workflow.Context, in *BackgroundTaskInput) error {
+	return runBackgroundTask(ctx, w.broker, backgroundTaskSteps{
+		prefix: w.agentName,
+		await: func(ctx workflow.Context) workflow.Future {
+			return workflow.ExecuteActivity(ctx, in.ToolName+awaitTaskActivitySuffix, in.Ref)
+		},
+		run: func(ctx workflow.Context, input *agents.AgentInput) workflow.ChildWorkflowFuture {
+			return workflow.ExecuteChildWorkflow(ctx, in.AgentName+"_AgentWorkflow", input)
+		},
+	}, in.Ref)
+}
+
+// backgroundTaskSteps is what differs between registered and factory background workflows.
+type backgroundTaskSteps struct {
+	prefix string
+	ref    *agents.AgentRef
+	await  func(ctx workflow.Context) workflow.Future
+	run    func(ctx workflow.Context, in *agents.AgentInput) workflow.ChildWorkflowFuture
+}
+
+func runBackgroundTask(ctx workflow.Context, broker agents.StreamBroker, steps backgroundTaskSteps, ref agents.BackgroundTaskRef) error {
 	// A background task owns retention for its separate stream until its wait finishes.
-	stopHeartbeat := NewTemporalStreamBrokerProxy(ctx, w.agentName, w.broker).StartHeartbeat(context.Background(), in.Ref.TaskStreamID)
+	heartbeat := &TemporalStreamBrokerProxy{workflowCtx: ctx, prefix: steps.prefix, ref: steps.ref, wrappedBroker: broker}
+	stopHeartbeat := heartbeat.StartHeartbeat(context.Background(), ref.TaskStreamID)
 	defer stopHeartbeat()
 
 	awaitCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
@@ -108,8 +129,7 @@ func (w *BackgroundTaskWorkflow) Execute(ctx workflow.Context, in *BackgroundTas
 	})
 
 	var result agents.BackgroundResult
-	awaitErr := workflow.ExecuteActivity(awaitCtx,
-		in.ToolName+awaitTaskActivitySuffix, in.Ref).Get(awaitCtx, &result)
+	awaitErr := steps.await(awaitCtx).Get(awaitCtx, &result)
 
 	shortCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
 		StartToCloseTimeout: 30 * time.Second,
@@ -120,8 +140,7 @@ func (w *BackgroundTaskWorkflow) Execute(ctx workflow.Context, in *BackgroundTas
 
 	// Close first: a client watching the task sees it end when it ends, not
 	// when the agent has finished reacting to it.
-	if err := workflow.ExecuteActivity(shortCtx,
-		w.agentName+closeTaskStreamActivityName, in.Ref).Get(shortCtx, nil); err != nil {
+	if err := executeActivity(shortCtx, steps.ref, steps.prefix+closeTaskStreamActivityName, ref).Get(shortCtx, nil); err != nil {
 		return err
 	}
 
@@ -133,8 +152,8 @@ func (w *BackgroundTaskWorkflow) Execute(ctx workflow.Context, in *BackgroundTas
 	}
 
 	var decision DeliverTaskOutput
-	if err := workflow.ExecuteActivity(shortCtx, w.agentName+deliverTaskActivityName, &DeliverTaskInput{
-		Ref:       in.Ref,
+	if err := executeActivity(shortCtx, steps.ref, steps.prefix+deliverTaskActivityName, &DeliverTaskInput{
+		Ref:       ref,
 		Result:    result,
 		AwaitFail: awaitMessage,
 	}).Get(shortCtx, &decision); err != nil {
@@ -151,18 +170,18 @@ func (w *BackgroundTaskWorkflow) Execute(ctx workflow.Context, in *BackgroundTas
 	// agent so it can react — as a child, so the wait is not holding a worker
 	// slot while the model works.
 	runCtx := workflow.WithChildOptions(ctx, workflow.ChildWorkflowOptions{
-		WorkflowID:        in.Ref.ThreadStreamID,
+		WorkflowID:        ref.ThreadStreamID,
 		ParentClosePolicy: enums.PARENT_CLOSE_POLICY_ABANDON,
 	})
-	run := workflow.ExecuteChildWorkflow(runCtx, in.AgentName+"_AgentWorkflow", &agents.AgentInput{
-		Namespace:   in.Ref.Namespace,
-		ThreadID:    in.Ref.ThreadID,
-		SessionID:   in.Ref.SessionID,
-		StreamID:    in.Ref.ThreadStreamID,
-		RunContext:  in.Ref.RunContext,
-		Skills:      in.Ref.Skills,
-		MCP:         in.Ref.MCP,
-		ClientTools: in.Ref.ClientTools,
+	run := steps.run(runCtx, &agents.AgentInput{
+		Namespace:   ref.Namespace,
+		ThreadID:    ref.ThreadID,
+		SessionID:   ref.SessionID,
+		StreamID:    ref.ThreadStreamID,
+		RunContext:  ref.RunContext,
+		Skills:      ref.Skills,
+		MCP:         ref.MCP,
+		ClientTools: ref.ClientTools,
 		Message:     decision.Message,
 	})
 	return run.GetChildWorkflowExecution().Get(runCtx, nil)

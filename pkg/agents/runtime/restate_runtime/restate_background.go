@@ -32,6 +32,9 @@ type BackgroundTaskInput struct {
 	// with a run: Restate has no context propagator, so a run started by this
 	// task's result would otherwise reach the gateway without a credential.
 	ProviderConfigKey string `json:"provider_config_key,omitempty"`
+
+	// GatewayContext travels for the same reason: gateway.AddContext values the run had.
+	GatewayContext map[string]string `json:"gateway_context,omitempty"`
 }
 
 // RestateBackgroundRunner hands a task's wait to a service invocation of its
@@ -66,6 +69,7 @@ func (r *RestateBackgroundRunner) StartTask(_ context.Context, tool agents.Backg
 		ToolKey:           proxy.key,
 		Ref:               ref,
 		ProviderConfigKey: r.providerConfigKey,
+		GatewayContext:    gatewayContextOf(r.restateCtx),
 	})
 	return nil
 }
@@ -97,24 +101,57 @@ func (s *BackgroundTaskService) Await(ctx restate.Context, in *BackgroundTaskInp
 	if err != nil {
 		return restate.Void{}, err
 	}
+	ctx = withGatewayContext(ctx, in.ProviderConfigKey, in.GatewayContext)
+	return runBackgroundTask(ctx, s.broker, in.ToolKey, in.Ref,
+		func(runCtx restate.RunContext, progress agents.ProgressReporter) (*awaitOutcome, error) {
+			return outcomeOf(tool.AwaitTask(runCtx, in.Ref, progress)), nil
+		},
+		func(decision *DeliverTaskOutput) {
+			restate.WorkflowSend(ctx, "AgentWorkflow", in.Ref.ThreadStreamID, "Run").Send(&WorkflowInput{
+				AgentName:         in.AgentName,
+				Namespace:         in.Ref.Namespace,
+				ThreadID:          in.Ref.ThreadID,
+				SessionID:         in.Ref.SessionID,
+				Message:           decision.Message,
+				RunContext:        in.Ref.RunContext,
+				Skills:            in.Ref.Skills,
+				MCP:               in.Ref.MCP,
+				ClientTools:       in.Ref.ClientTools,
+				StreamID:          in.Ref.ThreadStreamID,
+				ProviderConfigKey: in.ProviderConfigKey,
+				GatewayContext:    in.GatewayContext,
+			})
+		})
+}
 
+// outcomeOf turns a wait's result into what the step journals; the wait's failure is data for the model.
+func outcomeOf(result agents.BackgroundResult, err error) *awaitOutcome {
+	if err != nil {
+		return &awaitOutcome{Fail: err.Error()}
+	}
+	return &awaitOutcome{Result: result}
+}
+
+// runBackgroundTask is the body registered and factory background services share.
+// await returns a step error to retry, or an outcome to deliver.
+func runBackgroundTask(
+	ctx restate.Context,
+	broker agents.StreamBroker,
+	toolKey string,
+	ref agents.BackgroundTaskRef,
+	await func(restate.RunContext, agents.ProgressReporter) (*awaitOutcome, error),
+	start func(*DeliverTaskOutput),
+) (restate.Void, error) {
 	// One durable step for the wait. It is a long one by design — that is what
 	// makes the task a background task — and its outcome is journaled, so a
 	// restart after it finishes does not wait for it again.
 	outcome, err := restate.Run(ctx, func(runCtx restate.RunContext) (*awaitOutcome, error) {
 		// Keep the task stream alive only while its wait step is executing.
-		defer s.broker.StartHeartbeat(runCtx, in.Ref.TaskStreamID)()
+		defer broker.StartHeartbeat(runCtx, ref.TaskStreamID)()
 
-		progress := agents.NewStreamProgressReporter(s.broker, in.Ref.TaskStreamID, in.Ref.CallID, in.Ref.ToolName)
-		res, err := tool.AwaitTask(runCtx, in.Ref, progress)
-		if err != nil {
-			// The wait's failure is what the model is told about, not a step
-			// to retry — so it travels as its own field rather than as an
-			// error, and rather than masquerading as the task's result.
-			return &awaitOutcome{Fail: err.Error()}, nil
-		}
-		return &awaitOutcome{Result: res}, nil
-	}, restate.WithName(in.ToolKey+"_AwaitTask"))
+		progress := agents.NewStreamProgressReporter(broker, ref.TaskStreamID, ref.CallID, ref.ToolName)
+		return await(runCtx, progress)
+	}, restate.WithName(toolKey+"_AwaitTask"))
 	if err != nil {
 		return restate.Void{}, err
 	}
@@ -127,13 +164,13 @@ func (s *BackgroundTaskService) Await(ctx restate.Context, in *BackgroundTaskInp
 	// Close first: a client watching the task sees it end when it ends, not
 	// when the agent has finished reacting to it.
 	if _, err := restate.Run(ctx, func(runCtx restate.RunContext) (restate.Void, error) {
-		return restate.Void{}, agents.CloseBackgroundTaskStream(runCtx, s.broker, in.Ref)
+		return restate.Void{}, agents.CloseBackgroundTaskStream(runCtx, broker, ref)
 	}, restate.WithName("CloseTaskStream")); err != nil {
 		return restate.Void{}, err
 	}
 
 	decision, err := restate.Run(ctx, func(runCtx restate.RunContext) (*DeliverTaskOutput, error) {
-		start, msg, err := agents.DeliverBackgroundResult(runCtx, s.broker, in.Ref, outcome.Result, awaitErr)
+		start, msg, err := agents.DeliverBackgroundResult(runCtx, broker, ref, outcome.Result, awaitErr)
 		if err != nil {
 			return nil, err
 		}
@@ -152,20 +189,7 @@ func (s *BackgroundTaskService) Await(ctx restate.Context, in *BackgroundTaskInp
 	// The thread was idle, and this invocation now holds its claim. Start the
 	// run one-way: this task is done, and waiting for the model to finish
 	// talking is not part of it.
-	restate.WorkflowSend(ctx, "AgentWorkflow", in.Ref.ThreadStreamID, "Run").Send(&WorkflowInput{
-		AgentName:         in.AgentName,
-		Namespace:         in.Ref.Namespace,
-		ThreadID:          in.Ref.ThreadID,
-		SessionID:         in.Ref.SessionID,
-		Message:           decision.Message,
-		RunContext:        in.Ref.RunContext,
-		Skills:            in.Ref.Skills,
-		MCP:               in.Ref.MCP,
-		ClientTools:       in.Ref.ClientTools,
-		StreamID:          in.Ref.ThreadStreamID,
-		ProviderConfigKey: in.ProviderConfigKey,
-	})
-
+	start(decision)
 	return restate.Void{}, nil
 }
 

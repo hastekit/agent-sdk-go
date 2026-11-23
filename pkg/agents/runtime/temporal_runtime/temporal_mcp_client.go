@@ -51,6 +51,7 @@ func (c *TemporalMCPClient) ExecuteTool(ctx context.Context, tool *agents.BaseTo
 type temporalMCPClientProxy struct {
 	ctx    workflow.Context
 	prefix string
+	ref    *agents.AgentRef
 }
 
 func (c *temporalMCPClientProxy) ListTools(_ context.Context, namespace string, runContext map[string]any, selection ...agents.MCPSelection) ([]agents.ConnectorStatus, []agents.Tool, error) {
@@ -63,12 +64,14 @@ func (c *temporalMCPClientProxy) ListTools(_ context.Context, namespace string, 
 		input.MCP = selection[0]
 	}
 	var result agents.MCPListing
-	if err := workflow.ExecuteActivity(c.ctx, c.prefix+"_ListMCPToolsActivity", input).Get(c.ctx, &result); err != nil {
+	if err := executeActivity(c.ctx, c.ref, c.prefix+"_ListMCPToolsActivity", input).Get(c.ctx, &result); err != nil {
 		return nil, nil, err
 	}
 	tools := make([]agents.Tool, 0, len(result.Tools))
 	for _, tool := range result.Tools {
-		tools = append(tools, NewTemporalMCPToolProxy(c.ctx, c.prefix, runContext, tool))
+		proxy := NewTemporalMCPToolProxy(c.ctx, c.prefix, runContext, tool)
+		proxy.ref = c.ref
+		tools = append(tools, proxy)
 	}
 	return result.Connectors, tools, nil
 }

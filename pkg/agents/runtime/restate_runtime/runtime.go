@@ -2,6 +2,7 @@ package restate_runtime
 
 import (
 	"context"
+	"maps"
 	"net/http"
 
 	"github.com/google/uuid"
@@ -40,6 +41,36 @@ type WorkflowInput struct {
 	// is carried here across the durable boundary and re-established on the
 	// context inside the workflow.
 	ProviderConfigKey string
+
+	// GatewayContext carries the caller's gateway.AddContext values into every step.
+	GatewayContext map[string]string `json:"gateway_context,omitempty"`
+}
+
+// withGatewayContext puts the provider key and gateway values on ctx, so every run step sees them.
+func withGatewayContext[T restate.Context](ctx T, providerConfigKey string, values map[string]string) T {
+	if providerConfigKey == "" && len(values) == 0 {
+		return ctx
+	}
+	var goCtx context.Context = ctx
+	if providerConfigKey != "" {
+		goCtx = gateway.WithProviderConfigKey(goCtx, providerConfigKey)
+	}
+	if len(values) > 0 {
+		goCtx = gateway.AddContext(goCtx, maps.Clone(values))
+	}
+	return restate.WrapContext(ctx, goCtx)
+}
+
+// gatewayContextOf copies the gateway values on ctx, or returns nil when there are none.
+func gatewayContextOf(ctx context.Context) map[string]string {
+	if ctx == nil {
+		return nil
+	}
+	values := gateway.GetContext(ctx)
+	if len(values) == 0 {
+		return nil
+	}
+	return maps.Clone(values)
 }
 
 // RestateRuntime executes agents via Restate workflows for durability.
@@ -68,6 +99,7 @@ func (r *RestateRuntime) Run(ctx context.Context, agent *agents.Agent, in *agent
 	streamID := in.StreamID
 
 	input := &WorkflowInput{
+		GatewayContext:    gatewayContextOf(ctx),
 		AgentName:         agent.Name,
 		RunID:             in.RunID,
 		Namespace:         in.Namespace,
@@ -82,6 +114,13 @@ func (r *RestateRuntime) Run(ctx context.Context, agent *agents.Agent, in *agent
 		ClientTools:       in.ClientTools,
 		StreamID:          streamID,
 		ProviderConfigKey: gateway.ProviderConfigKeyFromContext(ctx),
+	}
+
+	if agent.FactoryBuilt() {
+		// Factory agents share one workflow service and pin the ref they start with.
+		return ingress.Workflow[*FactoryWorkflowInput, *agents.AgentOutput](
+			r.client, FactoryWorkflowServiceName, streamID, "Run",
+		).Request(ctx, &FactoryWorkflowInput{Ref: agent.Ref(), WorkflowInput: *input})
 	}
 
 	return ingress.Workflow[*WorkflowInput, *agents.AgentOutput](

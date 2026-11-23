@@ -74,6 +74,7 @@ func (l *TemporalLLM) NewStreamingResponsesActivity(ctx context.Context, in *res
 type TemporalLLMProxy struct {
 	workflowCtx workflow.Context
 	prefix      string
+	ref         *agents.AgentRef
 	broker      agents.StreamBroker
 }
 
@@ -88,7 +89,7 @@ func NewTemporalLLMProxy(workflowCtx workflow.Context, prefix string, broker age
 func (l *TemporalLLMProxy) NewStreamingResponses(ctx context.Context, call *agents.ModelCall, in *responses.Request, cb func(chunk *responses.ResponseChunk)) (*responses.Response, error) {
 	var response *responses.Response
 	// The call goes with the request, for the wraps on the activity side.
-	err := workflow.ExecuteActivity(l.workflowCtx, l.prefix+"_NewStreamingResponsesActivity", in, call).Get(l.workflowCtx, &response)
+	err := executeActivity(l.workflowCtx, l.ref, l.prefix+"_NewStreamingResponsesActivity", in, call).Get(l.workflowCtx, &response)
 	if err != nil {
 		// A call the stop cut short comes back as an activity failure. Report it
 		// as the stop it is, so the loop ends the run cleanly instead of

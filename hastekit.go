@@ -13,6 +13,13 @@ import (
 type Agent = agents.Agent
 type ModelParameters = responses.Parameters
 
+// AgentRef names one immutable version of a factory-built agent.
+type AgentRef = agents.AgentRef
+
+// AgentFactory builds agents from stored configuration; register one with a runtime's RegisterAgentFactory.
+type AgentFactory = agents.AgentFactory
+type AgentFactoryFunc = agents.AgentFactoryFunc
+
 // AgentMiddleware wraps agent operations. Embed agents.NoopMiddleware and
 // override the Wrap methods relevant to your implementation. The root
 // Middleware alias remains the gateway/provider middleware API.
@@ -52,6 +59,9 @@ type AgentConfig struct {
 	// retrieval. Embed agents.NoopMiddleware and override selected methods.
 	Middlewares []agents.Middleware
 }
+
+// Options returns the agent options this configuration describes, for an AgentFactory to return.
+func (ac *AgentConfig) Options() *agents.AgentOptions { return ac.toAgentOptions() }
 
 func (ac *AgentConfig) toAgentOptions() *agents.AgentOptions {
 	return &agents.AgentOptions{

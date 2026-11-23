@@ -10,6 +10,7 @@ import (
 type TemporalMCPToolProxy struct {
 	workflowCtx workflow.Context
 	prefix      string
+	ref         *agents.AgentRef
 	runContext  map[string]any
 	*agents.BaseTool
 }
@@ -27,7 +28,7 @@ func (t *TemporalMCPToolProxy) Execute(ctx context.Context, params *agents.ToolC
 	var output *agents.ToolCallResponse
 	// The tool goes with the call: the activity side would otherwise have to
 	// find it by name, and the name it has is the model-facing one.
-	err := workflow.ExecuteActivity(t.workflowCtx, t.prefix+"_ExecuteMCPToolActivity", t.BaseTool, params, t.runContext).Get(t.workflowCtx, &output)
+	err := executeActivity(t.workflowCtx, t.ref, t.prefix+"_ExecuteMCPToolActivity", t.BaseTool, params, t.runContext).Get(t.workflowCtx, &output)
 	if err != nil {
 		return nil, err
 	}

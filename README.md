@@ -1523,6 +1523,34 @@ See the [Temporal example](examples/agents/9_temporal_agent/main.go) and
 [Restate example](examples/agents/8_restate_agent/main.go) for worker and HTTP
 serving in one process with signal-driven shutdown.
 
+#### Agents built from stored configuration
+
+When agents are defined by data (a database row per version) rather than Go code,
+register an `AgentFactory` instead of each agent. The worker then runs one shared
+workflow keyed by `AgentRef{Name, Version}`, so agents created or edited after
+`Serve` starts need no restart:
+
+```go
+rt.RegisterAgentFactory(hastekit.AgentFactoryFunc(func(ctx context.Context, ref hastekit.AgentRef) (*agents.AgentOptions, error) {
+    row, err := db.LoadAgent(ctx, ref.Name, ref.Version) // return agents.ErrAgentNotFound for unknown refs
+    if err != nil { return nil, err }
+    return (&hastekit.AgentConfig{Name: ref.Name, LLM: client.Model(row.Model), Instruction: hastekit.NewPrompt(row.Prompt), History: hist}).Options(), nil
+}))
+go rt.Serve(ctx)
+
+agent, err := rt.BuildAgent(ctx, hastekit.AgentRef{Name: "support", Version: "7"})
+out, err := agent.Run(ctx, input)
+```
+
+A ref must always build the same agent: publish a new version instead of editing
+one. A run pins the ref it started with, and its shape (tools, handoffs, limits)
+is journaled when it starts, so an in-flight run replays on its own version after
+a restart. Handoff targets are refs too (`agents.Handoff{Name, Version}`). Only
+the ref and the usual `AgentInput` enter the workflow; credentials stay in the
+factory. The local runtime accepts the same factory, so the builder does not
+change when you move to Temporal or Restate. Values set with `gateway.AddContext`
+reach every activity and step. See the [agent factory example](examples/agents/16_agent_factory/main.go).
+
 ## Documentation
 
 - **[Full Documentation](https://docs.hastekit.ai/hastekit-sdk/introduction)** - Comprehensive guides and API reference

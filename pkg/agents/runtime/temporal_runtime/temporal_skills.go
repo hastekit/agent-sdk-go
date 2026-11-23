@@ -36,11 +36,12 @@ func (c *TemporalSkillClient) ReadSkill(ctx context.Context, namespace string, r
 type temporalSkillClientProxy struct {
 	ctx    workflow.Context
 	prefix string
+	ref    *agents.AgentRef
 }
 
 func (s *temporalSkillClientProxy) ListSkills(_ context.Context, namespace string, rc map[string]any) ([]agents.Skill, error) {
 	var skills []agents.Skill
-	err := workflow.ExecuteActivity(s.ctx, s.prefix+"_ListSkills", namespace, rc).Get(s.ctx, &skills)
+	err := executeActivity(s.ctx, s.ref, s.prefix+"_ListSkills", namespace, rc).Get(s.ctx, &skills)
 	return skills, err
 }
 
@@ -51,7 +52,7 @@ func (s *temporalSkillClientProxy) ReadSkill(context.Context, string, map[string
 
 func (s *temporalSkillClientProxy) ReadSkillCall(_ context.Context, namespace string, rc map[string]any, name, file string, call *agents.ToolCall) (string, error) {
 	var content string
-	err := workflow.ExecuteActivity(s.ctx, s.prefix+"_ReadSkill", namespace, rc, name, file, call).Get(s.ctx, &content)
+	err := executeActivity(s.ctx, s.ref, s.prefix+"_ReadSkill", namespace, rc, name, file, call).Get(s.ctx, &content)
 	return content, err
 }
 
