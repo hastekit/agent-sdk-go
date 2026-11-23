@@ -30,6 +30,7 @@ A `Source` lists and reads a fixed set of developer-owned skills:
 | `NewFSSource(fsys)` | An `embed.FS` or other `fs.FS`, the same way |
 | `NewBundleSource(bundles...)` | Inline bundles, validated and copied at construction |
 | `NewStoreSource(store, namespace)` | One store namespace your application manages at run time |
+| `Filter(source, names...)` | Only the named skills of another source |
 
 Implement `Source` (`List`, `Read`) for a database or service. The agent selects
 skills, builds the prompt metadata, and creates one `read_skill` tool. A request
@@ -48,6 +49,18 @@ base := skills.NewClient(store) // users' own skills, shared by every agent
 reviewer := &hastekit.AgentConfig{Name: "Reviewer", SkillClient: base.WithGlobalSkills(reviewSkills)}
 writer := &hastekit.AgentConfig{Name: "Writer", SkillClient: base.WithGlobalSkills(styleGuide)}
 // Set each agent's LLM and instruction before constructing it.
+```
+
+To give agents different parts of one library, filter it per agent. A filtered
+agent's skills are ordinary globals: always on, and shadowing user skills with
+the same name. Skills left out are not that agent's at all, so they neither reach
+its catalog nor reserve their names for it. Names the source does not list are
+ignored, so a library can drop a skill without failing runs.
+
+```go
+library, err := skills.NewStoreSource(store, "library") // managed by your application
+if err != nil { return err }
+dba := &hastekit.AgentConfig{Name: "DBA", SkillClient: base.WithGlobalSkills(skills.Filter(library, "sql-review", "postgres-tuning"))}
 ```
 
 Storage is shared across agents within the caller's namespace; neither the agent

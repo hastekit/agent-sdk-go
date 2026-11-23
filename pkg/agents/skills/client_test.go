@@ -110,6 +110,53 @@ func TestClientGivesEachAgentItsOwnGlobals(t *testing.T) {
 	require.Equal(t, []string{"review", "style", "mine"}, names(both))
 }
 
+func TestFilterServesOnlyNamedSkills(t *testing.T) {
+	ctx := t.Context()
+	store, err := NewFileStore(t.TempDir())
+	require.NoError(t, err)
+	_, err = store.Put(ctx, "tenant", bundle("tone", "user tone"))
+	require.NoError(t, err)
+	library := inlineSource(t, bundle("style", "developer style"), bundle("tone", "developer tone"), bundle("voice", "developer voice"))
+	filtered := Filter(library, "style", "voice", "missing")
+
+	// Only the named skills are listed; names the library lacks are ignored.
+	listed, err := filtered.List(ctx)
+	require.NoError(t, err)
+	require.Len(t, listed, 2)
+	require.Equal(t, "style", listed[0].Name)
+	require.Equal(t, "voice", listed[1].Name)
+	_, err = filtered.Read(ctx, "tone", "")
+	require.ErrorIs(t, err, ErrNotFound)
+	content, err := filtered.Read(ctx, "style", "refs/check.md")
+	require.NoError(t, err)
+	require.Equal(t, "check", content)
+
+	// A skill left out is not the agent's, so the user's same-named skill is visible.
+	client := NewClient(store).WithGlobalSkills(filtered)
+	catalog, err := client.ListSkills(ctx, "tenant", nil)
+	require.NoError(t, err)
+	global := map[string]bool{}
+	for _, skill := range catalog {
+		global[skill.Name] = skill.Global
+	}
+	require.Equal(t, map[string]bool{"style": true, "voice": true, "tone": false}, global)
+	content, err = client.ReadSkill(ctx, "tenant", nil, "tone", "")
+	require.NoError(t, err)
+	require.Contains(t, content, "user tone")
+
+	// Filters nest as an intersection, and no names serve nothing.
+	listed, err = Filter(filtered, "voice", "tone").List(ctx)
+	require.NoError(t, err)
+	require.Len(t, listed, 1)
+	require.Equal(t, "voice", listed[0].Name)
+	listed, err = Filter(library).List(ctx)
+	require.NoError(t, err)
+	require.Empty(t, listed)
+
+	_, err = NewClient(nil).WithGlobalSkills(Filter(nil, "style")).ListSkills(ctx, "tenant", nil)
+	require.ErrorContains(t, err, "must not be nil")
+}
+
 func TestClientRejectsAmbiguousGlobals(t *testing.T) {
 	client := NewClient(nil).WithGlobalSkills(inlineSource(t, bundle("review", "a")), inlineSource(t, bundle("review", "b")))
 	_, err := client.ListSkills(t.Context(), "tenant", nil)

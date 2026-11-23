@@ -12,7 +12,7 @@ import (
 // Source is a fixed set of developer-owned skills. A Client marks every skill a
 // source lists as global: always enabled, and shadowing a user's skill with
 // the same name. Give different agents different sources with
-// Client.WithGlobalSkills.
+// Client.WithGlobalSkills, or different subsets of one source with Filter.
 //
 // Read follows SkillClient.ReadSkill: an empty file returns the SKILL.md body
 // without frontmatter, "SKILL.md" returns the original document, and any other
@@ -158,6 +158,55 @@ func (s *storeSource) Read(ctx context.Context, name, file string) (string, erro
 		return "", err
 	}
 	return readBundle(bundle, file)
+}
+
+// filteredSource serves only the named skills of another source.
+type filteredSource struct {
+	source Source
+	names  map[string]bool
+}
+
+// Filter returns a source that serves only the named skills of source, so an
+// agent can take a few skills from a larger library instead of all of them:
+//
+//	library, err := skills.NewStoreSource(store, "library")
+//	client := base.WithGlobalSkills(skills.Filter(library, "sql-review", "postgres-tuning"))
+//
+// The filter is evaluated on every listing. A name the source does not list is
+// ignored, since a library can change at run time, and reading any skill
+// outside the filter returns ErrNotFound. Skills left out are not the agent's
+// globals at all: they do not reach its catalog, and they do not shadow a
+// user's skill with the same name. Filtering with no names serves nothing.
+func Filter(source Source, names ...string) Source {
+	if source == nil {
+		return nil // reported by the client like any nil source
+	}
+	keep := make(map[string]bool, len(names))
+	for _, name := range names {
+		keep[name] = true
+	}
+	return &filteredSource{source: source, names: keep}
+}
+
+func (s *filteredSource) List(ctx context.Context) ([]agents.Skill, error) {
+	listed, err := s.source.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var skills []agents.Skill
+	for _, skill := range listed {
+		if s.names[skill.Name] {
+			skills = append(skills, skill)
+		}
+	}
+	return skills, nil
+}
+
+func (s *filteredSource) Read(ctx context.Context, name, file string) (string, error) {
+	if !s.names[name] {
+		return "", ErrNotFound
+	}
+	return s.source.Read(ctx, name, file)
 }
 
 // listStore reads every page of one namespace, rejecting cursors that repeat.

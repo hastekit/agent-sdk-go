@@ -25,3 +25,6 @@ var NewDirSkillSource = skills.NewDirSource
 
 // NewFSSkillSource supports embed.FS and other io/fs implementations.
 var NewFSSkillSource = skills.NewFSSource
+
+// FilterSkillSource serves only the named skills of a global source.
+var FilterSkillSource = skills.Filter

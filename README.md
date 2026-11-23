@@ -1156,7 +1156,9 @@ developer-owned skills. Share one store across agents and give each agent its
 own globals. A source is a folder (`skills.NewDirSource`), an `embed.FS` or other
 `fs.FS` (`skills.NewFSSource`), inline bundles (`skills.NewBundleSource`), a
 store namespace the application manages (`skills.NewStoreSource`), or your own
-`skills.Source` (`List`, `Read`).
+`skills.Source` (`List`, `Read`). Wrap any source in `skills.Filter(source,
+names...)` to give an agent only some of its skills, such as a few from a shared
+library: `WithGlobalSkills(skills.Filter(library, "sql-review"))`.
 
 Global skills are always on: users cannot turn them off, and a global shadows a
 user skill with the same name. Users' own skills are on unless the run disables
