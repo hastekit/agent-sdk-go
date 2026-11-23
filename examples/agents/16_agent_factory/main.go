@@ -1,8 +1,7 @@
 // Agents built at runtime from stored, versioned configs instead of Go code.
 //
-// RUNTIME=local (default), temporal or restate picks where they run; the factory is the same.
-// Temporal expects a server on localhost:7233. Restate expects ingress on localhost:8080 and
-// this service registered with: restate deployments register http://localhost:9081
+// RUNTIME=local (default) or temporal picks where they run; the factory is the same.
+// Temporal expects a server on localhost:7233.
 package main
 
 import (
@@ -169,20 +168,6 @@ func newRuntime(ctx context.Context, broker agents.StreamBroker, f agents.AgentF
 		}
 		go func() {
 			if err := rt.Serve(ctx); err != nil {
-				log.Fatal(err)
-			}
-		}()
-		return rt
-	case "restate":
-		rt, err := hastekit.NewRestateRuntime("http://localhost:8080", broker)
-		if err != nil {
-			log.Fatal(err)
-		}
-		if err := rt.RegisterAgentFactory(f); err != nil {
-			log.Fatal(err)
-		}
-		go func() {
-			if err := rt.Serve(ctx, "localhost:9081"); err != nil {
 				log.Fatal(err)
 			}
 		}()

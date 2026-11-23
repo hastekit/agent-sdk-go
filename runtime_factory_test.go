@@ -2,7 +2,6 @@ package sdk
 
 import (
 	"context"
-	"net"
 	"testing"
 	"time"
 
@@ -10,7 +9,6 @@ import (
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/history"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/messages"
-	"github.com/hastekit/agent-sdk-go/pkg/agents/runtime/restate_runtime"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/runtime/temporal_runtime"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/streambroker"
 	"github.com/hastekit/agent-sdk-go/pkg/gateway"
@@ -42,40 +40,29 @@ func whoamiFactory() (*testutil.MapFactory, agents.AgentRef) {
 	return store, ref
 }
 
-func TestDurableRuntimes_RegisterOneFactoryBeforeServing(t *testing.T) {
+func TestTemporalRuntime_RegistersOneFactoryBeforeServing(t *testing.T) {
 	broker := streambroker.NewMemoryStreamBroker()
-	temporalRT := &TemporalRuntime{TemporalRuntime: temporal_runtime.NewTemporalRuntime(nil, broker), broker: broker}
-	restateRT := &RestateRuntime{RestateRuntime: restate_runtime.NewRestateRuntime("http://localhost:8080", broker), broker: broker}
+	rt := &TemporalRuntime{TemporalRuntime: temporal_runtime.NewTemporalRuntime(nil, broker), broker: broker}
 	store, ref := whoamiFactory()
 
-	for name, tc := range map[string]struct {
-		rt        agents.FactoryRuntime
-		lifecycle *runtimeLifecycle
-	}{
-		"temporal": {temporalRT, &temporalRT.lifecycle},
-		"restate":  {restateRT, &restateRT.lifecycle},
-	} {
-		t.Run(name, func(t *testing.T) {
-			_, err := tc.rt.BuildAgent(t.Context(), ref)
-			require.Error(t, err, "no factory yet")
-			require.Error(t, tc.rt.RegisterAgentFactory(nil))
-			require.NoError(t, tc.rt.RegisterAgentFactory(store))
-			require.Error(t, tc.rt.RegisterAgentFactory(store), "one factory per runtime")
+	_, err := rt.BuildAgent(t.Context(), ref)
+	require.Error(t, err, "no factory yet")
+	require.Error(t, rt.RegisterAgentFactory(nil))
+	require.NoError(t, rt.RegisterAgentFactory(store))
+	require.Error(t, rt.RegisterAgentFactory(store), "one factory per runtime")
 
-			agent, err := tc.rt.BuildAgent(t.Context(), ref)
-			require.NoError(t, err)
-			assert.True(t, agent.FactoryBuilt())
-			assert.Equal(t, ref, agent.Ref())
-			assert.Same(t, broker, agent.StreamBroker())
+	agent, err := rt.BuildAgent(t.Context(), ref)
+	require.NoError(t, err)
+	assert.True(t, agent.FactoryBuilt())
+	assert.Equal(t, ref, agent.Ref())
+	assert.Same(t, broker, agent.StreamBroker())
 
-			// A factory alone is enough to serve.
-			_, _, factory, finish, err := tc.lifecycle.begin(t.Context())
-			require.NoError(t, err)
-			assert.NotNil(t, factory)
-			require.Error(t, tc.rt.RegisterAgentFactory(store), "registration closes once serving starts")
-			finish()
-		})
-	}
+	// A factory alone is enough to serve.
+	_, _, finish, err := rt.lifecycle.begin(t.Context())
+	require.NoError(t, err)
+	assert.NotNil(t, rt.lifecycle.servingFactory())
+	require.Error(t, rt.RegisterAgentFactory(store), "registration closes once serving starts")
+	finish()
 }
 
 // Through the public API: the worker serves a static agent and factory agents side by side,
@@ -98,45 +85,6 @@ func TestTemporalRuntime_ServesFactoryAgentsAlongsideStaticOnes(t *testing.T) {
 	served := make(chan error, 1)
 	go func() { served <- rt.Serve(serveCtx) }()
 	defer func() { stop(); <-served }()
-
-	agent, err := rt.BuildAgent(ctx, ref)
-	require.NoError(t, err)
-	out, err := agent.Run(gateway.AddContext(ctx, map[string]string{"amg_id": "amg-42"}), factoryUserInput("who"))
-	require.NoError(t, err)
-	assert.Equal(t, "call:whoami | amg_id=amg-42", out.Text())
-
-	out, err = static.Run(ctx, factoryUserInput("hi"))
-	require.NoError(t, err)
-	assert.Equal(t, "static agent", out.Text(), "registered agents keep their own workflow")
-}
-
-func TestRestateRuntime_ServesFactoryAgentsAlongsideStaticOnes(t *testing.T) {
-	r := testutil.StartRestate(t)
-	broker := streambroker.NewMemoryStreamBroker()
-	rt, err := NewRestateRuntime(r.IngressURL, broker)
-	require.NoError(t, err)
-	defer rt.Close()
-
-	static, err := NewAgent(&AgentConfig{Name: "static", LLM: testutil.EchoProvider{}, Instruction: NewPrompt("static agent")}, WithRuntime(rt))
-	require.NoError(t, err)
-	store, ref := whoamiFactory()
-	require.NoError(t, rt.RegisterAgentFactory(store))
-
-	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
-	defer cancel()
-	serveCtx, stop := context.WithCancel(ctx)
-	port := testutil.FreePort(t)
-	served := make(chan error, 1)
-	go func() { served <- rt.Serve(serveCtx, "127.0.0.1:"+port) }()
-	defer func() { stop(); <-served }()
-	require.Eventually(t, func() bool {
-		conn, err := net.Dial("tcp", "127.0.0.1:"+port)
-		if err == nil {
-			_ = conn.Close()
-		}
-		return err == nil
-	}, 10*time.Second, 50*time.Millisecond)
-	r.Register(t, port)
 
 	agent, err := rt.BuildAgent(ctx, ref)
 	require.NoError(t, err)

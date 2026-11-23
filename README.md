@@ -1526,9 +1526,9 @@ serving in one process with signal-driven shutdown.
 #### Agents built from stored configuration
 
 When agents are defined by data (a database row per version) rather than Go code,
-register an `AgentFactory` instead of each agent. The worker then runs one shared
-workflow keyed by `AgentRef{Name, Version}`, so agents created or edited after
-`Serve` starts need no restart:
+register an `AgentFactory` instead of each agent. The Temporal worker then runs one
+shared workflow keyed by `AgentRef{Name, Version}`, so agents created or edited after
+`Serve` starts need no restart. Restate does not support factories yet.
 
 ```go
 rt.RegisterAgentFactory(hastekit.AgentFactoryFunc(func(ctx context.Context, ref hastekit.AgentRef) (*agents.AgentOptions, error) {
@@ -1548,8 +1548,8 @@ is journaled when it starts, so an in-flight run replays on its own version afte
 a restart. Handoff targets are refs too (`agents.Handoff{Name, Version}`). Only
 the ref and the usual `AgentInput` enter the workflow; credentials stay in the
 factory. The local runtime accepts the same factory, so the builder does not
-change when you move to Temporal or Restate. Values set with `gateway.AddContext`
-reach every activity and step. See the [agent factory example](examples/agents/16_agent_factory/main.go).
+change when you move to Temporal. Under Temporal, values set with `gateway.AddContext`
+reach every activity. See the [agent factory example](examples/agents/16_agent_factory/main.go).
 
 ## Documentation
 

@@ -86,7 +86,7 @@ func (r *TemporalRuntime) BuildAgent(ctx context.Context, ref agents.AgentRef) (
 // Serve runs the worker until ctx ends or startup fails. The caller owns the
 // runtime and must Close it after Serve and outstanding executions finish.
 func (r *TemporalRuntime) Serve(ctx context.Context) error {
-	ctx, configs, factory, finish, err := r.lifecycle.begin(ctx)
+	ctx, configs, finish, err := r.lifecycle.begin(ctx)
 	if err != nil {
 		return err
 	}
@@ -95,7 +95,7 @@ func (r *TemporalRuntime) Serve(ctx context.Context) error {
 		return fmt.Errorf("no temporal client available")
 	}
 	w := worker.New(r.client, "AgentWorkflowTaskQueue", worker.Options{})
-	if factory != nil {
+	if factory := r.lifecycle.servingFactory(); factory != nil {
 		factoryWorkflow := temporal_runtime.NewFactoryAgentWorkflow(factory, r.broker)
 		for name, fn := range factoryWorkflow.GetActivities() {
 			w.RegisterActivityWithOptions(fn, activity.RegisterOptions{Name: name})
@@ -159,21 +159,10 @@ func (r *RestateRuntime) RegisterAgent(options *agents.AgentOptions) error {
 	return r.lifecycle.register(options)
 }
 
-// RegisterAgentFactory serves agents built at runtime by ref. Register it before Serve;
-// agents the factory adds later need no restart.
-func (r *RestateRuntime) RegisterAgentFactory(factory agents.AgentFactory) error {
-	return r.lifecycle.registerFactory(factory)
-}
-
-// BuildAgent builds ref with the registered factory; its runs invoke the shared factory workflow.
-func (r *RestateRuntime) BuildAgent(ctx context.Context, ref agents.AgentRef) (*agents.Agent, error) {
-	return r.lifecycle.buildAgent(ctx, ref, r, r.broker)
-}
-
 // Serve blocks serving Restate invocations at address until ctx ends. The
 // address is the local listen address, separate from the ingress endpoint.
 func (r *RestateRuntime) Serve(ctx context.Context, address string) error {
-	ctx, configs, factory, finish, err := r.lifecycle.begin(ctx)
+	ctx, configs, finish, err := r.lifecycle.begin(ctx)
 	if err != nil {
 		return err
 	}
@@ -181,16 +170,9 @@ func (r *RestateRuntime) Serve(ctx context.Context, address string) error {
 	if address == "" {
 		return fmt.Errorf("restate listen address is required")
 	}
-	restateServer := server.NewRestate()
-	if len(configs) > 0 {
-		wf := restate_runtime.NewRestateWorkflow(configs, r.broker)
-		background := restate_runtime.NewBackgroundTaskService(configs, r.broker)
-		restateServer = restateServer.Bind(restate.Reflect(wf)).Bind(restate.Reflect(background))
-	}
-	if factory != nil {
-		restateServer = restate_runtime.BindFactory(restateServer, factory, r.broker)
-	}
-	handler, err := restateServer.Handler()
+	wf := restate_runtime.NewRestateWorkflow(configs, r.broker)
+	background := restate_runtime.NewBackgroundTaskService(configs, r.broker)
+	handler, err := server.NewRestate().Bind(restate.Reflect(wf)).Bind(restate.Reflect(background)).Handler()
 	if err != nil {
 		return err
 	}
@@ -250,11 +232,16 @@ func (r *runtimeLifecycle) registerFactory(factory agents.AgentFactory) error {
 	return nil
 }
 
+// servingFactory is the registered factory; it cannot change once Serve has begun.
+func (r *runtimeLifecycle) servingFactory() agents.AgentFactory {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.factory
+}
+
 // buildAgent builds ref with the registered factory, bound to runtime.
 func (r *runtimeLifecycle) buildAgent(ctx context.Context, ref agents.AgentRef, runtime agents.Runtime, broker agents.StreamBroker) (*agents.Agent, error) {
-	r.mu.Lock()
-	factory := r.factory
-	r.mu.Unlock()
+	factory := r.servingFactory()
 	if factory == nil {
 		return nil, fmt.Errorf("no agent factory registered")
 	}
@@ -285,17 +272,17 @@ func (r *runtimeLifecycle) register(options *agents.AgentOptions) error {
 	return nil
 }
 
-func (r *runtimeLifecycle) begin(ctx context.Context) (context.Context, map[string]*agents.AgentOptions, agents.AgentFactory, func(), error) {
+func (r *runtimeLifecycle) begin(ctx context.Context) (context.Context, map[string]*agents.AgentOptions, func(), error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if err := ctx.Err(); err != nil {
-		return nil, nil, nil, nil, err
+		return nil, nil, nil, err
 	}
 	if r.closed || r.cancel != nil {
-		return nil, nil, nil, nil, fmt.Errorf("runtime is serving or closed")
+		return nil, nil, nil, fmt.Errorf("runtime is serving or closed")
 	}
 	if len(r.configs) == 0 && r.factory == nil {
-		return nil, nil, nil, nil, fmt.Errorf("runtime has no registered agents")
+		return nil, nil, nil, fmt.Errorf("runtime has no registered agents")
 	}
 	ctx, r.cancel = context.WithCancel(ctx)
 	r.done = make(chan struct{})
@@ -310,7 +297,7 @@ func (r *runtimeLifecycle) begin(ctx context.Context) (context.Context, map[stri
 		r.cancel = nil
 		close(r.done)
 	}
-	return ctx, configs, r.factory, finish, nil
+	return ctx, configs, finish, nil
 }
 
 func (r *runtimeLifecycle) close() {
@@ -326,10 +313,7 @@ func (r *runtimeLifecycle) close() {
 	}
 }
 
-var (
-	_ agents.FactoryRuntime = (*TemporalRuntime)(nil)
-	_ agents.FactoryRuntime = (*RestateRuntime)(nil)
-)
+var _ agents.FactoryRuntime = (*TemporalRuntime)(nil)
 
 // StreamBroker returns the broker configured for this runtime.
 func (r *TemporalRuntime) StreamBroker() agents.StreamBroker { return r.broker }
