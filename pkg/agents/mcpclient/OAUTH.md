@@ -2,7 +2,7 @@
 
 MCP connection definitions and tokens have separate stores:
 
-- `MCPServerConfigStore` holds server endpoints and OAuth application settings.
+- `Store` holds server endpoints and OAuth application settings.
 - `CredentialStore` holds tokens under **namespace + credential key**. The key,
   `OAuthCredentialKey(connector)`, binds the definition's owner (global or the
   user's own), its server name, and the OAuth client ID and token URL (for
@@ -49,24 +49,23 @@ provider, err := mcpclient.NewOAuthCredentialProvider(mcpclient.OAuthCredentialP
 if err != nil {
     return err
 }
-client := mcpclient.NewClient(configs, builtins).WithCredentials(provider)
+client := mcpclient.NewClient(builtins, mcpclient.WithUserStore(configs), mcpclient.WithCredentials(provider))
 ```
 
-Give `client` to the agent's `MCPClient` option, then mount the config stores.
-`WithReadOnlyStores` lets the handler find Gmail's OAuth settings in `builtins`
-without ever writing to it:
+Give `client` to the agent's `MCPClient` option, then mount the same two config
+stores. The handler finds Gmail's OAuth settings in the built-in store without
+ever writing to it:
 
 ```go
 handler := web.Handler(registry,
     agui.WithNamespaceResolver(authenticatedNamespace),
-    agui.WithMCPStore(configs, mcpclient.WithOAuth(provider), mcpclient.WithReadOnlyStores(builtins)),
+    agui.WithMCPStore(configs, mcpclient.WithBuiltInStore(builtins), mcpclient.WithOAuth(provider)),
 )
 ```
 
 Use the same authenticated namespace for agent runs and HTTP requests. For the
-standalone handler, use `NewHandler(configs, WithNamespaceResolver(...),
-WithOAuth(provider), WithReadOnlyStores(builtins))` and mount it with
-`http.StripPrefix`.
+standalone handler, use `NewHandler(configs, WithBuiltInStore(builtins),
+WithNamespaceResolver(...), WithOAuth(provider))` and mount it with `http.StripPrefix`.
 
 Visit `/api/agui/mcp/gmail/connect`. The handler resolves Gmail's OAuth config,
 creates expiring browser-bound state and an S256 PKCE challenge, then redirects
@@ -167,7 +166,7 @@ definitions; user definitions always use the protected transport. See the
 Implement `CredentialProvider.Resolve(ctx, namespace, connector, runContext)` and
 return a token source and stable principal. Set `UseCredentials: true` on the
 relevant global `ServerConfig` (user-owned definitions cannot set it, so a user's
-endpoint never receives application credentials), and call `client.WithCredentials(provider)` before sharing
-the client. Custom providers need no OAuth routes. Credentials stay out of agent
+endpoint never receives application credentials), and pass `mcpclient.WithCredentials(provider)` to
+`NewClient`. Custom providers need no OAuth routes. Credentials stay out of agent
 run state and durable histories; `Connector.Authorization` contains the current
 OAuth settings when present.

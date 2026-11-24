@@ -538,8 +538,11 @@ func (e *Agent) ExecuteWithRun(ctx context.Context, in *AgentInput, run *history
 		in.SessionID = run.GetConversationID()
 	}
 
+	// Prepare handoffs
 	handoffTools := e.PrepareHandoffTools(ctx)
 	tools := append(slices.Clone(e.tools), handoffTools...)
+
+	// Prepare skills
 	tools, skills, skillHint, err := e.prepareSkills(ctx, in, tools)
 	if err != nil {
 		return &AgentOutput{Status: agentstate.RunStatusError, RunID: run.GetRunID()}, err
@@ -553,6 +556,8 @@ func (e *Agent) ExecuteWithRun(ctx context.Context, in *AgentInput, run *history
 		return &AgentOutput{Status: agentstate.RunStatusError, RunID: run.GetRunID()}, err
 	}
 	tools = append(tools, mcpTools...)
+
+	// Prepare client tools
 	tools, err = e.prepareClientTools(ctx, in, tools)
 	if err != nil {
 		return &AgentOutput{Status: agentstate.RunStatusError, RunID: run.GetRunID()}, err

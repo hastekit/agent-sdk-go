@@ -18,7 +18,8 @@ import (
 	"golang.org/x/oauth2"
 )
 
-// recordStore returns persisted records verbatim, like a database adapter that skips validation.
+// recordStore returns one namespace's persisted records verbatim, like a
+// database adapter that skips validation.
 type recordStore struct {
 	mu      sync.Mutex
 	records []ServerConfig
@@ -29,7 +30,7 @@ func (s *recordStore) ListServerConfigs(_ context.Context, namespace string, _ m
 	defer s.mu.Unlock()
 	result := []ServerConfig{}
 	for _, record := range s.records {
-		if record.Namespace == "" || record.Namespace == namespace {
+		if record.Namespace == namespace {
 			result = append(result, record)
 		}
 	}
@@ -89,7 +90,7 @@ func TestUserConfigsCannotUseSharedCredentials(t *testing.T) {
 		return &Credential{TokenSource: oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "application-secret"})}, nil
 	})
 	config.Namespace = "alice"
-	statuses, tools, err := NewClient(&recordStore{records: []ServerConfig{config}}).WithCredentials(provider).ListTools(t.Context(), "alice", nil)
+	statuses, tools, err := NewClient(nil, WithUserStore(&recordStore{records: []ServerConfig{config}}), WithCredentials(provider)).ListTools(t.Context(), "alice", nil)
 	require.NoError(t, err)
 	require.Empty(t, tools)
 	require.Len(t, statuses, 1)
@@ -109,7 +110,8 @@ func TestInvalidUserRecordsFailOnlyTheirConnector(t *testing.T) {
 	shadowed := catalogConfig("docs", "http://10.0.0.6/mcp")
 	shadowed.Namespace = "alice"
 	source := &recordStore{records: []ServerConfig{global, good, private, duplicate, duplicate, shadowed}}
-	client := NewClient(source)
+	// One store fills both roles: the global is its empty namespace's record.
+	client := NewClient(source, WithUserStore(source))
 
 	// Usable connectors keep working; each bad record fails alone, and a global shadows a bad one.
 	statuses, tools, err := client.ListTools(t.Context(), "alice", nil)
@@ -132,7 +134,7 @@ func TestInvalidUserRecordsFailOnlyTheirConnector(t *testing.T) {
 	require.ErrorContains(t, err, "invalid MCP server configuration")
 
 	// The owner can still see why, and delete the records over HTTP.
-	handler := NewHandler(NewStore(source), WithNamespaceResolver(func(*http.Request) (string, error) { return "alice", nil }))
+	handler := NewHandler(NewStore(source), WithBuiltInStore(source), WithNamespaceResolver(func(*http.Request) (string, error) { return "alice", nil }))
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
 	require.Equal(t, http.StatusOK, response.Code)
@@ -175,20 +177,22 @@ func TestFileStoreIsolatesBadUserRecords(t *testing.T) {
 	require.NoError(t, err)
 	bob, err := store.ListServerConfigs(t.Context(), "bob", nil)
 	require.NoError(t, err)
-	require.Len(t, bob, 1)
-	resolved, err := NewClient(store).listServerConfigs(t.Context(), "alice", nil)
+	require.Empty(t, bob)
+	resolved, err := NewClient(store, WithUserStore(store)).listServerConfigs(t.Context(), "alice", nil)
 	require.NoError(t, err)
 	require.Contains(t, resolved.invalid["bad"].Error(), "public network addresses")
 	require.NoError(t, store.Put(t.Context(), "alice", catalogConfig("ok", "https://ok.example/mcp")))
 	require.NoError(t, store.Delete(t.Context(), "alice", "bad"))
-	resolved, err = NewClient(store).listServerConfigs(t.Context(), "alice", nil)
+	resolved, err = NewClient(store, WithUserStore(store)).listServerConfigs(t.Context(), "alice", nil)
 	require.NoError(t, err)
 	require.Empty(t, resolved.invalid)
 	require.Contains(t, resolved.configs, "ok")
 
-	// A broken global still fails the file at load time.
+	// A broken record loads, and fails the listing where it is a built-in.
 	require.NoError(t, os.WriteFile(path, []byte(`[{"name":"docs"}]`), 0600))
-	_, err = NewFileStore(path)
+	store, err = NewFileStore(path)
+	require.NoError(t, err)
+	_, err = NewClient(store).listServerConfigs(t.Context(), "alice", nil)
 	require.ErrorContains(t, err, "requires an endpoint")
 }
 
@@ -208,7 +212,7 @@ func TestUserToolCollisionsFailOnlyThatConnector(t *testing.T) {
 	for _, config := range []ServerConfig{first, mine, other} {
 		require.NoError(t, store.Put(t.Context(), "alice", config))
 	}
-	client := NewClient(store)
+	client := NewClient(store, WithUserStore(store))
 	statuses, tools, err := client.ListTools(t.Context(), "alice", nil)
 	require.NoError(t, err)
 	require.Len(t, tools, 6)

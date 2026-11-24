@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strconv"
 	"strings"
 )
 
@@ -45,7 +44,7 @@ func WithChoices(choices func(ctx context.Context, namespace string) (Choices, e
 
 // NewHandler exposes the requester's own agent configs:
 //
-//	GET    /agent-configs           → {"agents": [...], "nextCursor": "..."} (?limit, ?cursor)
+//	GET    /agent-configs           → {"agents": [...]}, every config, ordered by name
 //	POST   /agent-configs           → create or replace the config in the body
 //	GET    /agent-configs/{name}    → one config
 //	PUT    /agent-configs/{name}    → create or replace; the body's name must match or be empty
@@ -85,24 +84,15 @@ func NewHandler(store MutableStore, options ...HandlerOption) http.Handler {
 	}
 
 	route("GET /agent-configs", func(w http.ResponseWriter, r *http.Request, ns string) {
-		n := 0
-		if v := r.URL.Query().Get("limit"); v != "" {
-			var err error
-			n, err = strconv.Atoi(v)
-			if err != nil || n < 1 || n > 200 {
-				fail(w, fmt.Errorf("%w: limit must be 1–200", ErrInvalid))
-				return
-			}
-		}
-		page, err := store.List(r.Context(), ns, ListOptions{Limit: n, Cursor: r.URL.Query().Get("cursor")})
+		configs, err := store.List(r.Context(), ns)
 		if err != nil {
 			fail(w, err)
 			return
 		}
-		if page.Agents == nil {
-			page.Agents = []Config{}
+		if configs == nil {
+			configs = []Config{}
 		}
-		respond(w, http.StatusOK, page)
+		respond(w, http.StatusOK, listResponse{Agents: configs})
 	})
 
 	save := func(w http.ResponseWriter, r *http.Request, ns string) {
@@ -188,8 +178,13 @@ func readConfig(w http.ResponseWriter, r *http.Request) (Config, error) {
 	return cfg, nil
 }
 
+// listResponse is GET /agent-configs' body.
+type listResponse struct {
+	Agents []Config `json:"agents"`
+}
+
 // respond writes one of the handler's JSON bodies.
-func respond[T Page | Config | Choices](w http.ResponseWriter, status int, v T) {
+func respond[T listResponse | Config | Choices](w http.ResponseWriter, status int, v T) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
@@ -205,8 +200,6 @@ func fail(w http.ResponseWriter, err error) {
 		status, message = http.StatusNotFound, err.Error()
 	case errors.Is(err, ErrReserved):
 		status, message = http.StatusConflict, err.Error()
-	case errors.Is(err, ErrReadOnly):
-		status, message = http.StatusForbidden, err.Error()
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)

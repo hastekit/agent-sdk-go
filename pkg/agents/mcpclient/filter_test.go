@@ -8,9 +8,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// filterFixture stores three globals and two of alice's own servers. One of
-// alice's shares its name with a global.
-func filterFixture(t *testing.T) *Store {
+// filterFixture stores three globals, under the empty namespace, and two of
+// alice's own servers. One of alice's shares its name with a global. It fills
+// both of a client's roles.
+func filterFixture(t *testing.T) MutableStore {
 	t.Helper()
 	ctx := t.Context()
 	store := NewMemoryStore()
@@ -36,13 +37,17 @@ func toolsByName(tools []agents.Tool) map[string]agents.Tool {
 	return byName
 }
 
-func listedFilters(t *testing.T, store MCPServerConfigStore, namespace string) map[string]ToolFilter {
+// listedFilters lists store's empty namespace and namespace, by
+// "namespace/name".
+func listedFilters(t *testing.T, store Store, namespace string) map[string]ToolFilter {
 	t.Helper()
-	configs, err := store.ListServerConfigs(t.Context(), namespace, nil)
-	require.NoError(t, err)
 	listed := map[string]ToolFilter{}
-	for _, config := range configs {
-		listed[config.Namespace+"/"+config.Name] = config.ToolFilter
+	for _, scope := range []string{"", namespace} {
+		configs, err := store.ListServerConfigs(t.Context(), scope, nil)
+		require.NoError(t, err)
+		for _, config := range configs {
+			listed[config.Namespace+"/"+config.Name] = config.ToolFilter
+		}
 	}
 	return listed
 }
@@ -66,7 +71,7 @@ func TestFilterListsOnlyNamedServersAndTools(t *testing.T) {
 		"alice/notes": {Include: []string{"read"}},
 	}, listedFilters(t, filtered, "alice"))
 
-	client := NewClient(filtered)
+	client := NewClient(filtered, WithUserStore(filtered))
 	statuses, tools, err := client.ListTools(ctx, "alice", nil)
 	require.NoError(t, err)
 	require.Equal(t, []agents.ConnectorStatus{
@@ -86,7 +91,7 @@ func TestFilterListsOnlyNamedServersAndTools(t *testing.T) {
 
 	// Execution re-lists through the filter, so tools and servers left out are not callable.
 	unfiltered := map[string]*agents.BaseTool{}
-	_, tools, err = NewClient(store).ListTools(ctx, "alice", nil)
+	_, tools, err = NewClient(store, WithUserStore(store)).ListTools(ctx, "alice", nil)
 	require.NoError(t, err)
 	for name, tool := range toolsByName(tools) {
 		unfiltered[name] = tool.GetToolDescriptor()
@@ -99,44 +104,46 @@ func TestFilterListsOnlyNamedServersAndTools(t *testing.T) {
 	require.ErrorContains(t, err, "no longer configured")
 
 	// No tools in common leaves the server connected with none, never all of them.
-	statuses, tools, err = NewClient(Filter(store, map[string]ToolFilter{"ops": {Include: []string{"hidden"}}})).ListTools(ctx, "bob", nil)
+	hidden := Filter(store, map[string]ToolFilter{"ops": {Include: []string{"hidden"}}})
+	statuses, tools, err = NewClient(hidden, WithUserStore(hidden)).ListTools(ctx, "bob", nil)
 	require.NoError(t, err)
 	require.Equal(t, []agents.ConnectorStatus{agents.ConnectedConnectorStatus("ops", 0)}, statuses)
 	require.Empty(t, tools)
 
-	// An empty map lists nothing, and a nil store is reported like any nil store.
+	// An empty map lists nothing, and so does a missing store.
 	require.Empty(t, listedFilters(t, Filter(store, nil), "alice"))
-	_, _, err = NewClient(Filter(nil, map[string]ToolFilter{"docs": {}})).ListTools(ctx, "alice", nil)
-	require.ErrorContains(t, err, "must not be nil")
+	statuses, _, err = NewClient(Filter(nil, map[string]ToolFilter{"docs": {}})).ListTools(ctx, "alice", nil)
+	require.NoError(t, err)
+	require.Empty(t, statuses)
 }
 
-func TestFilterKeepUserServers(t *testing.T) {
+func TestFilterNarrowsEachStoreOnItsOwn(t *testing.T) {
 	ctx := t.Context()
 	store := filterFixture(t)
 
-	// Unnamed user servers are kept as they are; named ones are still narrowed.
-	// The global search is left out, so it does not shadow alice's.
-	filtered := Filter(store, map[string]ToolFilter{"docs": {}, "notes": {Include: []string{"read"}}}, KeepUserServers())
-	require.Equal(t, map[string]ToolFilter{
-		"/docs":        {},
-		"alice/notes":  {Include: []string{"read"}},
-		"alice/search": {},
-	}, listedFilters(t, filtered, "alice"))
-	_, tools, err := NewClient(filtered).ListTools(ctx, "alice", nil)
+	// A built-in left out does not shadow alice's server with its name.
+	client := NewClient(
+		Filter(store, map[string]ToolFilter{"docs": {}}),
+		WithUserStore(Filter(store, map[string]ToolFilter{"search": {}, "notes": {Include: []string{"read"}}})),
+	)
+	statuses, tools, err := client.ListTools(ctx, "alice", nil)
 	require.NoError(t, err)
+	require.Equal(t, []agents.ConnectorStatus{
+		agents.ConnectedConnectorStatus("docs", 3),
+		agents.ConnectedConnectorStatus("notes", 1),
+		agents.ConnectedConnectorStatus("search", 3),
+	}, statuses)
 	output, err := toolsByName(tools)["search__read"].Execute(ctx, filterCall("alice", "search__read"))
 	require.NoError(t, err)
 	require.Contains(t, *output.Output.OfString, "alice search")
 
-	// A kept global still shadows the user's server with the same name.
-	_, tools, err = NewClient(Filter(store, map[string]ToolFilter{"search": {}}, KeepUserServers())).ListTools(ctx, "alice", nil)
+	// A kept built-in still shadows the user's server with the same name.
+	search := Filter(store, map[string]ToolFilter{"search": {}})
+	_, tools, err = NewClient(search, WithUserStore(search)).ListTools(ctx, "alice", nil)
 	require.NoError(t, err)
 	output, err = toolsByName(tools)["search__read"].Execute(ctx, filterCall("alice", "search__read"))
 	require.NoError(t, err)
 	require.Contains(t, *output.Output.OfString, "global search")
-
-	// With an empty map only users' own servers remain.
-	require.Equal(t, map[string]ToolFilter{"alice/notes": {}, "alice/search": {}}, listedFilters(t, Filter(store, nil, KeepUserServers()), "alice"))
 }
 
 func TestToolFilterNarrowAllowsOnlyToolsBothAllow(t *testing.T) {

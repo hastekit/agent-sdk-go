@@ -14,19 +14,23 @@ type SkillClient = agents.SkillClient
 type SkillSelection = agents.SkillSelection
 type ListedSkill = agents.ListedSkill
 
-// SkillStore lists and reads skills by namespace; its empty namespace holds
-// global (developer-owned) skills — see skills.Store.
+// SkillStore lists and reads skills by namespace — see skills.Store. A skill
+// client reads one as its built-in store and one as its user store.
 type SkillStore = skills.Store
 
-// NewSkillClient reads skills from one or more stores, such as a store of
-// users' uploads and a folder of built-in skills.
+// NewSkillClient reads global skills from a built-in store, such as a folder,
+// and each namespace's own from the store WithUserSkillStore gives, such as
+// one of users' uploads.
 var NewSkillClient = skills.NewClient
 
-// NewDirSkillStore serves a folder of skills as global skills, rediscovered on every listing.
+// WithUserSkillStore reads each namespace's own skills from a store.
+var WithUserSkillStore = skills.WithUserStore
+
+// NewDirSkillStore serves a folder of skills, rediscovered on every listing.
 var NewDirSkillStore = skills.NewDirStore
 
 // NewFSSkillStore supports embed.FS and other io/fs implementations.
 var NewFSSkillStore = skills.NewFSStore
 
-// FilterSkillStore lists only the named skills of a store, global or users' own.
+// FilterSkillStore lists only the named skills of a store.
 var FilterSkillStore = skills.Filter

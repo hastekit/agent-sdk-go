@@ -24,7 +24,7 @@ type registry struct{ agent *agents.Agent }
 func (r registry) Agent(name string) (*agents.Agent, bool) { return r.agent, name == r.agent.Name }
 func (r registry) AgentNames() []string                    { return []string{r.agent.Name} }
 
-func static(agent *agents.Agent) AgentRegistry { return StaticRegistry(registry{agent}) }
+func static(agent *agents.Agent) agents.Registry { return agents.StaticRegistry(registry{agent}) }
 func TestAgentExecutorDispatchesUserMessageAndTrustedContext(t *testing.T) {
 	var input *agents.AgentInput
 	agent := agents.NewAgent(&agents.AgentOptions{Name: "assistant", StreamBroker: streambroker.NewMemoryStreamBroker(), Runtime: runtimeFunc(func(_ context.Context, _ *agents.Agent, in *agents.AgentInput) (*agents.AgentOutput, error) {

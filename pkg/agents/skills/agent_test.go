@@ -29,7 +29,7 @@ func TestAgentBindsStoreToInputNamespace(t *testing.T) {
 	_, err = store.Put(context.Background(), "tenant", skills.Bundle{Files: map[string][]byte{"SKILL.md": []byte("---\nname: review\ndescription: Review work\n---\nInstructions")}})
 	require.NoError(t, err)
 	prompt := &promptRecorder{}
-	agent := agents.NewAgent(&agents.AgentOptions{Name: "tester", SkillClient: skills.NewClient(store), Instruction: prompt}).WithLLM(doneLLM{})
+	agent := agents.NewAgent(&agents.AgentOptions{Name: "tester", SkillClient: skills.NewClient(nil, skills.WithUserStore(store)), Instruction: prompt}).WithLLM(doneLLM{})
 	// A caller-supplied RunContext namespace must not override the execution's namespace.
 	_, err = agent.Run(context.Background(), &agents.AgentInput{Namespace: "tenant", RunContext: map[string]any{"Namespace": "other"}})
 	require.NoError(t, err)
@@ -41,7 +41,7 @@ func TestSkillStoreIsSharedAcrossAgents(t *testing.T) {
 	ctx := context.Background()
 	store, err := skills.NewFileStore(t.TempDir())
 	require.NoError(t, err)
-	base := skills.NewClient(store)
+	base := skills.NewClient(nil, skills.WithUserStore(store))
 	var configured []*agents.Agent
 	for _, name := range []string{"reviewer", "writer"} {
 		configured = append(configured, agents.NewAgent(&agents.AgentOptions{Name: name, SkillClient: base}))

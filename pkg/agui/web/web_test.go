@@ -24,7 +24,7 @@ import (
 type registry map[string]*agents.Agent
 
 // Agent and AgentNames make registry a code-built set; tests hand it to
-// Handler through agui.StaticRegistry's interface directly.
+// Handler as an agents.Registry directly.
 func (r registry) Agent(_ context.Context, _ string, name string) (*agents.Agent, bool, error) {
 	a, ok := r[name]
 	return a, ok, nil

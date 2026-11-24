@@ -60,14 +60,28 @@ func (c *Calls) Of(name string) int {
 }
 
 // AgentFixture is a Builder over a small catalog — two tools, two global
-// skills, two MCP servers — and a store holding one config, in
+// skills, two MCP servers — and a Registry over a store holding one config, in
 // FixtureNamespace, that picks one tool, one skill and one MCP tool.
 type AgentFixture struct {
 	Provider *ScriptedProvider
 	Store    *agentconfig.MemoryStore
 	Builder  *agentconfig.Builder
+	Registry *agentconfig.Registry
 	Calls    *Calls
 	Config   agentconfig.Config
+}
+
+// Agent resolves name for namespace through the fixture's Registry and builds
+// it, returning agentconfig.ErrNotFound for a name the namespace cannot run.
+func (f *AgentFixture) Agent(ctx context.Context, namespace, name string) (*agents.Agent, error) {
+	agent, ok, err := f.Registry.Agent(ctx, namespace, name)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, agentconfig.ErrNotFound
+	}
+	return agent, nil
 }
 
 // FixtureSteps is a script that uses every pick once, then answers.
@@ -112,10 +126,9 @@ func NewAgentFixture(t *testing.T, runtime agentconfig.Runtime, broker agents.St
 		MCP:         map[string]mcpclient.ToolFilter{"docs": {Include: []string{"search"}}},
 	}
 	builder, err := agentconfig.NewBuilder(agentconfig.Dependencies{
-		Stores:      []agentconfig.Store{store},
-		Models:      agentconfig.Models{FixtureModel: provider},
-		SkillStores: []skills.Store{skillStore},
-		MCPStores:   []mcpclient.MCPServerConfigStore{mcpStore},
+		Models:            agentconfig.Models{FixtureModel: provider},
+		BuiltInSkillStore: skillStore,
+		BuiltInMCPStore:   mcpStore,
 		Tools: map[string]agents.Tool{
 			FixturePickedTool:     newRecordingTool(calls, FixturePickedTool),
 			FixtureOtherTool:      newRecordingTool(calls, FixtureOtherTool),
@@ -126,7 +139,9 @@ func NewAgentFixture(t *testing.T, runtime agentconfig.Runtime, broker agents.St
 		Runtime:      runtime,
 	})
 	require.NoError(t, err)
-	return &AgentFixture{Provider: provider, Store: store, Builder: builder, Calls: calls, Config: cfg}
+	registry, err := agentconfig.NewRegistry(builder, nil, store)
+	require.NoError(t, err)
+	return &AgentFixture{Provider: provider, Store: store, Builder: builder, Registry: registry, Calls: calls, Config: cfg}
 }
 
 // AddConfig writes the fixture's config to its namespace, as a user would

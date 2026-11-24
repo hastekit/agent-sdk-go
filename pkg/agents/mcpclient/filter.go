@@ -5,56 +5,39 @@ import (
 	"slices"
 )
 
-// FilterOption configures Filter.
-type FilterOption func(*filteredStore)
-
-// KeepUserServers keeps every namespace-owned server that Filter's map does not
-// name, unchanged, for agents that should see whatever servers users add. Named
-// user servers are still narrowed to their tools.
-func KeepUserServers() FilterOption {
-	return func(s *filteredStore) { s.keepUsers = true }
-}
-
 // filteredStore lists only the chosen servers of another store, each narrowed
 // to its chosen tools.
 type filteredStore struct {
-	store     MCPServerConfigStore
-	servers   map[string]ToolFilter
-	keepUsers bool
+	store   Store
+	servers map[string]ToolFilter
 }
 
 // Filter returns a store that lists only the servers named in servers, each
-// narrowed by its ToolFilter, so an agent can take part of a shared catalog
-// instead of all of it. Names match global and namespace-owned servers alike:
+// narrowed by its ToolFilter, in every namespace, so an agent can take part of
+// a store instead of all of it. Filter either of a Client's stores, or both:
 //
-//	shared, err := mcpclient.NewFileStore("mcp.json")
-//	client := mcpclient.NewClient(mcpclient.Filter(shared, map[string]mcpclient.ToolFilter{
-//		"docs":   {},                                     // a global, every tool it exposes
-//		"github": {Include: []string{"get_issue", "search_issues"}},
-//		"gmail":  {Include: []string{"search"}},          // each user's own gmail server
-//	}))
-//
-// A namespace's servers the map does not name are dropped, since users choose
-// their own names; pass KeepUserServers to keep them. When a global and a
-// user's server share a kept name, the global wins as usual.
+//	client := mcpclient.NewClient(
+//		mcpclient.Filter(builtIns, map[string]mcpclient.ToolFilter{
+//			"docs":   {},                                     // every tool it exposes
+//			"github": {Include: []string{"get_issue", "search_issues"}},
+//		}),
+//		mcpclient.WithUserStore(mcpclient.Filter(users, map[string]mcpclient.ToolFilter{
+//			"gmail": {Include: []string{"search"}},           // each user's own gmail server
+//		})),
+//	)
 //
 // Tool names are the server's original names, before any ToolPrefix. A tool
 // filter narrows the server's own ServerConfig.ToolFilter and can never restore
 // a tool it excludes; an empty ToolFilter keeps the server's tools as they are.
-// Per-run MCPSelection.Tools narrows the result further.
+// Per-run MCPSelection.Tools narrows a user's server further.
 //
 // The filter applies to every listing, including the one CallTool makes, so a
 // server or tool left out is neither listed nor callable through the client. A
 // name the store does not list is ignored, since a catalog can change at run
-// time. An empty map lists nothing, or only users' servers with KeepUserServers.
+// time. An empty map lists nothing.
 //
-// A global left out is not the agent's at all, so it does not shadow a kept
-// user server with the same name. Stored OAuth grants are bound to the global
-// definition (see OAuthCredentialKey), so such a user server never receives them.
-//
-// The result is read-only. Give NewHandler the unfiltered store, so users manage
-// their servers there and every global name stays reserved.
-func Filter(store MCPServerConfigStore, servers map[string]ToolFilter, options ...FilterOption) MCPServerConfigStore {
+// The result is read-only. Give NewHandler the unfiltered stores.
+func Filter(store Store, servers map[string]ToolFilter) Store {
 	if store == nil {
 		return nil // reported by the client like any nil store
 	}
@@ -62,11 +45,6 @@ func Filter(store MCPServerConfigStore, servers map[string]ToolFilter, options .
 	filtered := &filteredStore{store: store, servers: make(map[string]ToolFilter, len(servers))}
 	for name, tools := range servers {
 		filtered.servers[name] = ToolFilter{Include: slices.Clone(tools.Include), Exclude: slices.Clone(tools.Exclude)}
-	}
-	for _, option := range options {
-		if option != nil {
-			option(filtered)
-		}
 	}
 	return filtered
 }
@@ -79,12 +57,10 @@ func (s *filteredStore) ListServerConfigs(ctx context.Context, namespace string,
 	configs := make([]ServerConfig, 0, len(listed))
 	for _, config := range listed {
 		tools, named := s.servers[config.Name]
-		switch {
-		case named:
-			config.ToolFilter = config.ToolFilter.narrow(tools)
-		case config.Namespace == "" || !s.keepUsers:
+		if !named {
 			continue
 		}
+		config.ToolFilter = config.ToolFilter.narrow(tools)
 		configs = append(configs, config)
 	}
 	return configs, nil

@@ -4,6 +4,7 @@ import (
 	"context"
 	"sort"
 
+	"github.com/hastekit/agent-sdk-go/pkg/agents/mcpclient"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/skills"
 )
 
@@ -77,8 +78,8 @@ func (b *Builder) Choices(ctx context.Context, namespace string) (Choices, error
 		}
 		choices.Tools = append(choices.Tools, choice)
 	}
-	if len(b.deps.SkillStores) > 0 {
-		listed, err := skills.NewClient(b.deps.SkillStores...).ListSkills(ctx, namespace, nil)
+	if b.deps.BuiltInSkillStore != nil || b.deps.UserSkillStore != nil {
+		listed, err := skills.NewClient(b.deps.BuiltInSkillStore, skills.WithUserStore(b.deps.UserSkillStore)).ListSkills(ctx, namespace, nil)
 		if err != nil {
 			return Choices{}, err
 		}
@@ -86,18 +87,25 @@ func (b *Builder) Choices(ctx context.Context, namespace string) (Choices, error
 			choices.Skills = append(choices.Skills, Choice{Name: skill.Name, Description: skill.Description, BuiltIn: skill.Global})
 		}
 	}
+	// Built-ins first, so one shadows a user's server with its name.
 	seen := map[string]bool{}
-	for _, store := range b.deps.MCPStores {
-		configs, err := store.ListServerConfigs(ctx, namespace, nil)
+	for _, source := range []struct {
+		store     mcpclient.Store
+		namespace string
+		user      bool
+	}{{b.deps.BuiltInMCPStore, "", false}, {b.deps.UserMCPStore, namespace, true}} {
+		if source.store == nil || (source.user && namespace == "") {
+			continue
+		}
+		configs, err := source.store.ListServerConfigs(ctx, source.namespace, nil)
 		if err != nil {
 			return Choices{}, err
 		}
 		for _, config := range configs {
-			if seen[config.Name] || (config.Namespace != "" && config.Namespace != namespace) {
-				continue
+			if !seen[config.Name] {
+				seen[config.Name] = true
+				choices.Connectors = append(choices.Connectors, Choice{Name: config.Name, BuiltIn: !source.user})
 			}
-			seen[config.Name] = true
-			choices.Connectors = append(choices.Connectors, Choice{Name: config.Name, BuiltIn: config.Namespace == ""})
 		}
 	}
 	sort.Slice(choices.Connectors, func(i, j int) bool { return choices.Connectors[i].Name < choices.Connectors[j].Name })
@@ -108,31 +116,21 @@ func (b *Builder) Choices(ctx context.Context, namespace string) (Choices, error
 // built-ins and the namespace's own. Code agents are not among them, since a
 // durable run carries its graph as configs.
 func (r *Registry) Choices(ctx context.Context, namespace string) (Choices, error) {
-	choices := emptyChoices()
-	if r.builder != nil {
-		var err error
-		if choices, err = r.builder.Choices(ctx, namespace); err != nil {
-			return Choices{}, err
-		}
+	choices, err := r.builder.Choices(ctx, namespace)
+	if err != nil {
+		return Choices{}, err
 	}
-	seen := map[string]bool{}
-	add := func(choice Choice) {
-		if !seen[choice.Name] {
-			seen[choice.Name] = true
-			choices.Agents = append(choices.Agents, choice)
-		}
+	listed, err := r.list(ctx, namespace)
+	if err != nil {
+		return Choices{}, err
 	}
-	if r.builder != nil {
-		listing, err := r.builder.Catalog().List(ctx, namespace)
-		if err != nil {
-			return Choices{}, err
-		}
-		for _, cfg := range listing.BuiltIn {
-			add(Choice{Name: cfg.Name, Description: cfg.Description, BuiltIn: true})
-		}
-		for _, cfg := range listing.Own {
-			add(Choice{Name: cfg.Name, Description: cfg.Description})
-		}
+	// list leaves out a namespace's config a built-in shadows, so no name
+	// repeats.
+	for _, cfg := range listed.builtIn {
+		choices.Agents = append(choices.Agents, Choice{Name: cfg.Name, Description: cfg.Description, BuiltIn: true})
+	}
+	for _, cfg := range listed.own {
+		choices.Agents = append(choices.Agents, Choice{Name: cfg.Name, Description: cfg.Description})
 	}
 	return choices, nil
 }

@@ -35,8 +35,6 @@ func TestMutableStoresIsolateNamespaces(t *testing.T) {
 			assert.Equal(t, stored, got)
 			_, err = store.Get(ctx, "tenant-b", "helper")
 			require.ErrorIs(t, err, agentconfig.ErrNotFound)
-			_, err = store.Get(ctx, "", "helper")
-			require.ErrorIs(t, err, agentconfig.ErrNotFound, "a namespace's config is never a built-in")
 
 			// What the caller holds afterwards cannot change what was stored.
 			stored.MCP["docs"] = mcpclient.ToolFilter{}
@@ -44,12 +42,17 @@ func TestMutableStoresIsolateNamespaces(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, []string{"search"}, got.MCP["docs"].Include)
 
-			page, err := store.List(ctx, "tenant-b", agentconfig.ListOptions{})
+			listed, err := store.List(ctx, "tenant-b")
 			require.NoError(t, err)
-			assert.Empty(t, page.Agents)
+			assert.Empty(t, listed)
 
-			_, err = store.Put(ctx, " ", config("x"))
-			require.ErrorIs(t, err, agentconfig.ErrInvalid, "a blank namespace cannot pass for the built-in one")
+			// Stores hold namespaces' own agents only; built-ins are code.
+			for _, namespace := range []string{"", " "} {
+				_, err = store.Put(ctx, namespace, config("x"))
+				require.ErrorIs(t, err, agentconfig.ErrInvalid, "namespace %q", namespace)
+				_, err = store.Get(ctx, namespace, "helper")
+				require.ErrorIs(t, err, agentconfig.ErrInvalid, "namespace %q", namespace)
+			}
 			_, err = store.Put(ctx, "tenant-a", agentconfig.Config{Name: "no-model"})
 			require.ErrorIs(t, err, agentconfig.ErrInvalid)
 
@@ -61,18 +64,20 @@ func TestMutableStoresIsolateNamespaces(t *testing.T) {
 	}
 }
 
-func TestListPagesByName(t *testing.T) {
-	store := agentconfig.NewMemoryStore()
-	for i := range 5 {
-		_, err := store.Put(context.Background(), "ns", config(fmt.Sprintf("agent-%d", 4-i)))
-		require.NoError(t, err)
+func TestListOrdersByName(t *testing.T) {
+	fileStore, err := agentconfig.NewFileStore(t.TempDir())
+	require.NoError(t, err)
+	for name, store := range map[string]agentconfig.MutableStore{"memory": agentconfig.NewMemoryStore(), "file": fileStore} {
+		t.Run(name, func(t *testing.T) {
+			for i := range 3 {
+				_, err := store.Put(context.Background(), "ns", config(fmt.Sprintf("agent-%d", 2-i)))
+				require.NoError(t, err)
+			}
+			listed, err := store.List(context.Background(), "ns")
+			require.NoError(t, err)
+			require.Equal(t, []string{"agent-0", "agent-1", "agent-2"}, names(listed))
+		})
 	}
-	page, err := store.List(context.Background(), "ns", agentconfig.ListOptions{Limit: 2})
-	require.NoError(t, err)
-	require.Equal(t, []string{"agent-0", "agent-1"}, names(page.Agents))
-	page, err = store.List(context.Background(), "ns", agentconfig.ListOptions{Limit: 2, Cursor: page.NextCursor})
-	require.NoError(t, err)
-	require.Equal(t, []string{"agent-2", "agent-3"}, names(page.Agents))
 }
 
 func names(configs []agentconfig.Config) []string {
@@ -83,46 +88,73 @@ func names(configs []agentconfig.Config) []string {
 	return out
 }
 
-func TestInlineStoreHoldsBuiltInsOnly(t *testing.T) {
-	store, err := agentconfig.NewInlineStore(config("concierge"))
+// registryOver offers builtIns and store's agents, building with a Builder
+// that allows the model config uses.
+func registryOver(t *testing.T, builtIns []agentconfig.Config, store agentconfig.MutableStore) *agentconfig.Registry {
+	t.Helper()
+	builder, err := agentconfig.NewBuilder(agentconfig.Dependencies{
+		Models: agentconfig.Models{"Test/m": testutil.NewScriptedProvider()},
+	})
 	require.NoError(t, err)
-	_, err = store.Get(context.Background(), "", "concierge")
+	registry, err := agentconfig.NewRegistry(builder, builtIns, store)
 	require.NoError(t, err)
-	_, err = store.Get(context.Background(), "tenant-a", "concierge")
-	require.ErrorIs(t, err, agentconfig.ErrNotFound)
-
-	_, err = agentconfig.NewInlineStore(config("dup"), config("dup"))
-	require.ErrorIs(t, err, agentconfig.ErrInvalid)
+	return registry
 }
 
-func TestCatalogPrecedence(t *testing.T) {
-	ctx := context.Background()
-	builtIns, err := agentconfig.NewInlineStore(config("concierge"))
+func TestNewRegistryValidatesBuiltIns(t *testing.T) {
+	builder, err := agentconfig.NewBuilder(agentconfig.Dependencies{
+		Models: agentconfig.Models{"Test/m": testutil.NewScriptedProvider()},
+	})
 	require.NoError(t, err)
+
+	_, err = agentconfig.NewRegistry(builder, []agentconfig.Config{config("dup"), config("dup")}, nil)
+	require.ErrorIs(t, err, agentconfig.ErrInvalid, "a built-in name is held once")
+	_, err = agentconfig.NewRegistry(builder, []agentconfig.Config{{Name: "no-model"}}, nil)
+	require.ErrorIs(t, err, agentconfig.ErrInvalid)
+	_, err = agentconfig.NewRegistry(nil, nil, agentconfig.NewMemoryStore())
+	require.Error(t, err, "a registry needs a builder")
+
+	// The registry keeps its own copy.
+	builtIns := []agentconfig.Config{config("concierge")}
+	registry, err := agentconfig.NewRegistry(builder, builtIns, nil)
+	require.NoError(t, err)
+	builtIns[0].Instruction = "changed afterwards"
+	snapshot, err := registry.Snapshot(context.Background(), "tenant-a", "concierge")
+	require.NoError(t, err)
+	assert.Empty(t, snapshot.Agents["concierge"].Instruction)
+}
+
+func TestRegistryPrecedence(t *testing.T) {
+	ctx := context.Background()
 	users := agentconfig.NewMemoryStore()
 	shadow := config("concierge")
 	shadow.Instruction = "an impostor"
-	_, err = users.Put(ctx, "tenant-a", shadow)
+	_, err := users.Put(ctx, "tenant-a", shadow)
 	require.NoError(t, err)
 	_, err = users.Put(ctx, "tenant-a", config("mine"))
 	require.NoError(t, err)
 
-	catalog := agentconfig.NewCatalog(builtIns, users)
-	got, builtIn, err := catalog.Get(ctx, "tenant-a", "concierge")
+	registry := registryOver(t, []agentconfig.Config{config("concierge")}, users)
+	snapshot, err := registry.Snapshot(ctx, "tenant-a", "concierge")
 	require.NoError(t, err)
-	assert.True(t, builtIn, "a built-in wins over a namespace's config with its name")
-	assert.Empty(t, got.Instruction)
+	assert.Empty(t, snapshot.Agents["concierge"].Instruction, "a built-in wins over a namespace's config with its name")
 
-	listing, err := catalog.List(ctx, "tenant-a")
+	choices, err := registry.Choices(ctx, "tenant-a")
 	require.NoError(t, err)
-	assert.Equal(t, []string{"concierge"}, names(listing.BuiltIn))
-	assert.Equal(t, []string{"mine"}, names(listing.Own), "a shadowed config is left out")
+	assert.Equal(t, []agentconfig.Choice{{Name: "concierge", BuiltIn: true}, {Name: "mine"}}, choices.Agents,
+		"a shadowed config is left out")
+}
 
-	// The same name in two stores for one scope is an error, never a choice.
-	twice, err := agentconfig.NewInlineStore(config("concierge"))
+func TestRegistryWithoutAStoreOffersBuiltInsOnly(t *testing.T) {
+	ctx := context.Background()
+	registry := registryOver(t, []agentconfig.Config{config("concierge")}, nil)
+	names, err := registry.AgentNames(ctx, "tenant-a")
 	require.NoError(t, err)
-	_, _, err = agentconfig.NewCatalog(builtIns, twice).Get(ctx, "tenant-a", "concierge")
-	require.ErrorContains(t, err, "duplicate built-in agent")
+	assert.Equal(t, []string{"concierge"}, names)
+	_, ok, err := registry.Agent(ctx, "tenant-a", "mine")
+	require.NoError(t, err)
+	assert.False(t, ok)
+	assert.Nil(t, registry.Store())
 }
 
 // A built-in hands off among built-ins only, so a namespace cannot change
@@ -131,8 +163,6 @@ func TestSnapshotKeepsBuiltInHandoffsAmongBuiltIns(t *testing.T) {
 	ctx := context.Background()
 	concierge := config("concierge")
 	concierge.Handoffs = []agentconfig.Handoff{{Name: "billing"}}
-	builtIns, err := agentconfig.NewInlineStore(concierge)
-	require.NoError(t, err)
 	users := agentconfig.NewMemoryStore()
 	front := config("front")
 	front.Handoffs = []agentconfig.Handoff{{Name: "billing"}, {Name: "concierge"}}
@@ -140,14 +170,14 @@ func TestSnapshotKeepsBuiltInHandoffsAmongBuiltIns(t *testing.T) {
 		_, err := users.Put(ctx, "tenant-a", c)
 		require.NoError(t, err)
 	}
-	catalog := agentconfig.NewCatalog(builtIns, users)
+	registry := registryOver(t, []agentconfig.Config{concierge}, users)
 
-	snapshot, err := catalog.Snapshot(ctx, "tenant-a", "concierge")
+	snapshot, err := registry.Snapshot(ctx, "tenant-a", "concierge")
 	require.NoError(t, err)
 	assert.Len(t, snapshot.Agents, 1, "the namespace's billing is not the built-in's to reach")
 	assert.Empty(t, snapshot.Agents["concierge"].Handoffs)
 
-	snapshot, err = catalog.Snapshot(ctx, "tenant-a", "front")
+	snapshot, err = registry.Snapshot(ctx, "tenant-a", "front")
 	require.NoError(t, err)
 	assert.Len(t, snapshot.Agents, 3, "a namespace's agent reaches its own and built-ins")
 	assert.Len(t, snapshot.Agents["front"].Handoffs, 2)
@@ -164,10 +194,11 @@ func TestRegistryReservesGlobalSkillsWithoutBuildingAgents(t *testing.T) {
 	_, err = store.Put(context.Background(), "tenant-a", config("helper"))
 	require.NoError(t, err)
 	models := &countingModels{inner: agentconfig.Models{"Test/m": testutil.NewScriptedProvider()}}
-	builder, err := agentconfig.NewBuilder(agentconfig.Dependencies{Stores: []agentconfig.Store{store}, Models: models, SkillStores: []skills.Store{skillStore}})
+	builder, err := agentconfig.NewBuilder(agentconfig.Dependencies{Models: models, BuiltInSkillStore: skillStore})
 	require.NoError(t, err)
 
-	registry := agentconfig.NewRegistry(builder)
+	registry, err := agentconfig.NewRegistry(builder, nil, store)
+	require.NoError(t, err)
 	reserved, err := registry.GlobalSkillNames(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, []string{"house-style"}, reserved)
@@ -181,28 +212,6 @@ func TestRegistryReservesGlobalSkillsWithoutBuildingAgents(t *testing.T) {
 	_, ok, err := registry.Agent(context.Background(), "tenant-b", "helper")
 	require.NoError(t, err)
 	assert.False(t, ok)
-}
-
-// uncomparableStore is a Store whose values cannot be compared with ==.
-type uncomparableStore struct {
-	agentconfig.Store
-	tags []string
-}
-
-func TestRegistryReadsOnlyItsBuildersStores(t *testing.T) {
-	store := agentconfig.NewMemoryStore()
-	odd := uncomparableStore{Store: agentconfig.NewMemoryStore()}
-	builder, err := agentconfig.NewBuilder(agentconfig.Dependencies{
-		Stores: []agentconfig.Store{odd, store},
-		Models: agentconfig.Models{"Test/m": testutil.NewScriptedProvider()},
-	})
-	require.NoError(t, err)
-	registry := agentconfig.NewRegistry(builder)
-	assert.True(t, registry.Reads(store))
-	assert.False(t, registry.Reads(agentconfig.NewMemoryStore()))
-	assert.False(t, registry.Reads(nil))
-	assert.False(t, registry.Reads(uncomparableStore{Store: store}), "and comparing one never panics")
-	assert.False(t, agentconfig.NewRegistry(nil).Reads(store))
 }
 
 func TestOutputMustBeASchemaObject(t *testing.T) {

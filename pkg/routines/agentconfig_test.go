@@ -10,7 +10,6 @@ import (
 	"testing"
 
 	"github.com/hastekit/agent-sdk-go/internal/testutil"
-	"github.com/hastekit/agent-sdk-go/pkg/agents/agentconfig"
 	"github.com/hastekit/agent-sdk-go/pkg/routines"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -24,7 +23,7 @@ func TestRoutinesTargetANamespacesOwnAgents(t *testing.T) {
 	store, err := routines.OpenJSONLStore(filepath.Join(t.TempDir(), "routines.jsonl"))
 	require.NoError(t, err)
 	defer store.Close()
-	executor := &routines.AgentExecutor{Registry: agentconfig.NewRegistry(f.Builder)}
+	executor := &routines.AgentExecutor{Registry: f.Registry}
 	service := routines.NewService(store, executor)
 	ctx := context.Background()
 
@@ -62,7 +61,7 @@ func TestRoutineAgentsRouteListsTheNamespacesAgents(t *testing.T) {
 	store, err := routines.OpenJSONLStore(filepath.Join(t.TempDir(), "routines.jsonl"))
 	require.NoError(t, err)
 	defer store.Close()
-	service := routines.NewService(store, &routines.AgentExecutor{Registry: agentconfig.NewRegistry(f.Builder)})
+	service := routines.NewService(store, &routines.AgentExecutor{Registry: f.Registry})
 	server := httptest.NewServer(routines.NewHTTPHandler(service, routines.HTTPConfig{
 		NamespaceResolver: func(r *http.Request) (string, error) { return r.Header.Get("X-Tenant"), nil },
 	}))

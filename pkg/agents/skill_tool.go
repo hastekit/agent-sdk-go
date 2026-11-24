@@ -21,7 +21,7 @@ type ReadSkillInput struct {
 	File string `json:"file,omitempty"`
 }
 
-func dynamicSkillDescriptor() *BaseTool {
+func skillToolDescriptor() *BaseTool {
 	return &BaseTool{
 		ToolUnion: responses.ToolUnion{
 			OfFunction: &responses.FunctionTool{
@@ -134,7 +134,8 @@ type SkillReadExecutor interface {
 // ReadSkillWithMiddleware runs a read inside a durable execution step.
 // Local tools already receive this wrapping from their ToolExecutor.
 func ReadSkillWithMiddleware(ctx context.Context, client SkillClient, namespace string, rc map[string]any, name, file string, call *ToolCall, middlewares []ToolCallMiddleware) (string, error) {
-	descriptor := dynamicSkillDescriptor()
+	descriptor := skillToolDescriptor()
+
 	resp, err := ExecuteWithTrace(ctx, nil, call, func(ctx context.Context, call *ToolCall) (*ToolCallResponse, error) {
 		return ExecuteToolCallWithMiddleware(ctx, middlewares, SerializeTool(descriptor, call), call, func(ctx context.Context, call *ToolCall) (*ToolCallResponse, error) {
 			content, err := client.ReadSkill(ctx, namespace, rc, name, file)
@@ -147,8 +148,10 @@ func ReadSkillWithMiddleware(ctx context.Context, client SkillClient, namespace 
 	if err != nil {
 		return "", err
 	}
+
 	if resp == nil || resp.FunctionCallOutputMessage == nil || resp.Output.OfString == nil {
 		return "", fmt.Errorf("skill reader middleware returned no text")
 	}
+
 	return *resp.Output.OfString, nil
 }

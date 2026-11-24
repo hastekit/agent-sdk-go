@@ -8,17 +8,18 @@ import (
 	"sort"
 )
 
-// fsStore serves skill folders as global skills. It rediscovers them on every
-// call, so skills added or removed on disk appear on the next run without
-// rebuilding the agent.
+// fsStore serves skill folders, the same for every namespace. It rediscovers
+// them on every call, so skills added or removed on disk appear on the next
+// run without rebuilding the agent.
 type fsStore struct {
 	load func() (*filesystemCatalog, error)
 }
 
 // NewDirStore serves the skill folders under directory, including nested
-// folders, as global skills: under the empty namespace and no other. It
-// validates the folders at construction so a bad path fails at startup, and
-// never accepts writes.
+// folders, under every namespace: as a Client's built-in store they are
+// global skills, as its user store they are every user's own. It validates the
+// folders at construction so a bad path fails at startup, and never accepts
+// writes.
 func NewDirStore(directory string) (Store, error) {
 	return newFSStore(func() (*filesystemCatalog, error) { return loadDirectoryCatalog(directory) })
 }
@@ -39,12 +40,9 @@ func newFSStore(load func() (*filesystemCatalog, error)) (Store, error) {
 	return &fsStore{load: load}, nil
 }
 
-func (s *fsStore) List(ctx context.Context, namespace string, opts ListOptions) (Page, error) {
+func (s *fsStore) List(ctx context.Context, _ string, opts ListOptions) (Page, error) {
 	if err := ctx.Err(); err != nil {
 		return Page{}, err
-	}
-	if namespace != "" {
-		return Page{Skills: []Metadata{}}, nil
 	}
 	catalog, err := s.load()
 	if err != nil {
@@ -57,12 +55,9 @@ func (s *fsStore) List(ctx context.Context, namespace string, opts ListOptions) 
 	return pageOf(listed, opts), ctx.Err()
 }
 
-func (s *fsStore) Get(ctx context.Context, namespace, name string) (Bundle, error) {
+func (s *fsStore) Get(ctx context.Context, _ string, name string) (Bundle, error) {
 	if err := ctx.Err(); err != nil {
 		return Bundle{}, err
-	}
-	if namespace != "" {
-		return Bundle{}, ErrNotFound
 	}
 	catalog, err := s.load()
 	if err != nil {
@@ -78,8 +73,8 @@ type inlineStore struct {
 }
 
 // NewInlineStore serves skill bundles defined in code, or loaded by the
-// application from its own configuration, as global skills: under the empty
-// namespace and no other. It validates and copies them, and never accepts writes.
+// application from its own configuration, under every namespace, as
+// NewDirStore does. It validates and copies them, and never accepts writes.
 func NewInlineStore(bundles ...Bundle) (Store, error) {
 	store := &inlineStore{bundles: map[string]Bundle{}}
 	for _, bundle := range bundles {
@@ -96,19 +91,16 @@ func NewInlineStore(bundles ...Bundle) (Store, error) {
 	return store, nil
 }
 
-func (s *inlineStore) List(ctx context.Context, namespace string, opts ListOptions) (Page, error) {
-	if namespace != "" {
-		return Page{Skills: []Metadata{}}, ctx.Err()
-	}
+func (s *inlineStore) List(ctx context.Context, _ string, opts ListOptions) (Page, error) {
 	return pageOf(s.listed, opts), ctx.Err()
 }
 
-func (s *inlineStore) Get(ctx context.Context, namespace, name string) (Bundle, error) {
+func (s *inlineStore) Get(ctx context.Context, _ string, name string) (Bundle, error) {
 	if err := ctx.Err(); err != nil {
 		return Bundle{}, err
 	}
 	bundle, ok := s.bundles[name]
-	if namespace != "" || !ok {
+	if !ok {
 		return Bundle{}, ErrNotFound
 	}
 	return cloneBundle(bundle), nil

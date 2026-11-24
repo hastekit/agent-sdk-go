@@ -88,8 +88,7 @@ func TestOAuthHandlerDiscoversAndRegisters(t *testing.T) {
 	as := newAuthServer(t, false)
 	provider, store := oauthTestProvider(t, "")
 	config := discoveredConfig(as.URL + "/mcp")
-	handler := NewHandler(NewInlineStore(config), WithOAuth(provider),
-		WithNamespaceResolver(func(r *http.Request) (string, error) { return "ada", nil }))
+	handler := NewHandler(nil, WithBuiltInStore(NewInlineStore(config)), WithOAuth(provider), WithNamespaceResolver(func(r *http.Request) (string, error) { return "ada", nil }))
 
 	connect := func() (*url.URL, *http.Cookie) {
 		t.Helper()
@@ -146,8 +145,7 @@ func TestOAuthHandlerDiscoversAndRegisters(t *testing.T) {
 func TestOAuthHandlerWithoutRegistration(t *testing.T) {
 	as := newAuthServer(t, true)
 	provider, _ := oauthTestProvider(t, "")
-	handler := NewHandler(NewInlineStore(discoveredConfig(as.URL+"/mcp")), WithOAuth(provider),
-		WithNamespaceResolver(func(r *http.Request) (string, error) { return "ada", nil }))
+	handler := NewHandler(nil, WithBuiltInStore(NewInlineStore(discoveredConfig(as.URL+"/mcp"))), WithOAuth(provider), WithNamespaceResolver(func(r *http.Request) (string, error) { return "ada", nil }))
 
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/notes/connect", nil))

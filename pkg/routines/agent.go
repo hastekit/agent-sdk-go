@@ -13,45 +13,6 @@ import (
 
 var ErrPaused = errors.New("agent paused awaiting input; resume through the application's agent API")
 
-// AgentRegistry finds the agents a namespace can run, so a routine can target
-// its namespace's own agents as well as shared ones. It has the shape of
-// agui.Registry: agentconfig.Registry, which builds agents namespaces create
-// at run time, satisfies both. Wrap agents built in code with StaticRegistry.
-type AgentRegistry interface {
-	// Agent returns the agent namespace runs under name. ok is false when the
-	// namespace has no such agent; an error means the lookup itself failed.
-	Agent(ctx context.Context, namespace, name string) (agent *agents.Agent, ok bool, err error)
-	// AgentNames lists the agents namespace can run.
-	AgentNames(ctx context.Context, namespace string) ([]string, error)
-}
-
-// StaticAgents is a fixed set of agents built in code, such as
-// *sdk.AgentRegistry.
-type StaticAgents interface {
-	Agent(name string) (*agents.Agent, bool)
-	AgentNames() []string
-}
-
-// StaticRegistry offers the same agents to every namespace.
-func StaticRegistry(set StaticAgents) AgentRegistry { return staticRegistry{set: set} }
-
-type staticRegistry struct{ set StaticAgents }
-
-func (s staticRegistry) Agent(_ context.Context, _ string, name string) (*agents.Agent, bool, error) {
-	if s.set == nil {
-		return nil, false, nil
-	}
-	agent, ok := s.set.Agent(name)
-	return agent, ok, nil
-}
-
-func (s staticRegistry) AgentNames(context.Context, string) ([]string, error) {
-	if s.set == nil {
-		return nil, nil
-	}
-	return s.set.AgentNames(), nil
-}
-
 // AgentLister is an Executor that can list the agents a namespace's routines
 // may target, for the routes and tools that offer them.
 type AgentLister interface {
@@ -61,9 +22,11 @@ type AgentLister interface {
 // AgentExecutor dispatches to registered agents using their configured runtime.
 // Each occurrence gets an isolated thread/session. ContextResolver optionally
 // loads trusted credentials/context at execution time, never from tool arguments.
-// Agents are looked up in the routine's own namespace.
+// Agents are looked up in the routine's own namespace, so a routine can target
+// its namespace's own agents (agentconfig.Registry) as well as shared ones;
+// wrap agents built in code with agents.StaticRegistry.
 type AgentExecutor struct {
-	Registry        AgentRegistry
+	Registry        agents.Registry
 	ContextResolver func(context.Context, Routine) (map[string]any, error)
 }
 

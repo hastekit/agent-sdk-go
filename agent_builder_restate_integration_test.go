@@ -88,7 +88,7 @@ func TestRestateRunsAConfigAddedAfterServeStarts(t *testing.T) {
 
 	// Written after Serve started: nothing about it was registered.
 	f.AddConfig(t)
-	agent, err := f.Builder.Agent(ctx, testutil.FixtureNamespace, testutil.FixtureAgent)
+	agent, err := f.Agent(ctx, testutil.FixtureNamespace, testutil.FixtureAgent)
 	require.NoError(t, err)
 	runCtx, stop := context.WithTimeout(ctx, 60*time.Second)
 	defer stop()
@@ -109,9 +109,9 @@ func TestRestateRunsAConfigAddedAfterServeStarts(t *testing.T) {
 	assert.Zero(t, f.Calls.Of(testutil.FixtureOtherTool))
 
 	// Another namespace can neither find the agent nor run its snapshot.
-	_, err = f.Builder.Agent(ctx, "tenant-b", testutil.FixtureAgent)
+	_, err = f.Agent(ctx, "tenant-b", testutil.FixtureAgent)
 	require.ErrorIs(t, err, agentconfig.ErrNotFound)
-	snapshot, err := f.Builder.Snapshot(ctx, testutil.FixtureNamespace, testutil.FixtureAgent)
+	snapshot, err := f.Registry.Snapshot(ctx, testutil.FixtureNamespace, testutil.FixtureAgent)
 	require.NoError(t, err)
 	_, err = runtime.Bind(snapshot).Run(runCtx, nil, &agents.AgentInput{Namespace: "tenant-b", ThreadID: "thread-2"})
 	require.Error(t, err)
@@ -129,7 +129,7 @@ func TestRestateDeliversAConfigBuiltAgentsBackgroundTask(t *testing.T) {
 	)
 	_, err := f.Store.Put(ctx, testutil.FixtureNamespace, agentconfig.Config{Name: "indexer", Model: testutil.FixtureModel, Tools: []string{testutil.FixtureBackgroundTool}})
 	require.NoError(t, err)
-	agent, err := f.Builder.Agent(ctx, testutil.FixtureNamespace, "indexer")
+	agent, err := f.Agent(ctx, testutil.FixtureNamespace, "indexer")
 	require.NoError(t, err)
 	runCtx, stop := context.WithTimeout(ctx, 60*time.Second)
 	defer stop()
@@ -167,7 +167,7 @@ func TestRestateRunsAConfigBuiltSubAgent(t *testing.T) {
 		Name: "orchestrator", Model: testutil.FixtureModel, SubAgents: []agentconfig.SubAgent{{Name: testutil.FixtureAgent}},
 	})
 	require.NoError(t, err)
-	agent, err := f.Builder.Agent(ctx, testutil.FixtureNamespace, "orchestrator")
+	agent, err := f.Agent(ctx, testutil.FixtureNamespace, "orchestrator")
 	require.NoError(t, err)
 	runCtx, stop := context.WithTimeout(ctx, 90*time.Second)
 	defer stop()

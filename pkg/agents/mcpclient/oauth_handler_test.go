@@ -34,7 +34,7 @@ func TestOAuthHandlerAuthorization(t *testing.T) {
 	}))
 	defer tokenServer.Close()
 	provider, store := oauthTestProvider(t, tokenServer.URL)
-	handler := NewHandler(oauthTestStore(tokenServer.URL), WithOAuth(provider), WithNamespaceResolver(func(r *http.Request) (string, error) { return r.Header.Get("Subject"), nil }))
+	handler := NewHandler(nil, WithBuiltInStore(oauthTestStore(tokenServer.URL)), WithOAuth(provider), WithNamespaceResolver(func(r *http.Request) (string, error) { return r.Header.Get("Subject"), nil }))
 
 	// Starting consent sets a browser-bound cookie and never puts the namespace or secrets in state.
 	request := httptest.NewRequest(http.MethodGet, "/gmail/connect", nil)
@@ -108,7 +108,7 @@ func TestOAuthHandlerAuthorizationForScripts(t *testing.T) {
 	}))
 	defer tokenServer.Close()
 	provider, store := oauthTestProvider(t, tokenServer.URL)
-	handler := NewHandler(oauthTestStore(tokenServer.URL), WithOAuth(provider), WithNamespaceResolver(func(r *http.Request) (string, error) { return r.Header.Get("Subject"), nil }))
+	handler := NewHandler(nil, WithBuiltInStore(oauthTestStore(tokenServer.URL)), WithOAuth(provider), WithNamespaceResolver(func(r *http.Request) (string, error) { return r.Header.Get("Subject"), nil }))
 
 	start := func(server string) string {
 		t.Helper()

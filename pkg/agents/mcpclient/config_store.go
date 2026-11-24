@@ -4,14 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"sync"
 )
 
-// memoryConfigStore holds global and namespace-owned definitions in one process.
+// memoryConfigStore holds definitions by namespace in one process.
 type memoryConfigStore struct {
 	mu      sync.RWMutex
 	configs map[serverConfigKey]ServerConfig
@@ -60,7 +59,7 @@ func (s *memoryConfigStore) ListServerConfigs(ctx context.Context, namespace str
 	defer s.mu.RUnlock()
 	result := []ServerConfig{}
 	for _, config := range s.configs {
-		if config.Namespace != "" && config.Namespace != namespace {
+		if config.Namespace != namespace {
 			continue
 		}
 		copy, err := cloneServerConfig(config)
@@ -106,23 +105,9 @@ func (s *fileConfigStore) read() ([]ServerConfig, error) {
 	if err := json.Unmarshal(data, &configs); err != nil {
 		return nil, errors.New("invalid MCP server configuration JSON")
 	}
-
-	// Only developer-owned globals fail the file. User records are validated by the client,
-	// which isolates a bad one to its own connector; failing here would also block the
-	// writes that repair it and break every other namespace.
-	seen := map[string]bool{}
-	for _, config := range configs {
-		if config.Namespace != "" {
-			continue
-		}
-		if err := validateServerConfig(config); err != nil {
-			return nil, err
-		}
-		if seen[config.Name] {
-			return nil, fmt.Errorf("duplicate MCP server %q in one scope", config.Name)
-		}
-		seen[config.Name] = true
-	}
+	// Records are validated by the client, which fails a listing on a bad
+	// built-in and isolates a bad user record to its own connector; failing
+	// here would also block the writes that repair it.
 	return configs, nil
 }
 
@@ -138,7 +123,7 @@ func (s *fileConfigStore) ListServerConfigs(ctx context.Context, namespace strin
 	}
 	result := []ServerConfig{}
 	for _, config := range configs {
-		if config.Namespace == "" || config.Namespace == namespace {
+		if config.Namespace == namespace {
 			result = append(result, config)
 		}
 	}

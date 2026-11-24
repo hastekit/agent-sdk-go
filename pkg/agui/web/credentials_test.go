@@ -36,7 +36,7 @@ func TestMCPCredentialsThroughWebHandler(t *testing.T) {
 
 	// Use the same resolver as chat and verify it receives the matched server exactly once.
 	resolutions := 0
-	handler := Handler(registry{}, agui.WithMCPStore(configs, mcpclient.WithOAuth(provider)), agui.WithNamespaceResolver(func(r *http.Request) (string, error) {
+	handler := Handler(registry{}, agui.WithMCPStore(nil, mcpclient.WithBuiltInStore(configs), mcpclient.WithOAuth(provider)), agui.WithNamespaceResolver(func(r *http.Request) (string, error) {
 		resolutions++
 		require.NotEmpty(t, r.PathValue("server"))
 		if r.Header.Get("Subject") == "denied" {
@@ -104,7 +104,7 @@ func TestMCPCredentialsFromScriptThroughWebHandler(t *testing.T) {
 	require.NoError(t, err)
 	authorization := &mcpclient.OAuthConfig{ClientID: "client", RedirectURL: "https://app.example/oauth-callback.html", AuthURL: "https://accounts.example/authorize", TokenURL: tokenServer.URL}
 	configs := mcpclient.NewInlineStore(mcpclient.ServerConfig{Name: "gmail", Endpoint: "https://mcp.example/gmail", Authorization: authorization})
-	handler := Handler(registry{}, agui.WithMCPStore(configs, mcpclient.WithOAuth(provider)), agui.WithNamespaceResolver(func(r *http.Request) (string, error) {
+	handler := Handler(registry{}, agui.WithMCPStore(nil, mcpclient.WithBuiltInStore(configs), mcpclient.WithOAuth(provider)), agui.WithNamespaceResolver(func(r *http.Request) (string, error) {
 		return r.Header.Get("Subject"), nil
 	}))
 

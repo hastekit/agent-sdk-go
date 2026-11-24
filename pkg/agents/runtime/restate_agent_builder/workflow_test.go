@@ -22,7 +22,7 @@ func TestBuildAgentWrapsOnlyThePicks(t *testing.T) {
 	f := testutil.NewAgentFixture(t, nil, broker)
 	f.AddConfig(t)
 	ctx := context.Background()
-	snapshot, err := f.Builder.Snapshot(ctx, testutil.FixtureNamespace, testutil.FixtureAgent)
+	snapshot, err := f.Registry.Snapshot(ctx, testutil.FixtureNamespace, testutil.FixtureAgent)
 	require.NoError(t, err)
 
 	real, err := f.Builder.AgentOptions(snapshot.Agents[testutil.FixtureAgent])
@@ -51,7 +51,7 @@ func TestRunRefusesSnapshotsTerminally(t *testing.T) {
 	broker := streambroker.NewMemoryStreamBroker()
 	f := testutil.NewAgentFixture(t, nil, broker)
 	f.AddConfig(t)
-	snapshot, err := f.Builder.Snapshot(context.Background(), testutil.FixtureNamespace, testutil.FixtureAgent)
+	snapshot, err := f.Registry.Snapshot(context.Background(), testutil.FixtureNamespace, testutil.FixtureAgent)
 	require.NoError(t, err)
 	builder := New(f.Builder, broker)
 
@@ -71,7 +71,7 @@ func TestRuntimeIsAnAgentConfigRuntime(t *testing.T) {
 	broker := streambroker.NewMemoryStreamBroker()
 	f := testutil.NewAgentFixture(t, NewRuntime("http://127.0.0.1:1", broker), nil)
 	f.AddConfig(t)
-	agent, err := f.Builder.Agent(context.Background(), testutil.FixtureNamespace, testutil.FixtureAgent)
+	agent, err := f.Agent(context.Background(), testutil.FixtureNamespace, testutil.FixtureAgent)
 	require.NoError(t, err)
 	require.Same(t, broker, agent.StreamBroker())
 	_, err = agent.Run(context.Background(), &agents.AgentInput{Namespace: testutil.FixtureNamespace})

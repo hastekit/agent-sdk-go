@@ -12,7 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestDirStoreDiscoversChangesAsGlobals(t *testing.T) {
+func TestDirStoreDiscoversChanges(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	write := func(name string) {
@@ -30,16 +30,16 @@ func TestDirStoreDiscoversChangesAsGlobals(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "reference", string(bundle.Files["guide.txt"]))
 
-	// Folder skills are globals only: no other namespace lists or reads them.
+	// A folder has no namespaces: every one lists and reads the same skills.
 	page, err = store.List(ctx, "tenant", ListOptions{})
 	require.NoError(t, err)
-	require.Empty(t, page.Skills)
+	require.Len(t, page.Skills, 1)
 	_, err = store.Get(ctx, "tenant", "first")
-	require.ErrorIs(t, err, ErrNotFound)
+	require.NoError(t, err)
 	_, err = store.Get(ctx, "", "missing")
 	require.ErrorIs(t, err, ErrNotFound)
 
-	// Globals are always enabled, and changes appear on the next listing.
+	// As built-ins they are always enabled, and changes appear on the next listing.
 	agent := agents.NewAgent(&agents.AgentOptions{Name: "files", SkillClient: NewClient(store)})
 	write("second")
 	listed, err := agent.ListSkills(ctx, "tenant", nil, agents.SkillSelection{Disable: []string{"first"}})

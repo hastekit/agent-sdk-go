@@ -33,9 +33,9 @@ type options struct {
 	skillStore         skills.MutableStore
 	attachmentStore    attachments.UploadStore
 	attachmentMaxBytes int64
-	mcpStore           mcpclient.MCPServerConfigStore
+	mcpStore           mcpclient.MutableStore
 	mcpOptions         []mcpclient.HandlerOption
-	agentConfigStore   agentconfig.MutableStore
+	agentConfigs       bool
 	agentConfigOptions []agentconfig.HandlerOption
 	namespaceResolver  NamespaceResolver
 	senderID           string
@@ -76,34 +76,38 @@ func WithAttachmentStore(store attachments.UploadStore) Option {
 	return func(o *options) { o.attachmentStore = store }
 }
 
-// WithMCPStore mounts connector management and OAuth routes under /mcp.
-// Pass the writable config store and the agent client's OAuth provider, plus
-// mcpclient.WithReadOnlyStores for the client's other stores, such as an
-// InlineStore. The handler always uses AG-UI's authenticated namespace resolver.
-func WithMCPStore(store mcpclient.MCPServerConfigStore, handlerOptions ...mcpclient.HandlerOption) Option {
+// WithMCPStore mounts connector management and OAuth routes under /mcp (see
+// mcpclient.NewHandler), as WithSkillStore does for skills. Pass the agents'
+// mcpclient.Client's user store, which users write to, and its built-in store
+// and OAuth provider through mcpclient.WithBuiltInStore and mcpclient.WithOAuth.
+// The handler always uses AG-UI's authenticated namespace resolver.
+func WithMCPStore(store mcpclient.MutableStore, handlerOptions ...mcpclient.HandlerOption) Option {
 	return func(o *options) { o.mcpStore = store; o.mcpOptions = handlerOptions }
 }
 
-// WithAgentConfigStore mounts /agent-configs, where each namespace manages the
-// agents it creates at run time (see agentconfig.NewHandler). The registry
-// must run what is written there: an agentconfig.Registry whose Builder reads
-// store, with any agents built in code passed alongside —
+// mcpRoutes reports whether WithMCPStore gave the /mcp routes anything to
+// serve: a store, or options such as a built-in store to connect with OAuth.
+func (o options) mcpRoutes() bool { return o.mcpStore != nil || len(o.mcpOptions) > 0 }
+
+// WithAgentConfigs mounts /agent-configs, where each namespace manages the
+// agents it creates at run time (see agentconfig.NewHandler), in the store of
+// the registry given to NewHandler — so what users write is what it runs:
 //
-//	registry := agentconfig.NewRegistry(builder, codeAgents)
-//	agui.NewHandler(registry, agui.WithAgentConfigStore(userStore))
+//	registry, err := agentconfig.NewRegistry(builder, builtIns, userStore, codeAgents)
+//	agui.NewHandler(registry, agui.WithAgentConfigs())
 //
-// NewHandler panics otherwise, since the agents users created would never
-// run. The registry's Validate checks each config first — refusing names a
+// The registry must be an *agentconfig.Registry with a store; NewHandler
+// panics otherwise. Its Validate checks each config first — refusing names a
 // code or built-in agent holds and anything the Builder cannot run — unless
 // the options supply a validator of their own, and its Choices serves
 // /agent-choices for the embedded UI's agent editor. The routes always use
-// AG-UI's namespace resolver, and never write the built-in (empty) namespace.
-// Protect management routes with application authorization middleware.
-func WithAgentConfigStore(store agentconfig.MutableStore, handlerOptions ...agentconfig.HandlerOption) Option {
-	return func(o *options) { o.agentConfigStore = store; o.agentConfigOptions = handlerOptions }
+// AG-UI's namespace resolver, and never write built-ins. Protect management
+// routes with application authorization middleware.
+func WithAgentConfigs(handlerOptions ...agentconfig.HandlerOption) Option {
+	return func(o *options) { o.agentConfigs = true; o.agentConfigOptions = handlerOptions }
 }
 
-const agentConfigRegistryPanic = "agui: WithAgentConfigStore needs a registry that runs the store's configs, such as agentconfig.NewRegistry(builder, codeAgents) with the store among the builder's Stores"
+const agentConfigRegistryPanic = "agui: WithAgentConfigs needs an *agentconfig.Registry with a store"
 
 // WithAttachmentUploadLimit bounds each HTTP upload (default 20 MiB).
 func WithAttachmentUploadLimit(n int64) Option {
@@ -173,7 +177,7 @@ func buildOptions(opts []Option) options {
 //	GET  /agents/{agent}/threads                  → the agent's own stored threads, newest first
 //	GET  /agents/{agent}/threads/{thread}/messages → thread history as AG-UI messages
 //	GET  /skills                                  → the caller's own skills (WithSkillStore)
-//	GET  /agent-configs                           → the caller's own agent configs (WithAgentConfigStore)
+//	GET  /agent-configs                           → the caller's own agent configs (WithAgentConfigs)
 //
 // The caller's own skills are not scoped to an agent: /skills manages them,
 // and every agent using the store can read them. An agent's built-in skills
@@ -185,7 +189,7 @@ func buildOptions(opts []Option) options {
 // (CopilotKit's HttpAgent, raw @ag-ui/client, the embedded UI in
 // pkg/agui/web) can point at it directly:
 //
-//	http.ListenAndServe(":8080", agui.NewHandler(agui.StaticRegistry(registry)))
+//	http.ListenAndServe(":8080", agui.NewHandler(agents.StaticRegistry(registry)))
 //
 // The stop endpoint (POST /agents/{agent}/stop) ends a run already
 // streaming, identified by its thread id in the resolved namespace — a separate request, since the
@@ -197,7 +201,7 @@ func buildOptions(opts []Option) options {
 // the agent's persistence adapter to implement history.ThreadLister
 // (the SDK's in-memory and file adapters do); when it doesn't, the
 // listing endpoint answers 501 so clients can hide the picker.
-func NewHandler(registry Registry, opts ...Option) http.Handler {
+func NewHandler(registry agents.Registry, opts ...Option) http.Handler {
 	o := buildOptions(opts)
 	mux := http.NewServeMux()
 	o.mountA2A(mux, registry)
@@ -221,25 +225,19 @@ func NewHandler(registry Registry, opts ...Option) http.Handler {
 		mux.Handle("/skills", h)
 		mux.Handle("/skills/", h)
 	}
-	if o.agentConfigStore != nil {
-		if reader, ok := registry.(interface{ Reads(agentconfig.Store) bool }); !ok || !reader.Reads(o.agentConfigStore) {
+	if o.agentConfigs {
+		configs, ok := registry.(*agentconfig.Registry)
+		if !ok || configs.Store() == nil {
 			panic(agentConfigRegistryPanic)
 		}
-		var handlerOptions []agentconfig.HandlerOption
-		if validator, ok := registry.(interface {
-			Validate(context.Context, agentconfig.Config) error
-		}); ok {
-			handlerOptions = append(handlerOptions, agentconfig.WithValidator(validator.Validate))
-		}
-		if chooser, ok := registry.(interface {
-			Choices(context.Context, string) (agentconfig.Choices, error)
-		}); ok {
-			handlerOptions = append(handlerOptions, agentconfig.WithChoices(chooser.Choices))
+		handlerOptions := []agentconfig.HandlerOption{
+			agentconfig.WithValidator(configs.Validate),
+			agentconfig.WithChoices(configs.Choices),
 		}
 		handlerOptions = append(handlerOptions, o.agentConfigOptions...)
 		// Last, so no option can replace the authenticated namespace.
 		handlerOptions = append(handlerOptions, agentconfig.WithNamespaceResolver(func(r *http.Request) (string, error) { return requestNamespace(r), nil }))
-		h := o.withNamespace(agentconfig.NewHandler(o.agentConfigStore, handlerOptions...))
+		h := o.withNamespace(agentconfig.NewHandler(configs.Store(), handlerOptions...))
 		mux.Handle("/agent-configs", h)
 		mux.Handle("/agent-configs/", h)
 		mux.Handle("/agent-choices", h)
@@ -351,8 +349,8 @@ func NewHandler(registry Registry, opts ...Option) http.Handler {
 			"full_history":  o.fullHistory,
 			"attachments":   o.attachmentStore != nil,
 			"skill_store":   o.skillStore != nil,
-			"mcp_store":     o.mcpStore != nil,
-			"agent_configs": o.agentConfigStore != nil,
+			"mcp_store":     o.mcpRoutes(),
+			"agent_configs": o.agentConfigs,
 			"routines":      o.routineService != nil,
 		})
 	})
@@ -990,7 +988,7 @@ func agentGlobalSkills(ctx context.Context, agent *agents.Agent, runContext map[
 // globalSkillNames lists the developer-owned skills user uploads may not
 // reuse. A GlobalSkillLister answers from its stores, building no agent; any
 // other registry is asked for each agent the namespace can run.
-func globalSkillNames(r *http.Request, registry Registry) ([]string, error) {
+func globalSkillNames(r *http.Request, registry agents.Registry) ([]string, error) {
 	if lister, ok := registry.(GlobalSkillLister); ok {
 		return lister.GlobalSkillNames(r.Context())
 	}

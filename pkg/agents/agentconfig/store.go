@@ -11,146 +11,58 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"slices"
 	"sort"
 	"strings"
 	"sync"
 )
 
-// Store lists and reads agent configs by namespace. It is everything a Builder
-// needs, so built-ins and custom backends implement only this. It mirrors
-// skills.Store.
+// Store lists and reads the agents namespaces create at run time. Built-in
+// agents are not stored: they are configs in code, given to NewRegistry.
 //
-// The empty namespace holds built-in agents: developer-owned, runnable from
-// every namespace, and winning over a namespace's own config with the same
-// name. Any other namespace holds that namespace's own agents. List pages
-// through one namespace only; Get returns ErrNotFound for a name the namespace
-// lacks. Implementations must be safe for concurrent callers and honor
-// cancellation.
+// Every call names a namespace, which is never empty. List returns the
+// namespace's configs ordered by name; namespaces hold an agent per thing a
+// user built, not per request, so a listing is not paged. Get returns
+// ErrNotFound for a name the namespace lacks. Implementations must be safe for
+// concurrent callers and honor cancellation.
 type Store interface {
 	Get(ctx context.Context, namespace, name string) (Config, error)
-	List(ctx context.Context, namespace string, opts ListOptions) (Page, error)
+	List(ctx context.Context, namespace string) ([]Config, error)
 }
 
 // MutableStore is a Store that also saves configs. Implementations must
 // isolate namespaces, replace a config atomically, make Delete idempotent, and
 // be safe for concurrent callers. Put returns the config as stored.
-//
-// Writing the empty namespace changes every namespace's built-in agents, so
-// only trusted server code may do it. NewHandler refuses it, whatever
-// namespace the request resolves to.
 type MutableStore interface {
 	Store
 	Put(ctx context.Context, namespace string, config Config) (Config, error)
 	Delete(ctx context.Context, namespace, name string) error
 }
 
-// ListOptions pages a listing. Limit defaults to 50 and is capped at 200.
-type ListOptions struct {
-	Limit  int
-	Cursor string
-}
-
-// Page is one page of a namespace's configs, ordered by name.
-type Page struct {
-	Agents     []Config `json:"agents"`
-	NextCursor string   `json:"nextCursor,omitempty"`
-}
-
-func limit(n int) int {
-	if n <= 0 {
-		return 50
-	}
-	if n > 200 {
-		return 200
-	}
-	return n
-}
-
-// checkNamespace rejects a blank but nonempty namespace, so it cannot pass for
-// the built-in one.
+// checkNamespace rejects an empty or blank namespace: stores hold namespaces'
+// own agents only.
 func checkNamespace(ctx context.Context, namespace string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if namespace != "" && strings.TrimSpace(namespace) == "" {
-		return fmt.Errorf("%w: blank namespace", ErrInvalid)
+	if strings.TrimSpace(namespace) == "" {
+		return fmt.Errorf("%w: namespace required", ErrInvalid)
 	}
 	return nil
 }
 
-// pageOf pages through configs in name order. The cursor is the last name
-// returned, so it stays valid while configs are added or removed.
-func pageOf(configs []Config, opts ListOptions) (Page, error) {
-	sorted := slices.Clone(configs)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Name < sorted[j].Name })
-	page := Page{Agents: []Config{}}
-	for _, c := range sorted {
-		if opts.Cursor != "" && c.Name <= opts.Cursor {
-			continue
-		}
-		if len(page.Agents) == limit(opts.Limit) {
-			page.NextCursor = page.Agents[len(page.Agents)-1].Name
-			break
-		}
-		copy, err := clone(c)
-		if err != nil {
-			return Page{}, err
-		}
-		page.Agents = append(page.Agents, copy)
-	}
-	return page, nil
-}
-
-// inlineStore serves configs written in code as built-ins.
-type inlineStore struct {
-	configs map[string]Config
-}
-
-// NewInlineStore serves configs defined in code, or loaded by the application
-// from its own files, as built-in agents: under the empty namespace and no
-// other. It validates and copies them, and never accepts writes.
-func NewInlineStore(configs ...Config) (Store, error) {
-	store := &inlineStore{configs: make(map[string]Config, len(configs))}
+// sortedClones copies configs in name order, so nothing a caller holds can
+// change what was stored.
+func sortedClones(configs []Config) ([]Config, error) {
+	result := make([]Config, 0, len(configs))
 	for _, c := range configs {
-		if err := Validate(c); err != nil {
-			return nil, err
-		}
-		if _, exists := store.configs[c.Name]; exists {
-			return nil, fmt.Errorf("%w: duplicate built-in agent %q", ErrInvalid, c.Name)
-		}
 		copy, err := clone(c)
 		if err != nil {
 			return nil, err
 		}
-		store.configs[c.Name] = copy
+		result = append(result, copy)
 	}
-	return store, nil
-}
-
-func (s *inlineStore) Get(ctx context.Context, namespace, name string) (Config, error) {
-	if err := checkNamespace(ctx, namespace); err != nil {
-		return Config{}, err
-	}
-	c, ok := s.configs[name]
-	if namespace != "" || !ok {
-		return Config{}, ErrNotFound
-	}
-	return clone(c)
-}
-
-func (s *inlineStore) List(ctx context.Context, namespace string, opts ListOptions) (Page, error) {
-	if err := checkNamespace(ctx, namespace); err != nil {
-		return Page{}, err
-	}
-	if namespace != "" {
-		return Page{Agents: []Config{}}, nil
-	}
-	configs := make([]Config, 0, len(s.configs))
-	for _, c := range s.configs {
-		configs = append(configs, c)
-	}
-	return pageOf(configs, opts)
+	sort.Slice(result, func(i, j int) bool { return result[i].Name < result[j].Name })
+	return result, nil
 }
 
 // MemoryStore keeps configs in process memory, for tests and single-process
@@ -207,9 +119,9 @@ func (s *MemoryStore) Delete(ctx context.Context, namespace, name string) error 
 	return nil
 }
 
-func (s *MemoryStore) List(ctx context.Context, namespace string, opts ListOptions) (Page, error) {
+func (s *MemoryStore) List(ctx context.Context, namespace string) ([]Config, error) {
 	if err := checkNamespace(ctx, namespace); err != nil {
-		return Page{}, err
+		return nil, err
 	}
 	s.mu.RLock()
 	configs := make([]Config, 0, len(s.namespaces[namespace]))
@@ -217,7 +129,7 @@ func (s *MemoryStore) List(ctx context.Context, namespace string, opts ListOptio
 		configs = append(configs, c)
 	}
 	s.mu.RUnlock()
-	return pageOf(configs, opts)
+	return sortedClones(configs)
 }
 
 // FileStore keeps one JSON file per config, in a directory per namespace. The
@@ -347,25 +259,24 @@ func (s *FileStore) Delete(ctx context.Context, namespace, name string) error {
 	return nil
 }
 
-// List orders by name. File names are hashes, so a page reads the namespace's
-// directory whole; namespaces hold an agent per thing a user built, not per
-// request, so this stays small.
-func (s *FileStore) List(ctx context.Context, namespace string, opts ListOptions) (Page, error) {
+// List reads the namespace's directory whole and orders it by name, since file
+// names are hashes.
+func (s *FileStore) List(ctx context.Context, namespace string) ([]Config, error) {
 	dir, err := s.dir(ctx, namespace)
 	if err != nil {
-		return Page{}, err
+		return nil, err
 	}
 	entries, err := os.ReadDir(dir)
 	if errors.Is(err, fs.ErrNotExist) {
-		return Page{Agents: []Config{}}, nil
+		return []Config{}, nil
 	}
 	if err != nil {
-		return Page{}, err
+		return nil, err
 	}
-	var configs []Config
+	configs := []Config{}
 	for _, entry := range entries {
 		if err := ctx.Err(); err != nil {
-			return Page{}, err
+			return nil, err
 		}
 		if !entry.Type().IsRegular() || !strings.HasSuffix(entry.Name(), ".json") {
 			continue
@@ -375,33 +286,12 @@ func (s *FileStore) List(ctx context.Context, namespace string, opts ListOptions
 			continue // removed while listing
 		}
 		if err != nil {
-			return Page{}, err
+			return nil, err
 		}
 		configs = append(configs, c)
 	}
-	return pageOf(configs, opts)
-}
-
-// listAll reads every page of one namespace, rejecting cursors that repeat.
-func listAll(ctx context.Context, store Store, namespace string) ([]Config, error) {
-	var result []Config
-	cursor := ""
-	seen := map[string]bool{}
-	for {
-		page, err := store.List(ctx, namespace, ListOptions{Limit: 200, Cursor: cursor})
-		if err != nil {
-			return nil, err
-		}
-		result = append(result, page.Agents...)
-		if page.NextCursor == "" {
-			return result, nil
-		}
-		if seen[page.NextCursor] {
-			return nil, errors.New("agent config store repeated pagination cursor")
-		}
-		seen[page.NextCursor] = true
-		cursor = page.NextCursor
-	}
+	sort.Slice(configs, func(i, j int) bool { return configs[i].Name < configs[j].Name })
+	return configs, nil
 }
 
 var (

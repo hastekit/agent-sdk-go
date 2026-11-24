@@ -21,7 +21,7 @@ func TestSkillStoresShareInstructionParsing(t *testing.T) {
 			require.NoError(t, err)
 			_, err = store.Put(ctx, "default", Bundle{Files: map[string][]byte{"SKILL.md": []byte(document)}})
 			require.NoError(t, err)
-			stored := NewClient(store)
+			stored := NewClient(nil, WithUserStore(store))
 			for _, file := range []string{"", "SKILL.md"} {
 				a, err := folder.ReadSkill(ctx, "", nil, "review", file)
 				require.NoError(t, err)

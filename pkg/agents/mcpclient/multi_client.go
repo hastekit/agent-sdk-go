@@ -12,115 +12,146 @@ import (
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
 )
 
-// Client manages store-defined MCP servers for multiple namespaces.
-// Global definitions win over namespace definitions; duplicate global names are errors.
-// Invalid, duplicate, or colliding user-owned definitions fail only their own connector.
+// Client manages MCP servers from two stores. It mirrors skills.Client.
+//
+// The built-in store holds the developer's servers: global, listed for every
+// namespace, always on, and winning over a user's server with the same name;
+// an invalid or duplicate one fails the listing. The user store, given with
+// WithUserStore, holds each namespace's own servers, which a run may turn off
+// or narrow (agents.MCPSelection); an invalid, duplicate, or colliding one
+// fails only its own connector. Stores do not know which role they play: the
+// client reads the built-in store under the empty namespace and the user store
+// under the run's, so any store can fill either, and one store can fill both:
+//
+//	builtIns := mcpclient.NewInlineStore(mcpclient.ServerConfig{Name: "docs", Endpoint: "https://docs.example/mcp"})
+//	users, err := mcpclient.NewFileStore("./data/mcp.json")
+//	client := mcpclient.NewClient(builtIns, mcpclient.WithUserStore(users), mcpclient.WithCredentials(provider))
 type Client struct {
-	stores      []MCPServerConfigStore
+	builtIn     Store
+	user        Store
 	credentials CredentialProvider
 	cache       SchemaCache
 }
 
-// NewClient reads all supplied stores at discovery and execution time.
-// Configure credentials and schema caching before sharing the client across agents.
-func NewClient(stores ...MCPServerConfigStore) *Client {
-	return &Client{stores: slices.Clone(stores)}
+// ClientOption configures NewClient.
+type ClientOption func(*Client)
+
+// WithUserStore reads each namespace's own servers from store.
+func WithUserStore(store Store) ClientOption {
+	return func(c *Client) { c.user = store }
 }
 
 // WithCredentials supplies shared credential resolution; OAuth settings live in ServerConfig.
-func (c *Client) WithCredentials(provider CredentialProvider) *Client {
-	c.credentials = provider
-	return c
+func WithCredentials(provider CredentialProvider) ClientOption {
+	return func(c *Client) { c.credentials = provider }
 }
 
 // WithSchemaCache supplies optional shared discovery caching.
-func (c *Client) WithSchemaCache(cache SchemaCache) *Client {
-	c.cache = cache
-	return c
+func WithSchemaCache(cache SchemaCache) ClientOption {
+	return func(c *Client) { c.cache = cache }
+}
+
+// NewClient reads its stores at discovery and execution time, so servers added
+// at run time appear on the next run. builtIn may be nil, for a client of
+// users' servers only. The client is safe to share across agents.
+func NewClient(builtIn Store, options ...ClientOption) *Client {
+	client := &Client{builtIn: builtIn}
+	for _, option := range options {
+		if option != nil {
+			option(client)
+		}
+	}
+	return client
 }
 
 // catalog is one resolved view of the definitions visible to a namespace.
 type catalog struct {
-	// configs holds usable definitions by name; a global shadows a same-named user definition.
+	// configs holds usable definitions by name; a built-in shadows a same-named
+	// user definition. Each carries the namespace that owns it: empty for a
+	// built-in, the namespace for a user's own.
 	configs map[string]ServerConfig
 	// invalid holds user-owned definitions that cannot be used, by name. They are reported as
 	// failed connectors rather than failing the owner's whole catalog, and remain deletable.
 	invalid map[string]error
 }
 
-// listServerConfigs resolves one visible catalog before doing network I/O, enforcing scope and precedence.
-// Store failures, cross-namespace records, and invalid globals are errors: they are application faults.
+// readStore lists one store under namespace, setting each definition's
+// Namespace to it, so ownership follows the store a definition came from. A
+// definition that names another namespace is an application fault.
+func readStore(ctx context.Context, store Store, namespace string, runContext map[string]any) ([]ServerConfig, error) {
+	if store == nil {
+		return nil, ctx.Err()
+	}
+	listed, err := store.ListServerConfigs(ctx, namespace, runContext)
+	if err != nil {
+		return nil, fmt.Errorf("list MCP server configurations: %w", err)
+	}
+	for i := range listed {
+		if listed[i].Namespace != "" && listed[i].Namespace != namespace {
+			return nil, errors.New("MCP store returned a server from another namespace")
+		}
+		listed[i].Namespace = namespace
+	}
+	return listed, nil
+}
+
+// listServerConfigs resolves one visible catalog before doing network I/O, enforcing precedence.
+// Store failures and invalid built-ins are errors: they are application faults.
 // Invalid or duplicate user-owned records are isolated so one bad record cannot lock its owner out.
 func (c *Client) listServerConfigs(ctx context.Context, namespace string, runContext map[string]any) (catalog, error) {
-	// Read every source before merging ownership scopes.
 	if err := ctx.Err(); err != nil {
 		return catalog{}, err
 	}
-	var configs []ServerConfig
-	for _, store := range c.stores {
-		if store == nil {
-			return catalog{}, errors.New("MCP config store must not be nil")
+	builtIns, err := readStore(ctx, c.builtIn, "", runContext)
+	if err != nil {
+		return catalog{}, err
+	}
+	result := catalog{configs: map[string]ServerConfig{}, invalid: map[string]error{}}
+	for _, config := range builtIns {
+		if err := validateServerConfig(config); err != nil {
+			return catalog{}, err
 		}
-		listed, err := store.ListServerConfigs(ctx, namespace, runContext)
+		if _, exists := result.configs[config.Name]; exists {
+			return catalog{}, fmt.Errorf("duplicate global MCP server %q", config.Name)
+		}
+		copy, err := cloneServerConfig(config)
 		if err != nil {
-			return catalog{}, fmt.Errorf("list MCP server configurations: %w", err)
+			return catalog{}, err
 		}
-		configs = append(configs, listed...)
+		result.configs[config.Name] = copy
+	}
+	if namespace == "" {
+		return result, nil
 	}
 
-	// Classify records by owner; globals are validated strictly, user records individually.
-	globals := map[string]ServerConfig{}
-	users := map[string]ServerConfig{}
-	invalid := map[string]error{}
-	for _, config := range configs {
-		if config.Namespace != "" && config.Namespace != namespace {
-			return catalog{}, errors.New("MCP store returned a server from another namespace")
-		}
-		if config.Namespace == "" {
-			if err := validateServerConfig(config); err != nil {
-				return catalog{}, err
-			}
-			if _, exists := globals[config.Name]; exists {
-				return catalog{}, fmt.Errorf("duplicate global MCP server %q", config.Name)
-			}
-			copy, err := cloneServerConfig(config)
-			if err != nil {
-				return catalog{}, err
-			}
-			globals[config.Name] = copy
+	users, err := readStore(ctx, c.user, namespace, runContext)
+	if err != nil {
+		return catalog{}, err
+	}
+	own := map[string]ServerConfig{}
+	for _, config := range users {
+		// Built-ins win, including over invalid user records.
+		if _, global := result.configs[config.Name]; global {
 			continue
 		}
-
-		// A name recorded twice in one scope is ambiguous, whichever copy is valid.
-		if _, exists := users[config.Name]; exists || invalid[config.Name] != nil {
-			delete(users, config.Name)
-			invalid[config.Name] = fmt.Errorf("duplicate MCP server %q in one scope", config.Name)
+		// A name recorded twice is ambiguous, whichever copy is valid.
+		if _, exists := own[config.Name]; exists || result.invalid[config.Name] != nil {
+			delete(own, config.Name)
+			result.invalid[config.Name] = fmt.Errorf("duplicate MCP server %q in one scope", config.Name)
 			continue
 		}
 		if err := validateServerConfig(config); err != nil {
-			invalid[config.Name] = err
+			result.invalid[config.Name] = err
 			continue
 		}
 		copy, err := cloneServerConfig(config)
 		if err != nil {
-			invalid[config.Name] = err
+			result.invalid[config.Name] = err
 			continue
 		}
-		users[config.Name] = copy
+		own[config.Name] = copy
 	}
-
-	// Globals win independently of store ordering, including over invalid user records.
-	result := catalog{configs: globals, invalid: map[string]error{}}
-	for name, config := range users {
-		if _, exists := globals[name]; !exists {
-			result.configs[name] = config
-		}
-	}
-	for name, err := range invalid {
-		if _, exists := globals[name]; !exists {
-			result.invalid[name] = err
-		}
-	}
+	maps.Copy(result.configs, own)
 	return result, nil
 }
 

@@ -18,12 +18,12 @@
 // declarative wire-shape code; treat the constants here as the
 // authoritative contract with the protocol.
 //
-// Any Registry can be exposed via NewHandler; StaticRegistry wraps agents
+// Any agents.Registry can be exposed via NewHandler; agents.StaticRegistry wraps agents
 // built in code:
 //
 //	registry := hastekit.NewRegistry()
 //	registry.Register(agent)
-//	http.ListenAndServe(":8080", agui.NewHandler(agui.StaticRegistry(registry)))
+//	http.ListenAndServe(":8080", agui.NewHandler(agents.StaticRegistry(registry)))
 //
 // For a ready-made browser chat UI on top of this protocol, see the
 // pkg/agui/web subpackage.

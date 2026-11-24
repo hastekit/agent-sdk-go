@@ -7,18 +7,22 @@ OPENAI_API_KEY=... go run ./examples/agents/15_dynamic_skills
 OPENAI_API_KEY=... go run ./examples/agents/15_dynamic_skills -serve
 ```
 
-The agent's `SkillClient` combines two kinds of skills, the same way MCP servers work:
+The agent's `SkillClient` reads two stores, the same way MCP servers work:
 
-- **Global skills** belong to the developer and live in a store's empty
-  namespace. Each agent reads its own stores with
-  `skills.NewClient(store, builtins...)`. This example uses a folder
-  (`skills.NewDirStore`) and `teamSkills`, a custom read-only `skills.Store`
-  whose `List` and `Get` could call your database, object store, or HTTP service.
-  Globals are always on, and users cannot turn them off or replace them. To give
-  an agent only some skills, wrap its stores in `skills.Filter`.
-- **User skills** are the ones each namespace uploads to the shared `MutableStore`
-  (`./data/skills` by default; pass `-skill-store /path` to change it). They are
-  on unless the run disables them, and cannot reuse a global skill's name.
+- **Global skills** belong to the developer and come from the client's
+  built-in store: `skills.NewClient(builtIns, skills.WithUserStore(uploads))`. A folder
+  (`skills.NewDirStore`) is the usual one; this example uses `teamSkills`, a
+  custom read-only `skills.Store` whose `List` and `Get` could call your
+  database, object store, or HTTP service. Globals are always on, and users
+  cannot turn them off or replace them. To give an agent only some skills, wrap
+  its stores in `skills.Filter`.
+- **User skills** are the ones each namespace uploads to the client's user
+  store, a `MutableStore` (`./data/skills` by default; pass `-skill-store /path`
+  to change it). They are on unless the run disables them, and cannot reuse a
+  global skill's name.
+
+A store does not know which role it plays, so any store — `NewFileStore`,
+`NewS3Store`, a folder, your own — can fill either slot.
 
 In the embedded UI at http://localhost:8080, use **+ → Skills → Manage Skills**
 to upload a skill folder, browse saved skills, and preview instructions. The

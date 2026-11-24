@@ -42,11 +42,11 @@ func TestBuilderRunsAConfigAddedAtRunTime(t *testing.T) {
 	f := testutil.NewAgentFixture(t, nil, nil, testutil.FixtureSteps()...)
 	ctx := context.Background()
 
-	_, err := f.Builder.Agent(ctx, testutil.FixtureNamespace, testutil.FixtureAgent)
+	_, err := f.Agent(ctx, testutil.FixtureNamespace, testutil.FixtureAgent)
 	require.ErrorIs(t, err, agentconfig.ErrNotFound, "nothing is stored yet")
 
 	f.AddConfig(t)
-	agent, err := f.Builder.Agent(ctx, testutil.FixtureNamespace, testutil.FixtureAgent)
+	agent, err := f.Agent(ctx, testutil.FixtureNamespace, testutil.FixtureAgent)
 	require.NoError(t, err)
 	out, err := agent.Run(ctx, &agents.AgentInput{Namespace: testutil.FixtureNamespace, Message: userTurn("go")})
 	require.NoError(t, err)
@@ -61,7 +61,7 @@ func TestBuilderNeverFindsAnotherNamespacesAgent(t *testing.T) {
 	f := testutil.NewAgentFixture(t, nil, nil)
 	f.AddConfig(t)
 	for _, namespace := range []string{"tenant-b", ""} {
-		_, err := f.Builder.Agent(context.Background(), namespace, testutil.FixtureAgent)
+		_, err := f.Agent(context.Background(), namespace, testutil.FixtureAgent)
 		require.ErrorIs(t, err, agentconfig.ErrNotFound, "namespace %q", namespace)
 	}
 }
@@ -85,24 +85,25 @@ func TestBuilderValidateRefusesWhatTheServerDoesNotOffer(t *testing.T) {
 	require.NoError(t, f.Builder.Validate(absentPicks))
 }
 
-// An unchanged config reuses its build; an edit takes effect on the next lookup.
-func TestBuilderRebuildsOnlyWhenTheConfigChanges(t *testing.T) {
-	f := testutil.NewAgentFixture(t, nil, nil)
+// Nothing is cached between lookups, so an edit takes effect on the next one.
+func TestRegistryBuildsTheConfigAsStoredNow(t *testing.T) {
+	f := testutil.NewAgentFixture(t, nil, nil, testutil.Step{Text: "done"})
 	f.AddConfig(t)
 	ctx := context.Background()
-	first, err := f.Builder.Agent(ctx, testutil.FixtureNamespace, testutil.FixtureAgent)
+	_, err := f.Agent(ctx, testutil.FixtureNamespace, testutil.FixtureAgent)
 	require.NoError(t, err)
-	again, err := f.Builder.Agent(ctx, testutil.FixtureNamespace, testutil.FixtureAgent)
-	require.NoError(t, err)
-	require.Same(t, first, again)
 
 	edited := f.Config
 	edited.Instruction = "You research questions carefully."
 	_, err = f.Store.Put(ctx, testutil.FixtureNamespace, edited)
 	require.NoError(t, err)
-	rebuilt, err := f.Builder.Agent(ctx, testutil.FixtureNamespace, testutil.FixtureAgent)
+	agent, err := f.Agent(ctx, testutil.FixtureNamespace, testutil.FixtureAgent)
 	require.NoError(t, err)
-	require.NotSame(t, first, rebuilt)
+	out, err := agent.Run(ctx, &agents.AgentInput{Namespace: testutil.FixtureNamespace, Message: userTurn("go")})
+	require.NoError(t, err)
+	require.Equal(t, agentstate.RunStatusCompleted, out.Status)
+	require.NotEmpty(t, f.Provider.Seen())
+	assert.Contains(t, f.Provider.Seen()[0].Instructions, "carefully")
 }
 
 func TestBuilderWiresHandoffsWithinTheSnapshot(t *testing.T) {
@@ -118,7 +119,7 @@ func TestBuilderWiresHandoffsWithinTheSnapshot(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	snapshot, err := f.Builder.Snapshot(ctx, testutil.FixtureNamespace, "triage")
+	snapshot, err := f.Registry.Snapshot(ctx, testutil.FixtureNamespace, "triage")
 	require.NoError(t, err)
 	require.Len(t, snapshot.Agents, 2, "a missing target is left out")
 	require.Len(t, snapshot.Agents["triage"].Handoffs, 1, "and so is its edge")
@@ -187,7 +188,7 @@ func TestBuilderRunsBackgroundToolsLocally(t *testing.T) {
 	ctx := context.Background()
 	_, err := f.Store.Put(ctx, testutil.FixtureNamespace, agentconfig.Config{Name: "indexer", Model: testutil.FixtureModel, Tools: []string{testutil.FixtureBackgroundTool}})
 	require.NoError(t, err)
-	agent, err := f.Builder.Agent(ctx, testutil.FixtureNamespace, "indexer")
+	agent, err := f.Agent(ctx, testutil.FixtureNamespace, "indexer")
 	require.NoError(t, err)
 
 	out, err := agent.Run(ctx, &agents.AgentInput{Namespace: testutil.FixtureNamespace, ThreadID: "thread-bg", Message: userTurn("index the docs")})
@@ -223,7 +224,7 @@ func TestSubAgentsAreToolsThatRunInTheCallersNamespace(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	snapshot, err := f.Builder.Snapshot(ctx, testutil.FixtureNamespace, "orchestrator")
+	snapshot, err := f.Registry.Snapshot(ctx, testutil.FixtureNamespace, "orchestrator")
 	require.NoError(t, err)
 	require.Len(t, snapshot.Agents, 2, "the sub-agent is part of the run's graph; a missing one is not")
 	require.Len(t, snapshot.Agents["orchestrator"].SubAgents, 1)

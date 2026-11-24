@@ -1,7 +1,6 @@
 package mcpclient
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -10,13 +9,14 @@ import (
 	"strings"
 )
 
-// HandlerOption configures trusted identity resolution and optional OAuth routes.
+// HandlerOption configures trusted identity resolution, the built-in servers
+// and optional OAuth routes.
 type HandlerOption func(*handlerOptions)
 
 type handlerOptions struct {
 	namespace func(*http.Request) (string, error)
 	oauth     *OAuthCredentialProvider
-	readOnly  []MCPServerConfigStore
+	builtIn   Store
 }
 
 // WithNamespaceResolver supplies the authenticated subject used by agent runs.
@@ -30,12 +30,11 @@ func WithOAuth(provider *OAuthCredentialProvider) HandlerOption {
 	return func(options *handlerOptions) { options.oauth = provider }
 }
 
-// WithReadOnlyStores adds stores the handler lists but never writes, such as an
-// InlineStore of servers defined in code. Pass every store the agents' clients
-// read besides the writable one, so users see those servers, can connect their
-// OAuth accounts to them, and cannot take a global server's name.
-func WithReadOnlyStores(stores ...MCPServerConfigStore) HandlerOption {
-	return func(options *handlerOptions) { options.readOnly = append(options.readOnly, stores...) }
+// WithBuiltInStore lists the built-in store of the agents' Client read-only, so
+// users see its servers, can connect their OAuth accounts to them, and cannot
+// take their names.
+func WithBuiltInStore(store Store) HandlerOption {
+	return func(options *handlerOptions) { options.builtIn = store }
 }
 
 // ConnectorInfo is the public catalog entry returned by the HTTP handler.
@@ -56,19 +55,21 @@ type ConnectorInfo struct {
 // NewHandler serves GET /, PUT /{server}, DELETE /{server}, and optional OAuth
 // GET /{server}/connect, GET /{server}/callback and POST /{server}/callback
 // routes; the POST finishes an attempt the app's own page relays (see
-// OAUTH.md). Mount with http.StripPrefix.
-// Writes go to store and are restricted to the authenticated namespace; globals
-// are developer-owned. WithReadOnlyStores adds stores that are listed but never
-// written. Without a namespace resolver requests fail closed. Pending OAuth state
-// is process-local.
-func NewHandler(store MCPServerConfigStore, options ...HandlerOption) http.Handler {
+// OAUTH.md). Mount with http.StripPrefix. It mirrors skills.NewHandler.
+// Writes go to store, the agents' Client's user store, and are restricted to
+// the authenticated namespace; they are refused when store's source cannot
+// persist them. Pass the Client's built-in store with WithBuiltInStore. Without
+// a namespace resolver requests fail closed. Pending OAuth state is
+// process-local.
+func NewHandler(store MutableStore, options ...HandlerOption) http.Handler {
 	// Share one catalog view and OAuth state map for the lifetime of this handler.
 	settings := handlerOptions{}
 	for _, option := range options {
-		option(&settings)
+		if option != nil {
+			option(&settings)
+		}
 	}
-	stores := append([]MCPServerConfigStore{store}, settings.readOnly...)
-	h := &configHandler{store: store, client: NewClient(stores...), options: settings}
+	h := &configHandler{store: writableStore(store), client: NewClient(settings.builtIn, WithUserStore(store)), options: settings}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", h.list)
 	mux.HandleFunc("PUT /{server}", h.put)
@@ -83,9 +84,20 @@ func NewHandler(store MCPServerConfigStore, options ...HandlerOption) http.Handl
 }
 
 type configHandler struct {
-	store   MCPServerConfigStore
+	// store is the user store when it can be written, else nil.
+	store   MutableStore
 	client  *Client
 	options handlerOptions
+}
+
+// writableStore returns store when it persists writes, else nil.
+func writableStore(store MutableStore) MutableStore {
+	if validated, ok := store.(*validatedStore); ok {
+		if _, err := validated.writable(); err != nil {
+			return nil
+		}
+	}
+	return store
 }
 
 func (h *configHandler) namespace(r *http.Request) (string, error) {
@@ -117,18 +129,12 @@ func (h *configHandler) list(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	owned, err := h.owned(r.Context(), namespace)
-	if err != nil {
-		http.Error(w, "Unable to read MCP configuration", http.StatusInternalServerError)
-		return
-	}
-
 	// Return safe summaries rather than serializing configuration secrets to the browser.
 	result := make([]ConnectorInfo, 0, len(resolved.configs)+len(resolved.invalid))
 	for _, config := range resolved.configs {
 		info := ConnectorInfo{
 			Name: config.Name, Namespace: config.Namespace, Transport: config.Transport,
-			ReadOnly: config.Namespace == "" || !owned[config.Name], OAuth: config.Authorization != nil,
+			ReadOnly: config.Namespace == "" || h.store == nil, OAuth: config.Authorization != nil,
 		}
 		if h.options.oauth != nil && config.Authorization != nil {
 			_, err := h.options.oauth.store.Load(r.Context(), namespace, OAuthCredentialKey(connectorFor(config)))
@@ -141,7 +147,7 @@ func (h *configHandler) list(w http.ResponseWriter, r *http.Request) {
 	// Unusable records stay visible to their owner, who can delete or replace them.
 	for name, err := range resolved.invalid {
 		result = append(result, ConnectorInfo{
-			Name: name, Namespace: namespace, ReadOnly: !owned[name], Error: err.Error(),
+			Name: name, Namespace: namespace, ReadOnly: h.store == nil, Error: err.Error(),
 		})
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].Name < result[j].Name })
@@ -149,32 +155,8 @@ func (h *configHandler) list(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(result)
 }
 
-// owned names the namespace's definitions the writable store holds. Only these
-// can change through the HTTP routes: a user's definition from a read-only
-// store, or behind a read-only Store, is listed but not editable.
-func (h *configHandler) owned(ctx context.Context, namespace string) (map[string]bool, error) {
-	owned := map[string]bool{}
-	if store, ok := h.store.(*Store); ok {
-		if _, err := store.writable(); err != nil {
-			return owned, nil
-		}
-	} else if _, mutable := h.store.(MutableMCPServerConfigStore); !mutable {
-		return owned, nil
-	}
-	configs, err := h.store.ListServerConfigs(ctx, namespace, nil)
-	if err != nil {
-		return nil, err
-	}
-	for _, config := range configs {
-		if config.Namespace == namespace {
-			owned[config.Name] = true
-		}
-	}
-	return owned, nil
-}
-
 // writer protects globals regardless of the namespace specified in an incoming JSON body.
-func (h *configHandler) writer(w http.ResponseWriter, r *http.Request) (string, catalog, MutableMCPServerConfigStore, bool) {
+func (h *configHandler) writer(w http.ResponseWriter, r *http.Request) (string, catalog, MutableStore, bool) {
 	namespace, resolved, ok := h.resolve(w, r)
 	if !ok {
 		return "", catalog{}, nil, false
@@ -184,27 +166,11 @@ func (h *configHandler) writer(w http.ResponseWriter, r *http.Request) (string, 
 		http.Error(w, "Global MCP configurations are read-only", http.StatusForbidden)
 		return "", catalog{}, nil, false
 	}
-	store, ok := h.store.(MutableMCPServerConfigStore)
-	if !ok {
+	if h.store == nil {
 		http.Error(w, "MCP configuration store is read-only", http.StatusForbidden)
 		return "", catalog{}, nil, false
 	}
-
-	// A visible definition the writable store does not hold belongs to a read-only store.
-	_, valid := resolved.configs[name]
-	_, invalid := resolved.invalid[name]
-	if valid || invalid {
-		owned, err := h.owned(r.Context(), namespace)
-		if err != nil {
-			http.Error(w, "Unable to read MCP configuration", http.StatusInternalServerError)
-			return "", catalog{}, nil, false
-		}
-		if !owned[name] {
-			http.Error(w, "MCP configuration is read-only", http.StatusForbidden)
-			return "", catalog{}, nil, false
-		}
-	}
-	return namespace, resolved, store, true
+	return namespace, resolved, h.store, true
 }
 
 func (h *configHandler) put(w http.ResponseWriter, r *http.Request) {

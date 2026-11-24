@@ -5,16 +5,13 @@ import (
 	"fmt"
 )
 
-// InlineStore serves server definitions written in code. Every definition is
-// global: developer-owned, listed for every namespace, and never written
-// through the HTTP routes. Combine it with a store of users' servers:
+// InlineStore serves server definitions written in code, the same for every
+// namespace, and never accepts writes. As a Client's built-in store, its
+// servers are global; as its user store, every user's own:
 //
 //	builtins := mcpclient.NewInlineStore(mcpclient.ServerConfig{Name: "docs", Endpoint: "https://docs.example/mcp"})
-//	client := mcpclient.NewClient(userStore, builtins)
-//	handler := mcpclient.NewHandler(userStore, mcpclient.WithReadOnlyStores(builtins))
-//
-// A server defined both here and in another store is a duplicate, which the
-// client reports rather than choosing one.
+//	client := mcpclient.NewClient(builtins, mcpclient.WithUserStore(userStore))
+//	handler := mcpclient.NewHandler(userStore, mcpclient.WithBuiltInStore(builtins))
 type InlineStore struct {
 	configs []ServerConfig
 	err     error
@@ -22,14 +19,14 @@ type InlineStore struct {
 
 // NewInlineStore validates and copies configs, so later changes to the
 // caller's maps and slices do not apply. A definition must leave Namespace
-// empty. An invalid one is reported when the store is listed, like an invalid
+// empty: the Client sets it from the store it reads. An invalid one is reported when the store is listed, like an invalid
 // database record, so the store can be built in a single expression.
 func NewInlineStore(configs ...ServerConfig) *InlineStore {
 	store := &InlineStore{}
 	for _, config := range configs {
 		copy, err := cloneServerConfig(config)
 		if err == nil && copy.Namespace != "" {
-			err = fmt.Errorf("inline MCP server %q must be global; leave its namespace empty", copy.Name)
+			err = fmt.Errorf("inline MCP server %q must leave its namespace empty", copy.Name)
 		}
 		if err == nil {
 			err = validateServerConfig(copy)
@@ -63,4 +60,4 @@ func (s *InlineStore) ListServerConfigs(ctx context.Context, _ string, _ map[str
 	return configs, nil
 }
 
-var _ MCPServerConfigStore = (*InlineStore)(nil)
+var _ Store = (*InlineStore)(nil)

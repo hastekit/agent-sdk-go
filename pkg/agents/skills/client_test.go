@@ -38,7 +38,7 @@ func TestClientGlobalsShadowUserSkills(t *testing.T) {
 			}
 			global := bundle("review", "developer instructions")
 			global.Files["global-only.md"] = []byte("global resource")
-			client := NewClient(store, testInlineStore(t, global))
+			client := NewClient(testInlineStore(t, global), WithUserStore(store))
 
 			// Globals come first; the user's same-named skill never reaches the agent.
 			listed, err := client.ListSkills(ctx, "tenant", nil)
@@ -82,7 +82,7 @@ func TestClientGlobalsShadowUserSkills(t *testing.T) {
 			}, catalog)
 
 			// Without the global, the user's own copy is visible and optional.
-			catalog, err = agents.NewAgent(&agents.AgentOptions{Name: "plain", SkillClient: NewClient(store)}).ListSkills(ctx, "tenant", nil, agents.SkillSelection{Disable: []string{"review"}})
+			catalog, err = agents.NewAgent(&agents.AgentOptions{Name: "plain", SkillClient: NewClient(nil, WithUserStore(store))}).ListSkills(ctx, "tenant", nil, agents.SkillSelection{Disable: []string{"review"}})
 			require.NoError(t, err)
 			require.Len(t, catalog, 2)
 			require.Equal(t, "notes", catalog[0].Name)
@@ -93,7 +93,9 @@ func TestClientGlobalsShadowUserSkills(t *testing.T) {
 	}
 }
 
-func TestStoreServesGlobalsFromTheEmptyNamespace(t *testing.T) {
+// A store does not know its role, so one store can fill both: the client
+// reads its built-ins under the empty namespace.
+func TestOneStoreCanFillBothRoles(t *testing.T) {
 	for name, store := range stores(t) {
 		t.Run(name, func(t *testing.T) {
 			ctx := t.Context()
@@ -102,8 +104,7 @@ func TestStoreServesGlobalsFromTheEmptyNamespace(t *testing.T) {
 			_, err = store.Put(ctx, "tenant", bundle("mine", "mine"))
 			require.NoError(t, err)
 
-			// One store holds both scopes, like an MCP config store.
-			client := NewClient(store)
+			client := NewClient(store, WithUserStore(store))
 			require.Equal(t, map[string]bool{"shared": true, "mine": false}, skillNames(t, client, "tenant"))
 			require.Equal(t, map[string]bool{"shared": true}, skillNames(t, client, "other"))
 			content, err := client.ReadSkill(ctx, "other", nil, "shared", "refs/check.md")
@@ -128,14 +129,14 @@ func TestClientGivesEachAgentItsOwnGlobals(t *testing.T) {
 	ctx := t.Context()
 	store, err := NewFileStore(t.TempDir())
 	require.NoError(t, err)
-	reviewer := NewClient(store, testInlineStore(t, bundle("review", "review")))
-	writer := NewClient(store, testInlineStore(t, bundle("style", "style")))
-	both := NewClient(store, testInlineStore(t, bundle("review", "review")), testInlineStore(t, bundle("style", "style")))
+	reviewer := NewClient(testInlineStore(t, bundle("review", "review")), WithUserStore(store))
+	writer := NewClient(testInlineStore(t, bundle("style", "style")), WithUserStore(store))
+	both := NewClient(testInlineStore(t, bundle("review", "review"), bundle("style", "style")), WithUserStore(store))
 
 	// Every client shares the user store; globals stay per client.
 	_, err = store.Put(ctx, "tenant", bundle("mine", "user"))
 	require.NoError(t, err)
-	require.Equal(t, map[string]bool{"mine": false}, skillNames(t, NewClient(store), "tenant"))
+	require.Equal(t, map[string]bool{"mine": false}, skillNames(t, NewClient(nil, WithUserStore(store)), "tenant"))
 	require.Equal(t, map[string]bool{"review": true, "mine": false}, skillNames(t, reviewer, "tenant"))
 	require.Equal(t, map[string]bool{"style": true, "mine": false}, skillNames(t, writer, "tenant"))
 	require.Equal(t, map[string]bool{"review": true, "style": true, "mine": false}, skillNames(t, both, "tenant"))
@@ -154,7 +155,7 @@ func TestFilterPicksGlobalAndUserSkills(t *testing.T) {
 				require.NoError(t, err)
 			}
 			names := []string{"review", "tone", "notes", "missing"}
-			picked := NewClient(Filter(store, names))
+			picked := NewClient(Filter(store, names), WithUserStore(Filter(store, names)))
 			names[0] = "style" // later changes to the caller's slice do not apply
 
 			// Picks of either kind are kept; the global review still wins over the user's.
@@ -175,20 +176,22 @@ func TestFilterPicksGlobalAndUserSkills(t *testing.T) {
 			_, err = store.Put(ctx, "tenant", bundle("later", "user later"))
 			require.NoError(t, err)
 			require.NotContains(t, skillNames(t, picked, "tenant"), "later")
-			require.Len(t, skillNames(t, NewClient(store), "tenant"), 6)
+			require.Len(t, skillNames(t, NewClient(store, WithUserStore(store)), "tenant"), 6)
 
-			// KeepUserSkills keeps every user skill; a global left out does not shadow the user's.
-			kept := NewClient(Filter(store, []string{"tone"}, KeepUserSkills()))
-			require.Equal(t, map[string]bool{"tone": true, "notes": false, "drafts": false, "review": false, "later": false}, skillNames(t, kept, "tenant"))
-			content, err = kept.ReadSkill(ctx, "tenant", nil, "review", "")
+			// Each store is filtered on its own; a built-in left out does not shadow the user's.
+			split := NewClient(Filter(store, []string{"tone"}), WithUserStore(Filter(store, []string{"review"})))
+			require.Equal(t, map[string]bool{"tone": true, "review": false}, skillNames(t, split, "tenant"))
+			content, err = split.ReadSkill(ctx, "tenant", nil, "review", "")
 			require.NoError(t, err)
 			require.Contains(t, content, "user review")
-			_, err = kept.ReadSkill(ctx, "tenant", nil, "style", "")
+			_, err = split.ReadSkill(ctx, "tenant", nil, "style", "")
 			require.ErrorIs(t, err, ErrNotFound)
 
 			// Filters nest as an intersection, and no names keep nothing.
-			require.Equal(t, map[string]bool{"notes": false}, skillNames(t, NewClient(Filter(Filter(store, []string{"review", "notes"}), []string{"notes", "style"})), "tenant"))
-			require.Empty(t, skillNames(t, NewClient(Filter(store, nil)), "tenant"))
+			nested := Filter(Filter(store, []string{"review", "notes"}), []string{"notes", "style"})
+			require.Equal(t, map[string]bool{"notes": false}, skillNames(t, NewClient(nested, WithUserStore(nested)), "tenant"))
+			none := Filter(store, nil)
+			require.Empty(t, skillNames(t, NewClient(none, WithUserStore(none)), "tenant"))
 
 			// Per-run selection still applies to the picks.
 			agent := agents.NewAgent(&agents.AgentOptions{Name: "custom", SkillClient: picked})
@@ -201,8 +204,10 @@ func TestFilterPicksGlobalAndUserSkills(t *testing.T) {
 			require.Equal(t, map[string]bool{"review": true, "tone": true, "notes": false}, enabled)
 		})
 	}
-	_, err := NewClient(Filter(nil, []string{"review"})).ListSkills(t.Context(), "tenant", nil)
-	require.ErrorContains(t, err, "must not be nil")
+	// A missing store lists nothing.
+	listed, err := NewClient(Filter(nil, []string{"review"})).ListSkills(t.Context(), "tenant", nil)
+	require.NoError(t, err)
+	require.Empty(t, listed)
 }
 
 func TestFilterKeepsPaginating(t *testing.T) {
@@ -216,29 +221,17 @@ func TestFilterKeepsPaginating(t *testing.T) {
 		}
 		return Page{Skills: []Metadata{{Name: "kept"}}}, nil
 	}}
-	require.Equal(t, map[string]bool{"kept": false}, skillNames(t, NewClient(Filter(store, []string{"kept"})), "tenant"))
+	require.Equal(t, map[string]bool{"kept": false}, skillNames(t, NewClient(nil, WithUserStore(Filter(store, []string{"kept"}))), "tenant"))
 }
 
-func TestClientRejectsAmbiguousStores(t *testing.T) {
-	client := NewClient(testInlineStore(t, bundle("review", "a")), testInlineStore(t, bundle("review", "b")))
-	_, err := client.ListSkills(t.Context(), "tenant", nil)
-	require.ErrorContains(t, err, "duplicate global skill")
-	_, err = client.ReadSkill(t.Context(), "tenant", nil, "review", "")
-	require.ErrorContains(t, err, "duplicate global skill")
+func TestClientWithoutStoresListsNothing(t *testing.T) {
+	listed, err := NewClient(nil).ListSkills(t.Context(), "tenant", nil)
+	require.NoError(t, err)
+	require.Empty(t, listed)
+	_, err = NewClient(nil).ReadSkill(t.Context(), "tenant", nil, "review", "")
+	require.ErrorIs(t, err, ErrNotFound)
 
-	// Two stores holding one namespace's skill are just as ambiguous.
-	first, second := stores(t)["filesystem"], stores(t)["s3"]
-	for _, store := range []MutableStore{first, second} {
-		_, err := store.Put(t.Context(), "tenant", bundle("notes", "notes"))
-		require.NoError(t, err)
-	}
-	_, err = NewClient(first, second).ListSkills(t.Context(), "tenant", nil)
-	require.ErrorContains(t, err, "duplicate skill")
-	_, err = NewClient(first, second).ReadSkill(t.Context(), "tenant", nil, "notes", "")
-	require.ErrorContains(t, err, "duplicate skill")
-
-	_, err = NewClient(nil).ListSkills(t.Context(), "tenant", nil)
-	require.ErrorContains(t, err, "must not be nil")
+	// A store holds a name once.
 	_, err = NewInlineStore(bundle("review", "a"), bundle("review", "b"))
 	require.ErrorIs(t, err, ErrInvalid)
 }
@@ -267,7 +260,7 @@ func TestClientPaginatesEachScope(t *testing.T) {
 		}
 		return Page{Skills: []Metadata{{Name: ns + "two"}}}, nil
 	}}
-	require.Equal(t, map[string]bool{"one": true, "two": true, "tenantone": false, "tenanttwo": false}, skillNames(t, NewClient(store), "tenant"))
+	require.Equal(t, map[string]bool{"one": true, "two": true, "tenantone": false, "tenanttwo": false}, skillNames(t, NewClient(store, WithUserStore(store)), "tenant"))
 	require.Equal(t, []string{":", ":next", "tenant:", "tenant:next"}, calls)
 
 	looping := pagedStore{list: func(context.Context, string, ListOptions) (Page, error) {
@@ -285,9 +278,11 @@ func TestClientDoesNotHideStoreErrors(t *testing.T) {
 	}
 
 	// A failing store fails listing and reads rather than silently dropping skills.
-	client := NewClient(testInlineStore(t, bundle("review", "review")), store)
+	client := NewClient(testInlineStore(t, bundle("review", "review")), WithUserStore(store))
 	_, err := client.ListSkills(t.Context(), "tenant", nil)
 	require.ErrorIs(t, err, failure)
-	_, err = client.ReadSkill(t.Context(), "tenant", nil, "review", "")
+	_, err = client.ReadSkill(t.Context(), "tenant", nil, "notes", "")
+	require.ErrorIs(t, err, failure)
+	_, err = NewClient(store).ReadSkill(t.Context(), "tenant", nil, "review", "")
 	require.ErrorIs(t, err, failure)
 }

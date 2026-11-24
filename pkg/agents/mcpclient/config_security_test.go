@@ -49,7 +49,7 @@ func TestUserTemplatesRejectedAtEveryConfigurationBoundary(t *testing.T) {
 			file, err := NewFileStore(filepath.Join(t.TempDir(), "servers.json"))
 			require.NoError(t, err)
 			custom := &uncheckedConfigStore{}
-			for _, store := range []*Store{NewMemoryStore(), file, NewStore(custom)} {
+			for _, store := range []MutableStore{NewMemoryStore(), file, NewStore(custom)} {
 				require.ErrorContains(t, store.Put(t.Context(), "alice", config), "cannot contain templates")
 			}
 			require.Zero(t, custom.writes, "validation must happen before custom persistence")
@@ -59,7 +59,7 @@ func TestUserTemplatesRejectedAtEveryConfigurationBoundary(t *testing.T) {
 			config.Namespace = "alice"
 			inline := NewInlineStore(config)
 			_, err = inline.ListServerConfigs(t.Context(), "alice", nil)
-			require.ErrorContains(t, err, "must be global")
+			require.ErrorContains(t, err, "namespace empty")
 			// Persisted user records never connect; they fail only their own connector.
 			custom.config = config
 			path := filepath.Join(t.TempDir(), "unsafe.json")
@@ -68,8 +68,8 @@ func TestUserTemplatesRejectedAtEveryConfigurationBoundary(t *testing.T) {
 			require.NoError(t, os.WriteFile(path, data, 0600))
 			existing, err := NewFileStore(path)
 			require.NoError(t, err, "one user's record must not fail the whole file")
-			for _, source := range []MCPServerConfigStore{custom, existing} {
-				statuses, tools, err := NewClient(source).ListTools(t.Context(), "alice", map[string]any{"github_token": "secret"})
+			for _, source := range []Store{custom, existing} {
+				statuses, tools, err := NewClient(nil, WithUserStore(source)).ListTools(t.Context(), "alice", map[string]any{"github_token": "secret"})
 				require.NoError(t, err)
 				require.Empty(t, tools)
 				require.Len(t, statuses, 1)

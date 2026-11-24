@@ -20,20 +20,24 @@ For Restate, register the service once:
   MCP connectors with their tools, catalog tool names, handoffs, and
   sub-agents — other configs it calls as tools, keeping the conversation. It is
   plain JSON.
-- **Stores** hold configs per namespace. The empty namespace holds built-ins
-  (`agentconfig.NewInlineStore`), which every namespace can run and none can
-  replace. `NewFileStore` and `NewMemoryStore` hold each namespace's own.
+- **Built-ins** are configs in code, which every namespace can run and none
+  can replace. **A store** (`NewFileStore` or `NewMemoryStore`) holds each
+  namespace's own.
 - **`agentconfig.Builder`** holds everything a config may choose among, in
   code: the model allowlist, the unfiltered skill and MCP stores, the tool
-  catalog, history and middlewares. It builds a plain `agents.NewAgent`, giving
-  it only the config's picks through `skills.Filter` and `mcpclient.Filter`.
-- **Durable runs** take a snapshot of the config as workflow input. One
-  generic `AgentBuilder` workflow serves every config, so an agent written
-  after the worker started runs durably; an edit applies from the next run.
-- **`agentconfig.Registry`** is the `agui.Registry`: it finds code agents and
-  configs for the request's namespace only. It is also a
-  `routines.AgentRegistry`, so a namespace's routines can target its own
-  agents: `routines.NewService(store, &routines.AgentExecutor{Registry: registry})`.
+  catalog, history and middlewares. It turns a snapshot of configs into a plain
+  `agents.NewAgent`, giving it only the config's picks through `skills.Filter`
+  and `mcpclient.Filter`. It reads no config store.
+- **`agentconfig.Registry`** takes the built-ins and the store, freezes the snapshot a run
+  enters, and hands it to the Builder. It is an `agents.Registry`, so
+  `agui.NewHandler` and `routines.AgentExecutor` both take it: it finds code
+  agents and configs for the request's namespace only, and a namespace's
+  routines can target its own agents:
+  `routines.NewService(store, &routines.AgentExecutor{Registry: registry})`.
+- **Durable runs** take that snapshot as workflow input. One generic
+  `AgentBuilder` workflow serves every config, so an agent written after the
+  worker started runs durably; an edit applies from the next run. Workers need
+  only the Builder.
 - **Background tools** in the catalog work everywhere: in process, on
   Temporal (a background workflow per task) and on Restate (a background
   service invocation per task). A task's result starts a new run from the

@@ -50,16 +50,24 @@ func (c tenantRequest) agentNames(tenant string) []string {
 	return listing.Agents
 }
 
+// configRegistry offers builtIns, store's agents and static's code agents.
+func configRegistry(t *testing.T, builder *agentconfig.Builder, builtIns []agentconfig.Config, store agentconfig.MutableStore, static ...agents.StaticAgents) *agentconfig.Registry {
+	t.Helper()
+	reg, err := agentconfig.NewRegistry(builder, builtIns, store, static...)
+	require.NoError(t, err)
+	return reg
+}
+
 // A namespace creates an agent over HTTP at run time; it runs with only its
 // picks, and no other namespace can see or run it.
 func TestAgentConfigsAreCreatedAndRunPerNamespace(t *testing.T) {
 	f := testutil.NewAgentFixture(t, nil, nil, testutil.FixtureSteps()...)
 	static := registry{"static-helper": agents.NewAgent(&agents.AgentOptions{Name: "static-helper"})}
-	reg := agentconfig.NewRegistry(f.Builder, staticAgents(static))
+	reg := configRegistry(t, f.Builder, nil, f.Store, staticAgents(static))
 	userSkills, err := skills.NewFileStore(t.TempDir())
 	require.NoError(t, err)
 	server := httptest.NewServer(NewHandler(reg,
-		WithAgentConfigStore(f.Store),
+		WithAgentConfigs(),
 		WithSkillStore(userSkills),
 		WithNamespaceResolver(func(r *http.Request) (string, error) { return r.Header.Get("X-Tenant"), nil }),
 	))
@@ -105,15 +113,13 @@ func TestAgentConfigsAreCreatedAndRunPerNamespace(t *testing.T) {
 func TestAgentConfigWritesAreValidated(t *testing.T) {
 	f := testutil.NewAgentFixture(t, nil, nil)
 	static := registry{"static-helper": agents.NewAgent(&agents.AgentOptions{Name: "static-helper"})}
-	builtIns, err := agentconfig.NewInlineStore(agentconfig.Config{Name: "concierge", Model: testutil.FixtureModel})
-	require.NoError(t, err)
+	builtIns := []agentconfig.Config{{Name: "concierge", Model: testutil.FixtureModel}}
 	builder, err := agentconfig.NewBuilder(agentconfig.Dependencies{
-		Stores: []agentconfig.Store{builtIns, f.Store},
 		Models: agentconfig.Models{testutil.FixtureModel: f.Provider},
 	})
 	require.NoError(t, err)
-	reg := agentconfig.NewRegistry(builder, staticAgents(static))
-	server := httptest.NewServer(NewHandler(reg, WithAgentConfigStore(f.Store),
+	reg := configRegistry(t, builder, builtIns, f.Store, staticAgents(static))
+	server := httptest.NewServer(NewHandler(reg, WithAgentConfigs(),
 		WithNamespaceResolver(func(r *http.Request) (string, error) { return r.Header.Get("X-Tenant"), nil })))
 	defer server.Close()
 	c := tenantRequest{server: server, t: t}
@@ -140,9 +146,9 @@ func TestAgentConfigWritesAreValidated(t *testing.T) {
 	assert.Contains(t, c.agentNames("tenant-b"), "concierge")
 }
 
-// The management handler refuses the built-in namespace whatever its resolver
-// says, so no request writes it.
-func TestAgentConfigHandlerNeverWritesTheBuiltInNamespace(t *testing.T) {
+// The management handler refuses an empty namespace whatever its resolver
+// says, before the store sees the request.
+func TestAgentConfigHandlerRefusesAnEmptyNamespace(t *testing.T) {
 	store := agentconfig.NewMemoryStore()
 	for _, resolve := range []func(*http.Request) (string, error){
 		nil,
@@ -158,9 +164,6 @@ func TestAgentConfigHandlerNeverWritesTheBuiltInNamespace(t *testing.T) {
 		h.ServeHTTP(w, httptest.NewRequest("PUT", "/agent-configs/x", strings.NewReader(`{"model":"m"}`)))
 		require.Equal(t, http.StatusForbidden, w.Code)
 	}
-	listing, err := agentconfig.NewCatalog(store).List(t.Context(), "")
-	require.NoError(t, err)
-	require.Empty(t, listing.BuiltIn)
 }
 
 // staticAgents adapts the test registry, which already speaks Registry, to
@@ -180,29 +183,12 @@ func (s staticAgents) AgentNames() []string {
 	return names
 }
 
-func TestStaticRegistryOffersTheSameAgentsToEveryNamespace(t *testing.T) {
-	helper := agents.NewAgent(&agents.AgentOptions{Name: "helper"})
-	reg := StaticRegistry(staticAgents{"helper": helper})
-	for _, namespace := range []string{"a", "b"} {
-		agent, ok, err := reg.Agent(t.Context(), namespace, "helper")
-		require.NoError(t, err)
-		require.True(t, ok)
-		require.Same(t, helper, agent)
-		names, err := reg.AgentNames(t.Context(), namespace)
-		require.NoError(t, err)
-		require.Equal(t, []string{"helper"}, names)
-	}
-	_, ok, err := reg.Agent(t.Context(), "a", "missing")
-	require.NoError(t, err)
-	require.False(t, ok)
-}
-
 // The embedded editor offers what a config may pick: nothing is typed blind.
 func TestAgentChoicesListWhatAConfigMayPick(t *testing.T) {
 	f := testutil.NewAgentFixture(t, nil, nil)
 	f.AddConfig(t)
-	reg := agentconfig.NewRegistry(f.Builder, staticAgents(registry{"static-helper": agents.NewAgent(&agents.AgentOptions{Name: "static-helper"})}))
-	server := httptest.NewServer(NewHandler(reg, WithAgentConfigStore(f.Store),
+	reg := configRegistry(t, f.Builder, nil, f.Store, staticAgents(registry{"static-helper": agents.NewAgent(&agents.AgentOptions{Name: "static-helper"})}))
+	server := httptest.NewServer(NewHandler(reg, WithAgentConfigs(),
 		WithNamespaceResolver(func(r *http.Request) (string, error) { return r.Header.Get("X-Tenant"), nil })))
 	defer server.Close()
 	c := tenantRequest{server: server, t: t}
@@ -243,19 +229,19 @@ func TestAgentChoicesListWhatAConfigMayPick(t *testing.T) {
 	require.Equal(t, http.StatusOK, status, body, "another config is a sub-agent like any")
 }
 
-// Agents users create must be agents the registry runs, so the handler is
-// refused a store its registry does not read.
-func TestAgentConfigStoreNeedsARegistryThatRunsIt(t *testing.T) {
+// Agents users create are written to the store of the registry that runs
+// them, so the routes need a config registry that has one.
+func TestAgentConfigsNeedARegistryWithAStore(t *testing.T) {
 	f := testutil.NewAgentFixture(t, nil, nil)
 	static := staticAgents{"static-helper": agents.NewAgent(&agents.AgentOptions{Name: "static-helper"})}
 	assert.PanicsWithValue(t, agentConfigRegistryPanic, func() {
-		NewHandler(StaticRegistry(static), WithAgentConfigStore(f.Store))
+		NewHandler(agents.StaticRegistry(static), WithAgentConfigs())
 	}, "code agents alone run no configs")
 	assert.PanicsWithValue(t, agentConfigRegistryPanic, func() {
-		NewHandler(agentconfig.NewRegistry(f.Builder, static), WithAgentConfigStore(agentconfig.NewMemoryStore()))
-	}, "the builder never reads another store")
+		NewHandler(configRegistry(t, f.Builder, nil, nil, static), WithAgentConfigs())
+	}, "a registry of built-ins only has nowhere to write")
 	assert.NotPanics(t, func() {
-		NewHandler(agentconfig.NewRegistry(f.Builder, static), WithAgentConfigStore(f.Store))
+		NewHandler(configRegistry(t, f.Builder, nil, f.Store, static), WithAgentConfigs())
 	})
 }
 
@@ -268,7 +254,7 @@ func TestAgentRoutesNameTheAgentsOwnServers(t *testing.T) {
 	withClient := agents.NewAgent(&agents.AgentOptions{Name: "with-client", MCPClient: mcpclient.NewClient(
 		mcpclient.NewInlineStore(mcpclient.ServerConfig{Name: "global-docs", Endpoint: "https://docs.example/mcp"}))})
 	static := registry{"without-client": agents.NewAgent(&agents.AgentOptions{Name: "without-client"}), "with-client": withClient}
-	server := httptest.NewServer(NewHandler(agentconfig.NewRegistry(f.Builder, staticAgents(static)), WithAgentConfigStore(f.Store),
+	server := httptest.NewServer(NewHandler(configRegistry(t, f.Builder, nil, f.Store, staticAgents(static)), WithAgentConfigs(),
 		WithNamespaceResolver(func(r *http.Request) (string, error) { return r.Header.Get("X-Tenant"), nil })))
 	defer server.Close()
 	c := tenantRequest{server: server, t: t}

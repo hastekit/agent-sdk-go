@@ -10,6 +10,7 @@ import (
 	"os"
 
 	hastekit "github.com/hastekit/agent-sdk-go"
+	"github.com/hastekit/agent-sdk-go/pkg/agents"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/prompts"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/skills"
 	"github.com/hastekit/agent-sdk-go/pkg/agui"
@@ -21,19 +22,15 @@ func main() {
 	storeDir := flag.String("skill-store", "./data/skills", "directory for users' uploaded skills")
 	flag.Parse()
 
-	// Users' own skills, shared by every agent that uses this store. Its empty
-	// namespace could hold global skills too; this example keeps them elsewhere.
+	// Users' own skills, shared by every agent that uses this store.
 	store, err := skills.NewFileStore(*storeDir)
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	// Developer-owned global skills: always on, never shadowed by a user's.
-	builtins, err := skills.NewDirStore("./samples/skills/skills")
-	if err != nil {
-		log.Fatal(err)
-	}
-	// Implement teamSkills with a database or HTTP-backed store.
+	// skills.NewDirStore serves a folder of them; teamSkills shows that any
+	// skills.Store, such as one backed by a database or HTTP service, can too.
 	// List runs at the start of each run, so new skills appear without rebuilding the agent.
 	team := &teamSkills{}
 
@@ -41,7 +38,7 @@ func main() {
 	agent, err := hastekit.NewAgent(&hastekit.AgentConfig{
 		Name: "ReleaseAssistant", LLM: client.Model("OpenAI/gpt-4.1-mini"),
 		Instruction: hastekit.NewPrompt("Help prepare releases. Read relevant skills before answering.", prompts.WithResolver(prompts.DefaultResolvers()...)),
-		SkillClient: skills.NewClient(store, builtins, team),
+		SkillClient: skills.NewClient(team, skills.WithUserStore(store)),
 	})
 	if err != nil {
 		log.Fatal(err)
@@ -51,7 +48,7 @@ func main() {
 		if err := registry.Register(agent); err != nil {
 			log.Fatal(err)
 		}
-		log.Fatal(web.Serve(":8080", agui.StaticRegistry(registry), agui.WithSkillStore(store)))
+		log.Fatal(web.Serve(":8080", agents.StaticRegistry(registry), agui.WithSkillStore(store)))
 	}
 
 	// A run can turn off the user's own skills; naming a global here has no effect.
@@ -73,8 +70,9 @@ func main() {
 	fmt.Println(result.Text())
 }
 
-// teamSkills is a custom read-only store; any skills.Store can back an agent's skills.
-// It serves global skills, so it answers only for the empty namespace.
+// teamSkills is a custom read-only store; any skills.Store can back an agent's
+// skills. It has no notion of namespaces, so it serves the same skills for
+// every one: as the client's built-in store, they are global.
 type teamSkills struct{}
 
 var teamBundles = map[string]skills.Bundle{
@@ -87,20 +85,16 @@ var teamBundles = map[string]skills.Bundle{
 	}},
 }
 
-func (s *teamSkills) List(ctx context.Context, namespace string, _ skills.ListOptions) (skills.Page, error) {
-	page := skills.Page{Skills: []skills.Metadata{}}
-	if namespace == "" {
-		page.Skills = append(page.Skills,
-			skills.Metadata{Name: "release-review", Description: "Review a release before shipping.", Resources: []string{"checklist.md"}},
-			skills.Metadata{Name: "writing", Description: "Write concise release notes."},
-		)
-	}
-	return page, ctx.Err()
+func (s *teamSkills) List(ctx context.Context, _ string, _ skills.ListOptions) (skills.Page, error) {
+	return skills.Page{Skills: []skills.Metadata{
+		{Name: "release-review", Description: "Review a release before shipping.", Resources: []string{"checklist.md"}},
+		{Name: "writing", Description: "Write concise release notes."},
+	}}, ctx.Err()
 }
 
-func (s *teamSkills) Get(ctx context.Context, namespace, name string) (skills.Bundle, error) {
+func (s *teamSkills) Get(ctx context.Context, _ string, name string) (skills.Bundle, error) {
 	bundle, ok := teamBundles[name]
-	if namespace != "" || !ok {
+	if !ok {
 		return skills.Bundle{}, skills.ErrNotFound
 	}
 	return bundle, ctx.Err()

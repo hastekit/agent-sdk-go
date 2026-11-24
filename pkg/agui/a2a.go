@@ -45,13 +45,13 @@ type a2aAdapter struct {
 	adapter *agents.A2A
 }
 type a2aRoutes struct {
-	registry Registry
+	registry agents.Registry
 	options  options
 	mu       sync.Mutex
 	adapters map[a2aKey]a2aAdapter
 }
 
-func (o options) mountA2A(mux *http.ServeMux, registry Registry) {
+func (o options) mountA2A(mux *http.ServeMux, registry agents.Registry) {
 	routes := &a2aRoutes{registry: registry, options: o, adapters: map[a2aKey]a2aAdapter{}}
 	directory := o.withNamespace(http.HandlerFunc(routes.directory))
 	mux.Handle("GET /a2a", directory)

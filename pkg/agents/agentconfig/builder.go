@@ -97,27 +97,28 @@ type Runtime interface {
 }
 
 // Dependencies are what configs choose among, held in code. Only Models is
-// required.
+// required. Where configs are stored is the Registry's concern, not the
+// Builder's: a Builder only builds the snapshots it is handed, so durable
+// workers, which take each run's snapshot as input, never read a store.
 type Dependencies struct {
-	// Stores are where configs are read, with built-ins in their empty
-	// namespace. The same stores must be readable wherever agents are looked up
-	// by name; durable workers do not read them, since a run carries its
-	// snapshot.
-	Stores []Store
-
 	// Models allowlists the model ids configs may name.
 	Models ModelResolver
 
-	// SkillStores are the unfiltered skill stores; each agent sees only its
-	// picks, through skills.Filter.
-	SkillStores []skills.Store
+	// BuiltInSkillStore and UserSkillStore are the unfiltered stores configs pick
+	// skills from: the developer's, and each namespace's own, as a
+	// skills.Client takes them. Each agent sees only its picks, through
+	// skills.Filter.
+	BuiltInSkillStore skills.Store
+	UserSkillStore    skills.Store
 
-	// MCPStores are the unfiltered MCP stores; each agent sees only its picks,
+	// BuiltInMCPStore and UserMCPStore are the unfiltered stores configs pick
+	// MCP servers from, as an mcpclient.Client takes them. Each agent sees only its picks,
 	// through mcpclient.Filter. MCPCredentials and MCPSchemaCache are shared by
 	// every agent's client.
-	MCPStores      []mcpclient.MCPServerConfigStore
-	MCPCredentials mcpclient.CredentialProvider
-	MCPSchemaCache mcpclient.SchemaCache
+	BuiltInMCPStore mcpclient.Store
+	UserMCPStore    mcpclient.Store
+	MCPCredentials  mcpclient.CredentialProvider
+	MCPSchemaCache  mcpclient.SchemaCache
 
 	// Tools is the catalog configs pick tools from, by key. A catalog tool is
 	// shared by every agent that names it, so it must be safe for concurrent
@@ -148,15 +149,12 @@ type Dependencies struct {
 
 	// Runtime runs built agents durably. Nil runs them in process.
 	Runtime Runtime
-
-	// CacheSize bounds how many built agents are kept for reuse, keyed by
-	// their snapshot, so a request does not rebuild an unchanged agent. Zero
-	// uses 256; a negative size disables the cache.
-	CacheSize int
 }
 
-// Builder turns configs into plain agents.Agent values from code-side
-// Dependencies. It is safe for concurrent use.
+// Builder turns snapshots into plain agents.Agent values from code-side
+// Dependencies. It looks nothing up by name: a Registry resolves the snapshot
+// and hands it over. Building is plain construction, so nothing is cached. It
+// is safe for concurrent use.
 //
 // Durable workers use the same Builder to rebuild each dependency from the
 // part of a config an activity carries — see Model, Tool, Prompt, SkillClient
@@ -164,10 +162,8 @@ type Dependencies struct {
 // Dependencies.
 type Builder struct {
 	deps    Dependencies
-	catalog *Catalog
 	broker  agents.StreamBroker
 	history *history.CommonConversationManager
-	cache   *agentCache
 }
 
 // NewBuilder validates the dependencies and copies the slices and maps it is
@@ -176,25 +172,12 @@ func NewBuilder(deps Dependencies) (*Builder, error) {
 	if deps.Models == nil {
 		return nil, errors.New("agentconfig: a ModelResolver is required")
 	}
-	deps.Stores = slices.Clone(deps.Stores)
-	deps.SkillStores = slices.Clone(deps.SkillStores)
-	deps.MCPStores = slices.Clone(deps.MCPStores)
 	deps.Middlewares = slices.Clone(deps.Middlewares)
 	deps.PromptOptions = slices.Clone(deps.PromptOptions)
 	deps.Tools = maps.Clone(deps.Tools)
 	for name, tool := range deps.Tools {
 		if tool == nil || tool.GetToolDescriptor() == nil {
 			return nil, fmt.Errorf("agentconfig: catalog tool %q has no descriptor", name)
-		}
-	}
-	for _, store := range deps.SkillStores {
-		if store == nil {
-			return nil, errors.New("agentconfig: skill store must not be nil")
-		}
-	}
-	for _, store := range deps.MCPStores {
-		if store == nil {
-			return nil, errors.New("agentconfig: MCP store must not be nil")
 		}
 	}
 
@@ -218,21 +201,8 @@ func NewBuilder(deps Dependencies) (*Builder, error) {
 		historyManager = history.NewConversationManager(history.NewInMemoryConversationPersistence())
 	}
 
-	size := deps.CacheSize
-	if size == 0 {
-		size = 256
-	}
-	return &Builder{
-		deps:    deps,
-		catalog: NewCatalog(deps.Stores...),
-		broker:  broker,
-		history: historyManager,
-		cache:   newAgentCache(size),
-	}, nil
+	return &Builder{deps: deps, broker: broker, history: historyManager}, nil
 }
-
-// Catalog reads the Builder's stores.
-func (b *Builder) Catalog() *Catalog { return b.catalog }
 
 // StreamBroker is the broker built agents stream on.
 func (b *Builder) StreamBroker() agents.StreamBroker { return b.broker }
@@ -246,35 +216,12 @@ func (b *Builder) Middlewares() []agents.Middleware { return slices.Clone(b.deps
 // ClientTools configures client-run tools for every built agent.
 func (b *Builder) ClientTools() agents.ClientToolOptions { return b.deps.ClientTools }
 
-// Agent resolves name for namespace and builds it, reusing a cached build when
-// nothing in its graph changed. It returns ErrNotFound for a name the
-// namespace cannot run.
-func (b *Builder) Agent(ctx context.Context, namespace, name string) (*agents.Agent, error) {
-	snapshot, err := b.catalog.Snapshot(ctx, namespace, name)
-	if err != nil {
-		return nil, err
-	}
-	return b.Build(snapshot)
-}
-
-// Snapshot freezes the graph a run in namespace entering at name would use.
-func (b *Builder) Snapshot(ctx context.Context, namespace, name string) (*Snapshot, error) {
-	return b.catalog.Snapshot(ctx, namespace, name)
-}
-
 // Build turns a snapshot into a plain agent: agents.NewAgent for every config
 // in the graph, handoffs wired between them, the root bound to the durable
 // Runtime when there is one.
 func (b *Builder) Build(snapshot *Snapshot) (*agents.Agent, error) {
 	if err := snapshot.Check(snapshot.Namespace); err != nil {
 		return nil, err
-	}
-	key, err := snapshot.fingerprint()
-	if err != nil {
-		return nil, err
-	}
-	if agent, ok := b.cache.get(key); ok {
-		return agent, nil
 	}
 
 	built := make(map[string]*agents.Agent, len(snapshot.Agents))
@@ -298,9 +245,7 @@ func (b *Builder) Build(snapshot *Snapshot) (*agents.Agent, error) {
 			}
 		}
 	}
-	root := built[snapshot.Root]
-	b.cache.put(key, root)
-	return root, nil
+	return built[snapshot.Root], nil
 }
 
 // SubAgentTools are the tools that call the snapshot's agent name's sub-agents,
@@ -480,134 +425,85 @@ func (b *Builder) Prompt(instruction string) agents.SystemPromptProvider {
 	return prompts.New(instruction, options...)
 }
 
-// SkillClient reads a config's skills from the Builder's skill stores: the
-// named skills, which are the agent's own and always on, as a developer's
-// global skills are for an agent built in code; and the user's other skills,
-// which a run may turn off (agents.SkillSelection). The developer's globals
-// the config does not name are not the agent's. It returns nil when there are
-// no skill stores.
+// SkillClient reads a config's skills: the named ones and no others, from the
+// Builder's built-in and user stores alike, every one the agent's own and
+// always on. A run cannot turn a pick off; to give the agent another skill,
+// edit its config. It returns nil when the config picks none or there are no
+// skill stores.
 func (b *Builder) SkillClient(names []string) agents.SkillClient {
-	if len(b.deps.SkillStores) == 0 {
+	if len(names) == 0 || (b.deps.BuiltInSkillStore == nil && b.deps.UserSkillStore == nil) {
 		return nil
 	}
-	stores := make([]skills.Store, 0, len(b.deps.SkillStores))
-	for _, store := range b.deps.SkillStores {
-		stores = append(stores, skills.Filter(store, names, skills.KeepUserSkills()))
-	}
-	pinned := make(map[string]bool, len(names))
-	for _, name := range names {
-		pinned[name] = true
-	}
-	return &pickedSkills{client: skills.NewClient(stores...), picked: pinned}
+	return alwaysOnSkills{client: skills.NewClient(
+		skills.Filter(b.deps.BuiltInSkillStore, names),
+		skills.WithUserStore(skills.Filter(b.deps.UserSkillStore, names)),
+	)}
 }
 
-// pickedSkills lists a config's picks as global — the agent's own, which no
-// run turns off — and the user's other skills as they are.
-type pickedSkills struct {
-	client *skills.Client
-	picked map[string]bool
-}
+// alwaysOnSkills lists every skill as global: each is one of the config's
+// picks, which no run turns off.
+type alwaysOnSkills struct{ client *skills.Client }
 
-func (s *pickedSkills) ListSkills(ctx context.Context, namespace string, runContext map[string]any) ([]agents.Skill, error) {
+func (s alwaysOnSkills) ListSkills(ctx context.Context, namespace string, runContext map[string]any) ([]agents.Skill, error) {
 	listed, err := s.client.ListSkills(ctx, namespace, runContext)
-	if err != nil {
-		return nil, err
-	}
 	for i := range listed {
-		if s.picked[listed[i].Name] {
-			listed[i].Global = true
-		}
+		listed[i].Global = true
 	}
-	return listed, nil
+	return listed, err
 }
 
-func (s *pickedSkills) ReadSkill(ctx context.Context, namespace string, runContext map[string]any, name, file string) (string, error) {
+func (s alwaysOnSkills) ReadSkill(ctx context.Context, namespace string, runContext map[string]any, name, file string) (string, error) {
 	return s.client.ReadSkill(ctx, namespace, runContext, name, file)
 }
 
-// MCPClient reaches a config's connectors through the Builder's MCP stores:
-// the picked ones, each narrowed to its picked tools, which are the agent's own
-// and always on, as a developer's global servers are for an agent built in
-// code; and the user's other servers, which a run may turn off or narrow
-// (agents.MCPSelection). The developer's globals the config does not pick are
-// not the agent's. It returns nil when there are no MCP stores.
+// MCPClient reaches a config's connectors: the picked ones and no others, from
+// the Builder's built-in and user stores alike, each narrowed to its picked
+// tools and always on. It returns nil when the config picks none or there are
+// no MCP stores.
 func (b *Builder) MCPClient(picks map[string]mcpclient.ToolFilter) agents.MCPClient {
-	if len(b.deps.MCPStores) == 0 {
+	if len(picks) == 0 || (b.deps.BuiltInMCPStore == nil && b.deps.UserMCPStore == nil) {
 		return nil
 	}
-	stores := make([]mcpclient.MCPServerConfigStore, 0, len(b.deps.MCPStores))
-	for _, store := range b.deps.MCPStores {
-		stores = append(stores, mcpclient.Filter(store, picks, mcpclient.KeepUserServers()))
-	}
-	client := mcpclient.NewClient(stores...)
-	if b.deps.MCPCredentials != nil {
-		client = client.WithCredentials(b.deps.MCPCredentials)
-	}
-	if b.deps.MCPSchemaCache != nil {
-		client = client.WithSchemaCache(b.deps.MCPSchemaCache)
-	}
-	return &pickedConnectors{client: client, picked: picks}
+	return alwaysOnConnectors{client: mcpclient.NewClient(
+		mcpclient.Filter(b.deps.BuiltInMCPStore, picks),
+		mcpclient.WithUserStore(mcpclient.Filter(b.deps.UserMCPStore, picks)),
+		mcpclient.WithCredentials(b.deps.MCPCredentials),
+		mcpclient.WithSchemaCache(b.deps.MCPSchemaCache),
+	)}
 }
 
-// pickedConnectors keeps a config's picked servers on whatever a run selects:
-// a user's own server is still the user's — its grants and checks stay its
-// owner's — but a run may only turn off or narrow the servers it did not pick.
-type pickedConnectors struct {
-	client *mcpclient.Client
-	picked map[string]mcpclient.ToolFilter
+// alwaysOnConnectors keeps every server on whatever a run selects, since each
+// is one of the config's picks. A user's own server is still the user's: its
+// grants and checks stay its owner's.
+type alwaysOnConnectors struct{ client *mcpclient.Client }
+
+func (c alwaysOnConnectors) ListTools(ctx context.Context, namespace string, runContext map[string]any, _ ...agents.MCPSelection) ([]agents.ConnectorStatus, []agents.Tool, error) {
+	return c.client.ListTools(ctx, namespace, runContext)
 }
 
-func (c *pickedConnectors) ListTools(ctx context.Context, namespace string, runContext map[string]any, selection ...agents.MCPSelection) ([]agents.ConnectorStatus, []agents.Tool, error) {
-	kept := make([]agents.MCPSelection, 0, len(selection))
-	for _, s := range selection {
-		next := agents.MCPSelection{}
-		for _, name := range s.Disable {
-			if _, picked := c.picked[name]; !picked {
-				next.Disable = append(next.Disable, name)
-			}
-		}
-		for name, tools := range s.Tools {
-			if _, picked := c.picked[name]; !picked {
-				if next.Tools == nil {
-					next.Tools = map[string]agents.MCPToolSelection{}
-				}
-				next.Tools[name] = tools
-			}
-		}
-		kept = append(kept, next)
-	}
-	return c.client.ListTools(ctx, namespace, runContext, kept...)
-}
-
-func (c *pickedConnectors) CallTool(ctx context.Context, descriptor *agents.BaseTool, call *agents.ToolCall) (*agents.ToolCallResponse, error) {
+func (c alwaysOnConnectors) CallTool(ctx context.Context, descriptor *agents.BaseTool, call *agents.ToolCall) (*agents.ToolCallResponse, error) {
 	return c.client.CallTool(ctx, descriptor, call)
 }
 
-// ListServers lists the agent's servers without connecting, its picks always
+// ListServers lists the agent's servers without connecting, every one always
 // on, as a UI offering them shows them.
-func (c *pickedConnectors) ListServers(ctx context.Context, namespace string, runContext map[string]any) ([]mcpclient.ListedServer, error) {
+func (c alwaysOnConnectors) ListServers(ctx context.Context, namespace string, runContext map[string]any) ([]mcpclient.ListedServer, error) {
 	listed, err := c.client.ListServers(ctx, namespace, runContext)
-	if err != nil {
-		return nil, err
-	}
 	for i := range listed {
-		if _, picked := c.picked[listed[i].Name]; picked {
-			listed[i].AlwaysOn = true
-		}
+		listed[i].AlwaysOn = true
 	}
-	return listed, nil
+	return listed, err
 }
 
-var _ mcpclient.ServerLister = (*pickedConnectors)(nil)
+var _ mcpclient.ServerLister = alwaysOnConnectors{}
 
-// GlobalSkillNames lists the global skills of the Builder's unfiltered skill
-// stores: every skill any config could pick, which users' uploads must not
-// reuse. It reads the stores, never building an agent.
+// GlobalSkillNames lists the skills of the Builder's built-in store, which
+// users' uploads must not reuse. It reads the store, never building an agent.
 func (b *Builder) GlobalSkillNames(ctx context.Context) ([]string, error) {
-	if len(b.deps.SkillStores) == 0 {
+	if b.deps.BuiltInSkillStore == nil {
 		return nil, nil
 	}
-	catalog, err := skills.NewClient(b.deps.SkillStores...).ListSkills(ctx, "", nil)
+	catalog, err := skills.NewClient(b.deps.BuiltInSkillStore).ListSkills(ctx, "", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -617,87 +513,4 @@ func (b *Builder) GlobalSkillNames(ctx context.Context) ([]string, error) {
 	}
 	sort.Strings(names)
 	return names, nil
-}
-
-// agentCache is a small LRU of built agents by snapshot fingerprint: a map
-// for lookup and a doubly linked list, most recently used first, for eviction.
-type agentCache struct {
-	mu      sync.Mutex
-	size    int
-	entries map[string]*cacheEntry
-	newest  *cacheEntry
-	oldest  *cacheEntry
-}
-
-type cacheEntry struct {
-	key          string
-	agent        *agents.Agent
-	newer, older *cacheEntry
-}
-
-func newAgentCache(size int) *agentCache {
-	return &agentCache{size: size, entries: map[string]*cacheEntry{}}
-}
-
-func (c *agentCache) get(key string) (*agents.Agent, bool) {
-	if c.size <= 0 {
-		return nil, false
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	entry, ok := c.entries[key]
-	if !ok {
-		return nil, false
-	}
-	c.unlink(entry)
-	c.pushNewest(entry)
-	return entry.agent, true
-}
-
-func (c *agentCache) put(key string, agent *agents.Agent) {
-	if c.size <= 0 {
-		return
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if entry, ok := c.entries[key]; ok {
-		entry.agent = agent
-		c.unlink(entry)
-		c.pushNewest(entry)
-		return
-	}
-	entry := &cacheEntry{key: key, agent: agent}
-	c.entries[key] = entry
-	c.pushNewest(entry)
-	for len(c.entries) > c.size {
-		evicted := c.oldest
-		c.unlink(evicted)
-		delete(c.entries, evicted.key)
-	}
-}
-
-func (c *agentCache) pushNewest(entry *cacheEntry) {
-	entry.older = c.newest
-	entry.newer = nil
-	if c.newest != nil {
-		c.newest.newer = entry
-	}
-	c.newest = entry
-	if c.oldest == nil {
-		c.oldest = entry
-	}
-}
-
-func (c *agentCache) unlink(entry *cacheEntry) {
-	if entry.newer != nil {
-		entry.newer.older = entry.older
-	} else {
-		c.newest = entry.older
-	}
-	if entry.older != nil {
-		entry.older.newer = entry.newer
-	} else {
-		c.oldest = entry.newer
-	}
-	entry.newer, entry.older = nil, nil
 }

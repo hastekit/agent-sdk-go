@@ -164,7 +164,7 @@ func TestClientUsesTheExecutionNamespace(t *testing.T) {
 	require.NoError(t, err)
 	_, err = store.Put(context.Background(), "tenant", bundle("review", "content"))
 	require.NoError(t, err)
-	client := NewClient(store)
+	client := NewClient(nil, WithUserStore(store))
 	empty, err := client.ListSkills(context.Background(), "other", nil)
 	require.NoError(t, err)
 	require.Empty(t, empty)

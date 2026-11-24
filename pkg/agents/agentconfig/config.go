@@ -1,11 +1,11 @@
-// Package agentconfig defines agents as data: a serializable Config stored per
-// namespace, and a Builder that turns one into a plain agents.Agent from
-// dependencies held in code.
+// Package agentconfig defines agents as data: a serializable Config, a
+// Registry that finds the configs a namespace can run, and a Builder that
+// turns them into a plain agents.Agent from dependencies held in code.
 //
-// The empty namespace holds built-in agents, which every namespace can run and
-// none can replace. Any other namespace — a user or a tenant — holds the agents
-// it created at run time, which only it can see or run. This mirrors the skills
-// and mcpclient stores, whose empty namespaces hold their globals.
+// Built-in agents are configs in code, given to NewRegistry: every namespace
+// can run them and none can replace them. Each namespace — a user or a tenant
+// — keeps the agents it creates at run time in a MutableStore, where only it
+// can see or run them.
 //
 // A config names what the agent may use; it never carries the thing itself. A
 // model is an id the Builder allowlists, a tool is a name in the Builder's
@@ -19,8 +19,6 @@
 package agentconfig
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -41,8 +39,6 @@ var (
 	// malformed config, or one naming a model, tool or handoff the server does
 	// not offer. Durable runtimes treat it as permanent and do not retry it.
 	ErrInvalid = errors.New("invalid agent config")
-	// ErrReadOnly reports a write to a store, or a name, that cannot be written.
-	ErrReadOnly = errors.New("agent config is read-only")
 )
 
 // MaxConfigBytes bounds one config's JSON encoding. A config travels in every
@@ -74,13 +70,14 @@ type Config struct {
 	// Output is a JSON schema object the final answer must follow.
 	Output json.RawMessage `json:"output,omitempty"`
 
-	// Skills names the skills the agent may read, global or the namespace's
-	// own, as skills.Filter does. A name no store lists is ignored, since
-	// skills come and go at run time.
+	// Skills names the agent's skills, built-in or the namespace's own, and
+	// it has no others. Each is always on: a run cannot turn a pick off. A
+	// name no store lists is ignored, since skills come and go at run time.
 	Skills []string `json:"skills,omitempty"`
 
-	// MCP picks connectors by name, each narrowed to the tools its ToolFilter
-	// allows (an empty filter keeps every tool), as mcpclient.Filter does.
+	// MCP names the agent's connectors, built-in or the namespace's own, each
+	// narrowed to the tools its ToolFilter allows (an empty filter keeps every
+	// tool), and it has no others. Each is always on, as Skills are.
 	MCP map[string]mcpclient.ToolFilter `json:"mcp,omitempty"`
 
 	// Tools names tools in the Builder's catalog.
@@ -348,15 +345,4 @@ func (s *Snapshot) Sub(name string) *Snapshot {
 		}
 	}
 	return sub
-}
-
-// fingerprint identifies a snapshot's content, so a cache never serves an agent
-// built from an older version of a config.
-func (s *Snapshot) fingerprint() (string, error) {
-	data, err := json.Marshal(s) // map keys encode sorted, so equal snapshots encode equally
-	if err != nil {
-		return "", err
-	}
-	sum := sha256.Sum256(data)
-	return hex.EncodeToString(sum[:]), nil
 }

@@ -36,13 +36,14 @@ func catalogConfig(name, endpoint string) ServerConfig {
 
 func TestConfigStoresScopeIsolationAndRoundTrip(t *testing.T) {
 	type writableStore interface {
-		MCPServerConfigStore
+		Store
 		Put(context.Context, string, ServerConfig) error
 		Delete(context.Context, string, string) error
 	}
 	for _, kind := range []string{"memory", "file"} {
 		t.Run(kind, func(t *testing.T) {
-			// Both implementations keep one name per scope and return global plus only the requested user.
+			// Both implementations keep one name per namespace and return only the requested one:
+			// the empty namespace is a key like any other.
 			var store writableStore = NewMemoryStore()
 			path := filepath.Join(t.TempDir(), "servers.json")
 			if kind == "file" {
@@ -57,18 +58,21 @@ func TestConfigStoresScopeIsolationAndRoundTrip(t *testing.T) {
 			}
 			visible, err := store.ListServerConfigs(t.Context(), "alice", nil)
 			require.NoError(t, err)
-			require.Len(t, visible, 2)
+			require.Len(t, visible, 1)
+			require.Equal(t, "alice", visible[0].Namespace)
+			visible, err = store.ListServerConfigs(t.Context(), "", nil)
+			require.NoError(t, err)
+			require.Len(t, visible, 1)
 			require.Equal(t, "", visible[0].Namespace)
-			require.Equal(t, "alice", visible[1].Namespace)
 
-			// Namespace writes and deletes never modify a developer definition with the same name.
+			// Namespace writes and deletes never modify another namespace's definition with the same name.
 			require.NoError(t, store.Delete(t.Context(), "alice", "same"))
 			visible, err = store.ListServerConfigs(t.Context(), "alice", nil)
 			require.NoError(t, err)
-			require.Len(t, visible, 1)
+			require.Empty(t, visible)
 			visible, err = store.ListServerConfigs(t.Context(), "bob", nil)
 			require.NoError(t, err)
-			require.Len(t, visible, 2)
+			require.Len(t, visible, 1)
 			if kind == "file" {
 				reopened, err := NewFileStore(path)
 				require.NoError(t, err)
@@ -89,7 +93,8 @@ func TestClientGlobalPrecedenceSelectionAndExecution(t *testing.T) {
 	user := catalogConfig("private", userCatalogServer(t, "alice"))
 	require.NoError(t, store.Put(t.Context(), "alice", user))
 	require.NoError(t, store.Put(t.Context(), "bob", catalogConfig("bob", "https://down.invalid/mcp")))
-	client := NewClient(store)
+	// One store fills both roles: its empty namespace holds the built-ins.
+	client := NewClient(store, WithUserStore(store))
 
 	// User configuration cannot replace a global destination or re-enable its excluded
 	// tools, and a run narrows only the user's own server: the global keeps every
@@ -136,7 +141,7 @@ func TestCallToolRoutesByServerNameAndExecutionNamespace(t *testing.T) {
 	for _, namespace := range []string{"alice", "bob"} {
 		require.NoError(t, store.Put(t.Context(), namespace, catalogConfig("docs", userCatalogServer(t, namespace))))
 	}
-	client := NewClient(store)
+	client := NewClient(nil, WithUserStore(store))
 	_, tools, err := client.ListTools(t.Context(), "alice", nil)
 	require.NoError(t, err)
 	require.NotEmpty(t, tools)
@@ -168,7 +173,7 @@ func TestNewNamespaceServersAreEnabledWithExistingSelection(t *testing.T) {
 	disabled := catalogConfig("disabled", "https://down.invalid/mcp")
 	disabled.Authorization = &OAuthConfig{ClientID: "client", RedirectURL: "https://app.example/cb", AuthURL: "https://accounts.example/authorize", TokenURL: "https://accounts.example/token"}
 	require.NoError(t, store.Put(t.Context(), "alice", disabled))
-	client := NewClient(store)
+	client := NewClient(nil, WithUserStore(store))
 	selection := agents.MCPSelection{Disable: []string{"disabled"}}
 	statuses, tools, err := client.ListTools(t.Context(), "alice", nil, selection)
 	require.NoError(t, err)
@@ -197,7 +202,7 @@ func TestNewNamespaceServersAreEnabledWithExistingSelection(t *testing.T) {
 
 func TestClientUsesCurrentStoreConfiguration(t *testing.T) {
 	store := NewMemoryStore()
-	client := NewClient(store)
+	client := NewClient(nil, WithUserStore(store))
 	input := &agents.AgentInput{Namespace: "alice"}
 	_, tools, err := client.ListTools(t.Context(), input.Namespace, input.RunContext, input.MCP)
 	require.NoError(t, err)
@@ -236,11 +241,11 @@ func (failingConfigStore) ListServerConfigs(context.Context, string, map[string]
 
 func TestClientErrorsAndConcurrentNamespaceIsolation(t *testing.T) {
 	// Store errors abort discovery; a down connector instead contributes an unavailable status.
-	_, _, err := NewClient(failingConfigStore{}).ListTools(t.Context(), "alice", nil)
+	_, _, err := NewClient(nil, WithUserStore(failingConfigStore{})).ListTools(t.Context(), "alice", nil)
 	require.ErrorContains(t, err, "store unavailable")
 	store := NewMemoryStore()
 	require.NoError(t, store.Put(t.Context(), "alice", catalogConfig("down", "https://down.invalid/mcp")))
-	statuses, tools, err := NewClient(store).ListTools(t.Context(), "alice", nil)
+	statuses, tools, err := NewClient(nil, WithUserStore(store)).ListTools(t.Context(), "alice", nil)
 	require.NoError(t, err)
 	require.Empty(t, tools)
 	require.Equal(t, agents.ToolsetErrorUnavailable, statuses[0].Kind)
@@ -256,7 +261,7 @@ func TestClientErrorsAndConcurrentNamespaceIsolation(t *testing.T) {
 	}
 	require.NoError(t, store.Delete(t.Context(), "alice", "down"))
 	cache := newMemCache()
-	client := NewClient(store).WithSchemaCache(cache)
+	client := NewClient(nil, WithUserStore(store), WithSchemaCache(cache))
 	var workers sync.WaitGroup
 	for _, scope := range []string{"alice", "bob"} {
 		workers.Add(1)
@@ -287,8 +292,8 @@ func TestStoredOAuthBindingsAreNamespaceScoped(t *testing.T) {
 		config.Authorization = &OAuthConfig{ClientID: namespace, RedirectURL: "https://app.example/mail/callback", AuthURL: "https://accounts.example/authorize", TokenURL: "https://accounts.example/token"}
 		require.NoError(t, store.Put(t.Context(), namespace, config))
 	}
-	client := NewClient(store).WithCredentials(provider)
-	handler := NewHandler(store, WithOAuth(provider), WithNamespaceResolver(func(r *http.Request) (string, error) { return r.Header.Get("Subject"), nil }))
+	client := NewClient(store, WithUserStore(store), WithCredentials(provider))
+	handler := NewHandler(store, WithBuiltInStore(store), WithOAuth(provider), WithNamespaceResolver(func(r *http.Request) (string, error) { return r.Header.Get("Subject"), nil }))
 	for _, namespace := range []string{"alice", "bob"} {
 		statuses, tools, err := client.ListTools(t.Context(), namespace, nil)
 		require.NoError(t, err)

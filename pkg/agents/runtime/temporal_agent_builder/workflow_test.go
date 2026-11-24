@@ -51,7 +51,7 @@ func TestAgentBuilderWorkflowRunsAConfigAddedAfterWorkerStart(t *testing.T) {
 	env := builderEnv(t, f, broker)
 
 	f.AddConfig(t)
-	snapshot, err := f.Builder.Snapshot(context.Background(), testutil.FixtureNamespace, testutil.FixtureAgent)
+	snapshot, err := f.Registry.Snapshot(context.Background(), testutil.FixtureNamespace, testutil.FixtureAgent)
 	require.NoError(t, err)
 
 	env.ExecuteWorkflow(temporal_agent_builder.WorkflowName, snapshot, builderInput(testutil.FixtureNamespace))
@@ -78,7 +78,7 @@ func TestAgentBuilderWorkflowRefusesAnotherNamespacesSnapshot(t *testing.T) {
 	f := testutil.NewAgentFixture(t, nil, broker, testutil.FixtureSteps()...)
 	env := builderEnv(t, f, broker)
 	f.AddConfig(t)
-	snapshot, err := f.Builder.Snapshot(context.Background(), testutil.FixtureNamespace, testutil.FixtureAgent)
+	snapshot, err := f.Registry.Snapshot(context.Background(), testutil.FixtureNamespace, testutil.FixtureAgent)
 	require.NoError(t, err)
 
 	env.ExecuteWorkflow(temporal_agent_builder.WorkflowName, snapshot, builderInput("tenant-b"))
@@ -132,7 +132,7 @@ func TestRuntimeIsAnAgentConfigRuntime(t *testing.T) {
 	runtime := temporal_agent_builder.NewRuntime(nil, broker)
 	f := testutil.NewAgentFixture(t, runtime, nil)
 	f.AddConfig(t)
-	agent, err := f.Builder.Agent(context.Background(), testutil.FixtureNamespace, testutil.FixtureAgent)
+	agent, err := f.Agent(context.Background(), testutil.FixtureNamespace, testutil.FixtureAgent)
 	require.NoError(t, err)
 	require.Same(t, broker, agent.StreamBroker(), "the agent streams on the runtime's broker")
 	_, err = agent.Run(context.Background(), builderInput(testutil.FixtureNamespace))
@@ -144,7 +144,7 @@ func backgroundSnapshot(t *testing.T, f *testutil.AgentFixture) *agentconfig.Sna
 	t.Helper()
 	_, err := f.Store.Put(context.Background(), testutil.FixtureNamespace, agentconfig.Config{Name: "indexer", Model: testutil.FixtureModel, Tools: []string{testutil.FixtureBackgroundTool}})
 	require.NoError(t, err)
-	snapshot, err := f.Builder.Snapshot(context.Background(), testutil.FixtureNamespace, "indexer")
+	snapshot, err := f.Registry.Snapshot(context.Background(), testutil.FixtureNamespace, "indexer")
 	require.NoError(t, err)
 	return snapshot
 }
@@ -230,7 +230,7 @@ func TestSubAgentCallRunsInAnActivity(t *testing.T) {
 		Name: "orchestrator", Model: testutil.FixtureModel, SubAgents: []agentconfig.SubAgent{{Name: testutil.FixtureAgent}},
 	})
 	require.NoError(t, err)
-	snapshot, err := f.Builder.Snapshot(context.Background(), testutil.FixtureNamespace, "orchestrator")
+	snapshot, err := f.Registry.Snapshot(context.Background(), testutil.FixtureNamespace, "orchestrator")
 	require.NoError(t, err)
 
 	calls := 0

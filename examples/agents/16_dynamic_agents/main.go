@@ -55,25 +55,22 @@ func main() {
 	}})
 
 	// Built-in agents: every namespace can run them, none can replace them.
-	builtIns, err := agentconfig.NewInlineStore(agentconfig.Config{
+	builtIns := []agentconfig.Config{{
 		Name:        "concierge",
 		Description: "Answers general questions.",
 		Model:       "OpenAI/gpt-4.1-mini",
 		Instruction: "You are a friendly concierge.",
 		Tools:       []string{"current_time"},
-	})
-	if err != nil {
-		log.Fatal(err)
-	}
+	}}
 	// Each namespace's own agents, written over HTTP at run time.
 	userAgents, err := agentconfig.NewFileStore("./data/agents")
 	if err != nil {
 		log.Fatal(err)
 	}
-	// Skills a config may pick from; ./skills is optional.
-	var skillStores []skills.Store
+	// Built-in skills a config may pick from; ./skills is optional.
+	var builtInSkills skills.Store
 	if dir, err := skills.NewDirStore("./skills"); err == nil {
-		skillStores = append(skillStores, dir)
+		builtInSkills = dir
 	}
 	history, err := hastekit.OpenFileHistory("./data/conversations")
 	if err != nil {
@@ -125,12 +122,11 @@ func main() {
 	}
 
 	builder, err := agentconfig.NewBuilder(agentconfig.Dependencies{
-		Stores: []agentconfig.Store{builtIns, userAgents},
 		// The allowlist: a config naming any other model is refused.
 		Models: agentconfig.AllowModels(func(id string) (llm.Provider, error) {
 			return client.Model(id), nil
 		}, "OpenAI/gpt-4.1-mini", "OpenAI/gpt-4o"),
-		SkillStores: skillStores,
+		BuiltInSkillStore: builtInSkills,
 		Tools: map[string]agents.Tool{
 			"current_time": hastekit.NewTool(CurrentTime, hastekit.WithName("current_time"), hastekit.WithDescription("The current time in a time zone.")),
 		},
@@ -152,9 +148,15 @@ func main() {
 		}()
 	}
 
-	registry := agentconfig.NewRegistry(builder)
+	// The registry finds built-ins and each namespace's own agents and hands
+	// each run's snapshot to the builder; the worker above needs only the
+	// builder.
+	registry, err := agentconfig.NewRegistry(builder, builtIns, userAgents)
+	if err != nil {
+		log.Fatal(err)
+	}
 	handler := web.Handler(registry,
-		agui.WithAgentConfigStore(userAgents),
+		agui.WithAgentConfigs(),
 		// Demo only: trust a header. Derive the namespace from authentication.
 		agui.WithNamespaceResolver(func(r *http.Request) (string, error) { return r.Header.Get("X-User"), nil }),
 	)

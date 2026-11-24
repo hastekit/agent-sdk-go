@@ -53,7 +53,7 @@ func skillBundle(name, description string) skills.Bundle {
 func TestSkillsAreNotScopedToAgents(t *testing.T) {
 	store, err := skills.NewFileStore(t.TempDir())
 	require.NoError(t, err)
-	agent := agents.NewAgent(&agents.AgentOptions{Name: "helper", SkillClient: skills.NewClient(store)})
+	agent := agents.NewAgent(&agents.AgentOptions{Name: "helper", SkillClient: skills.NewClient(nil, skills.WithUserStore(store))})
 	handler := NewHandler(skillAgents{"helper": agent}, WithSkillStore(store), WithNamespaceResolver(func(*http.Request) (string, error) { return "tenant", nil }))
 
 	// Users manage one library for every agent; the per-agent route lists the
@@ -72,7 +72,7 @@ func TestSkillsAreNotScopedToAgents(t *testing.T) {
 func TestSkillStoreManagementUsesResolvedNamespace(t *testing.T) {
 	store, err := skills.NewFileStore(t.TempDir())
 	require.NoError(t, err)
-	agent := agents.NewAgent(&agents.AgentOptions{Name: "helper", SkillClient: skills.NewClient(store)})
+	agent := agents.NewAgent(&agents.AgentOptions{Name: "helper", SkillClient: skills.NewClient(nil, skills.WithUserStore(store))})
 	handler := NewHandler(skillAgents{"helper": agent}, WithSkillStore(store), WithNamespaceResolver(func(r *http.Request) (string, error) { return r.Header.Get("Tenant"), nil }))
 	data, err := json.Marshal(skillBundle("review", "Review work"))
 	require.NoError(t, err)
@@ -114,8 +114,8 @@ func TestUploadsCannotReuseAnyAgentsGlobalSkillName(t *testing.T) {
 	styleGlobals, err := skills.NewInlineStore(skillBundle("style", "Developer style"))
 	require.NoError(t, err)
 	registry := skillAgents{
-		"reviewer": agents.NewAgent(&agents.AgentOptions{Name: "reviewer", SkillClient: skills.NewClient(store, reviewGlobals)}),
-		"writer":   agents.NewAgent(&agents.AgentOptions{Name: "writer", SkillClient: skills.NewClient(store, styleGlobals)}),
+		"reviewer": agents.NewAgent(&agents.AgentOptions{Name: "reviewer", SkillClient: skills.NewClient(reviewGlobals, skills.WithUserStore(store))}),
+		"writer":   agents.NewAgent(&agents.AgentOptions{Name: "writer", SkillClient: skills.NewClient(styleGlobals, skills.WithUserStore(store))}),
 	}
 	handler := NewHandler(registry, WithSkillStore(store), WithNamespaceResolver(func(*http.Request) (string, error) { return "tenant", nil }))
 	upload := func(method, path, name string) int {

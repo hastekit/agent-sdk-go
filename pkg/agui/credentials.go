@@ -8,7 +8,7 @@ import (
 
 // mountMCPCredentials shares the chat namespace with connector management and OAuth routes.
 func (o options) mountMCPCredentials(mux *http.ServeMux) {
-	if o.mcpStore == nil {
+	if !o.mcpRoutes() {
 		return
 	}
 

@@ -49,11 +49,13 @@ type Page struct {
 
 // Store lists and reads skill bundles by namespace. It is everything a Client
 // needs, so built-in skills, filters and custom backends implement only this.
-// It mirrors mcpclient.MCPServerConfigStore.
+// It mirrors mcpclient.Store.
 //
-// The empty namespace holds global skills: developer-owned, listed for every
-// namespace, and winning over a namespace's own skill with the same name. Any
-// other namespace holds that namespace's own skills. List pages through one
+// A store does not know whether its skills are global or a user's: that is
+// the Client's to say, by which of its two stores it reads (see NewClient). A
+// namespace is an opaque key, the empty one included, under which the Client
+// reads built-in skills. A store with no notion of namespaces, such as
+// NewDirStore, serves the same skills for every one. List pages through one
 // namespace only; Get returns ErrNotFound for a name the namespace lacks.
 // Implementations must be safe for concurrent callers and honor cancellation.
 type Store interface {
@@ -62,14 +64,14 @@ type Store interface {
 }
 
 // MutableStore is a Store that also saves skills, as
-// mcpclient.MutableMCPServerConfigStore is for MCP servers. Implementations must isolate
+// mcpclient.MutableStore is for MCP servers. Implementations must isolate
 // namespaces, atomically replace bundles, return ErrNotFound for absent Get
 // calls, make Delete idempotent, and be safe for concurrent callers.
 //
-// Writing the empty namespace changes every agent's global skills, so only
-// trusted server code may do it. NewHandler refuses it, whatever namespace the
-// request resolves to. Policies and authorization belong to the host, never
-// uploaded skill content.
+// NewHandler refuses the empty namespace, whatever the request resolves to, so
+// a store that also serves an agent's built-in skills, read under it, is never
+// written there over HTTP. Policies and authorization belong to the host,
+// never uploaded skill content.
 type MutableStore interface {
 	Store
 	Put(ctx context.Context, namespace string, bundle Bundle) (Metadata, error)
@@ -120,8 +122,9 @@ func validName(s string) bool {
 	return s != "" && len(s) <= 128 && s == strings.TrimSpace(s) && fs.ValidPath(s) && !strings.ContainsAny(s, "/\\\x00") && s != "."
 }
 
-// namespaceKey names a namespace's storage. The empty namespace is the global
-// one; a blank but nonempty namespace is rejected so it cannot pass for it.
+// namespaceKey names a namespace's storage. The empty namespace is a key like
+// any other; a blank but nonempty namespace is rejected so it cannot pass for
+// it.
 func namespaceKey(ctx context.Context, ns string) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
