@@ -60,8 +60,13 @@ func NewHTTPHandler(service *Service, config HTTPConfig) http.Handler {
 	}))
 	mux.HandleFunc("GET /routines/agents", wrap(func(w http.ResponseWriter, r *http.Request, ns string) {
 		names := []string{}
-		if registry, ok := service.executor.(interface{ AgentNames() []string }); ok {
-			names = append(names, registry.AgentNames()...)
+		if lister, ok := service.executor.(AgentLister); ok {
+			listed, err := lister.AgentNames(r.Context(), namespace(ns))
+			if err != nil {
+				writeJSON(w, 500, map[string]string{"error": "unable to list agents"})
+				return
+			}
+			names = append(names, listed...)
 		}
 		writeJSON(w, 200, names)
 	}))

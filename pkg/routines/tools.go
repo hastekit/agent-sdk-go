@@ -454,8 +454,12 @@ func (t *listAgentsTool) Execute(ctx context.Context, call *agents.ToolCall) (*a
 	}
 
 	value := []string{}
-	if registry, ok := t.service.executor.(interface{ AgentNames() []string }); ok {
-		value = append(value, registry.AgentNames()...)
+	if lister, ok := t.service.executor.(AgentLister); ok {
+		listed, err := lister.AgentNames(ctx, namespace(call.Namespace))
+		if err != nil {
+			return nil, err
+		}
+		value = append(value, listed...)
 	}
 	data, err := json.Marshal(value)
 	if err != nil {

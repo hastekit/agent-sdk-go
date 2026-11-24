@@ -292,6 +292,13 @@ func (e *Agent) History() *history.CommonConversationManager {
 	return e.history
 }
 
+// MCPClient returns the agent's MCP client, or nil when it has none. Callers
+// can use it to describe the agent's connectors, e.g. listing them without
+// connecting when the client implements mcpclient.ServerLister.
+func (e *Agent) MCPClient() MCPClient {
+	return e.mcpClient
+}
+
 // Stop asks the run on streamID to stop — the same request
 // AgentHandle.Stop makes, for callers that don't hold the handle.
 //
@@ -423,7 +430,7 @@ func (e *Agent) ExecuteLocal(ctx context.Context, in *AgentInput) (output *Agent
 		defer e.streamBroker.StartHeartbeat(ctx, in.StreamID)()
 	}
 
-	run, err := history.NewRun(ctx, e.history, in.Namespace, in.ThreadID, in.PreviousRunID, history.WithGroupID(in.GroupID), history.WithRunContext(in.RunContext), history.WithRunID(in.RunID), history.WithDefaultConversationID(in.SessionID))
+	run, err := history.NewRun(ctx, e.history, in.Namespace, in.ThreadID, in.PreviousRunID, history.WithGroupID(in.GroupID), history.WithRunContext(in.RunContext), history.WithRunID(in.RunID), history.WithDefaultConversationID(in.SessionID), history.WithAgentName(in.owner.Name))
 	if err != nil {
 		return &AgentOutput{Status: agentstate.RunStatusError, RunID: ""}, err
 	}

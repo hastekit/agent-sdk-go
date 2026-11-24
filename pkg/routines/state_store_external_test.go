@@ -24,7 +24,7 @@ func (s *recordingStateStore) Save(ctx context.Context, rec routines.StateRecord
 
 type executor struct{}
 
-func (executor) HasAgent(string) bool                                          { return true }
+func (executor) HasAgent(context.Context, string, string) (bool, error)        { return true, nil }
 func (executor) Execute(context.Context, routines.Routine, routines.Run) error { return nil }
 
 func TestExternalStateStorePlugin(t *testing.T) {

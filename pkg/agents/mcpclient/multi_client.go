@@ -124,6 +124,50 @@ func (c *Client) listServerConfigs(ctx context.Context, namespace string, runCon
 	return result, nil
 }
 
+// ListedServer is one of a client's servers, as a UI offering them shows it.
+type ListedServer struct {
+	Name string `json:"name"`
+	// AlwaysOn reports a server no run can turn off or narrow: a global, or
+	// one the client pins.
+	AlwaysOn bool `json:"always_on"`
+}
+
+// ServerLister is an MCP client that can list the servers it has for a
+// namespace without connecting to any. Client implements it.
+type ServerLister interface {
+	ListServers(ctx context.Context, namespace string, runContext map[string]any) ([]ListedServer, error)
+}
+
+// ListServers lists the servers the client has for namespace — the same ones
+// ListTools would connect to with no selection, unusable ones included —
+// without connecting: globals first, always on, then the namespace's own,
+// each group by name.
+func (c *Client) ListServers(ctx context.Context, namespace string, runContext map[string]any) ([]ListedServer, error) {
+	resolved, err := c.listServerConfigs(ctx, namespace, runContext)
+	if err != nil {
+		return nil, err
+	}
+	var globals, users []ListedServer
+	for name, config := range resolved.configs {
+		if config.Namespace == "" {
+			globals = append(globals, ListedServer{Name: name, AlwaysOn: true})
+		} else {
+			users = append(users, ListedServer{Name: name})
+		}
+	}
+	for name := range resolved.invalid {
+		users = append(users, ListedServer{Name: name})
+	}
+	byName := func(servers []ListedServer) {
+		sort.Slice(servers, func(i, j int) bool { return servers[i].Name < servers[j].Name })
+	}
+	byName(globals)
+	byName(users)
+	return append(append([]ListedServer{}, globals...), users...), nil
+}
+
+var _ ServerLister = (*Client)(nil)
+
 // build configures a lightweight server from the current store definition.
 // Network sessions and tool schemas are reused by their existing pool and cache.
 func (c *Client) build(ctx context.Context, config ServerConfig) (*server, error) {

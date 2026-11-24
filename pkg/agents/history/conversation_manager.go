@@ -148,6 +148,9 @@ type ConversationRunManager struct {
 	// runContext
 	runContext map[string]any
 
+	// agentName is the agent the run entered at (see WithAgentName).
+	agentName string
+
 	// State is used to store any key-value pairs that need to be persisted along with the run
 	State map[string]string
 
@@ -312,6 +315,22 @@ func WithConversationID(cid string) RunOption {
 // RunContextMetaKey is the saved row meta entry under which
 // SaveMessages records the run's RunContext (see WithRunContext).
 const RunContextMetaKey = "run_context"
+
+// AgentMetaKey is the saved row meta entry under which SaveMessages records
+// the agent the run entered at (see WithAgentName).
+const AgentMetaKey = "agent_name"
+
+// WithAgentName records the agent the run entered at, which SaveMessages
+// stores in each saved row's meta under AgentMetaKey. A thread belongs to the
+// agent its first run entered at, so agents sharing one store can each list
+// only their own threads (see ThreadInfo.AgentName). It is the entry agent,
+// not whichever one is answering: a run handed off to a specialist still
+// records the agent the user was talking to.
+func WithAgentName(name string) RunOption {
+	return func(cm *ConversationRunManager) {
+		cm.agentName = name
+	}
+}
 
 // WithRunContext records the run's RunContext, which SaveMessages
 // stores in the saved row's meta under RunContextMetaKey. It is
@@ -639,6 +658,9 @@ func (cm *ConversationRunManager) SaveMessages(ctx context.Context) error {
 	// provider) so later reads recover the turn's context.
 	if len(cm.runContext) > 0 {
 		meta[RunContextMetaKey] = cm.runContext
+	}
+	if cm.agentName != "" {
+		meta[AgentMetaKey] = cm.agentName
 	}
 
 	if cm.summaries != nil {

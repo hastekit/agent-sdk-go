@@ -77,6 +77,27 @@ connector status before opening an MCP connection or using cached tools.
 
 Register the full callback URL in the OAuth application.
 
+### Apps that authenticate with headers
+
+A navigation sends cookies but not an `Authorization` header, so an app whose
+API authenticates with headers cannot visit `/connect` or receive the callback
+there. It starts consent from a script and finishes it the same way:
+
+1. Set the definition's `RedirectURL` to a page of the app's own.
+2. `GET /mcp/{server}/connect` with `Accept: application/json` and the app's
+   usual headers. The handler answers `{"authorizationUrl": "..."}` instead of
+   redirecting, and sets no cookie; open that URL, in a popup for example.
+3. The authorization server sends the browser to the app's page with `code`,
+   `state` and possibly `iss` (or `error`). The page hands them to the app, which
+   sends `POST /mcp/{server}/callback` with `{"state", "code", "iss"}`, or
+   `{"state", "error"}`, authenticated as usual. The handler answers 204 when
+   the account is connected.
+
+The attempt must be the authenticated user's own, which binds it to its user
+without the browser cookie. An attempt started this way never finishes through
+the GET callback. Hand the response only to the app's own origin: the page can
+use a `BroadcastChannel`, which is same-origin.
+
 ## Discovery and dynamic client registration
 
 Most MCP servers publish their authorization server, and most of those accept

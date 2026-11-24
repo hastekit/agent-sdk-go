@@ -5,6 +5,7 @@ import { HastekitAgent } from "@hastekit/copilotkit";
 import { fetchMCPServers, fetchSkillCatalog, isGlobalMCPServer, type MCPServerInfo } from "./api";
 import { AttachmentMessageView } from "./attachment-message";
 import { ComposerMCPContext, ComposerSkillsContext } from "./composer-menu";
+import { AgentLibrary } from "./agent-library";
 import { MCPLibrary } from "./mcp-library";
 import { RoutineLibrary } from "./routine-library";
 import { SkillLibrary } from "./skill-library";
@@ -17,7 +18,8 @@ import { InterruptHandler } from "./components/Interrupts";
 import { RoutineHistory } from "./components/RoutineHistory";
 import { Sidebar } from "./components/Sidebar";
 import { InlineToolRenderer } from "./components/ToolCallCard";
-import { useBuiltInSkills } from "./hooks/useBuiltInSkills";
+import { useAgentSkills } from "./hooks/useAgentSkills";
+import { useAgentServers } from "./hooks/useAgentServers";
 import { useCatalogChoices } from "./hooks/useCatalogChoices";
 import { useNavigation } from "./hooks/useNavigation";
 import { useRoutineList } from "./hooks/useRoutineList";
@@ -78,7 +80,8 @@ export default function App() {
   // once, remembered once per browser, and sent with every run and resume.
   const skills = useCatalogChoices({ enabled: server.skillStoreEnabled, storageKey: "hastekit-skills", load: fetchSkillCatalog });
   // The agent's own skills: always on, shown beside the user's for reference.
-  const builtInSkills = useBuiltInSkills(agentName);
+  const { builtIn: builtInSkills, optional: optionalSkills } = useAgentSkills(agentName);
+  const agentServers = useAgentServers(agentName);
   const mcp = useCatalogChoices({ enabled: server.mcpStoreEnabled, storageKey: "hastekit-mcp", load: fetchMCPServers, optional: isUserMCPServer });
   useEffect(() => {
     if (agent) agent.skillSelection = { disable: skills.disabled };
@@ -116,6 +119,21 @@ export default function App() {
     threadList.reset();
   }, [nav.changeAgent, threadList.reset]);
 
+  // The user's own agents: created and edited in the agent library, then
+  // talked to like any other. A deleted agent the chat was on falls back to
+  // the first one left.
+  const [agentsOpen, setAgentsOpen] = useState(false);
+  const { reloadAgents } = server;
+  const refreshAgents = useCallback(async () => {
+    const agents = await reloadAgents();
+    if (!agents.includes(agentName)) changeAgent(agents[0] ?? "");
+  }, [reloadAgents, agentName, changeAgent]);
+  const chatWith = useCallback((name: string) => {
+    setAgentsOpen(false);
+    if (name !== agentName) changeAgent(name);
+  }, [agentName, changeAgent]);
+  const manageAgents = server.agentConfigsEnabled ? () => setAgentsOpen(true) : undefined;
+
   // Steering: a turn typed while the agent is working folds into the run
   // in flight (see HastekitAgent.steer). Memoised so the composer
   // isn't remounted on every render.
@@ -148,6 +166,7 @@ export default function App() {
       {routinesOpen && <RoutineLibrary initialAgent={agentName} onChanged={routineList.reload} onClose={() => setRoutinesOpen(false)} />}
       {libraryOpen && <SkillLibrary builtIn={builtInSkills} onClose={() => setLibraryOpen(false)} onSaved={skills.reload} />}
       {mcpLibraryOpen && <MCPLibrary onClose={() => setMCPLibraryOpen(false)} onChanged={mcp.reload} />}
+      {agentsOpen && <AgentLibrary current={agentName} onClose={() => setAgentsOpen(false)} onChanged={refreshAgents} onChat={chatWith} />}
       <Sidebar
         threads={threadList.threads}
         activeThreadId={active.threadId}
@@ -163,6 +182,7 @@ export default function App() {
         onManageRoutines={server.routinesEnabled ? () => setRoutinesOpen(true) : undefined}
         onManageSkills={server.skillStoreEnabled ? () => setLibraryOpen(true) : undefined}
         onManageMCP={server.mcpStoreEnabled ? () => setMCPLibraryOpen(true) : undefined}
+        onManageAgents={manageAgents}
         onRetry={threadList.refresh}
         listingSupported={threadList.supported}
         error={error}
@@ -170,7 +190,11 @@ export default function App() {
       {routine.selected && !routine.threadOpen ? <main className="chat-pane routine-empty">
         <h2>{routine.selected.name}</h2>
         <p>{routine.loading ? "Loading latest conversation…" : routine.error || "This routine has no conversations yet. Its first run will appear here."}</p>
-      </main> : agent && (
+      </main> : !agent ? (manageAgents && <main className="chat-pane routine-empty">
+        <h2>No agents yet</h2>
+        <p>Create an agent from the tools and skills this server offers, then talk to it here.</p>
+        <button className="primary-action" onClick={manageAgents}>Create an agent</button>
+      </main>) : (
         <CopilotKitProvider
           key={active.threadId}
           selfManagedAgents={{ [agentName]: agent }}
@@ -183,6 +207,7 @@ export default function App() {
                 agents={server.agents}
                 agentName={agentName}
                 onAgentChange={changeAgent}
+                onManage={manageAgents}
               />
             </header>
             <InterruptHandler agentName={agentName} publish={activity.publishInterrupt} />
@@ -202,8 +227,8 @@ export default function App() {
                 </button>
               </div>
             )}
-            <ComposerSkillsContext.Provider value={{ builtIn: builtInSkills, skills: skills.items, choices: skills.choices, error: skills.error, toggle: skills.toggle, canManage: server.skillStoreEnabled, onManage: () => setLibraryOpen(true) }}>
-            <ComposerMCPContext.Provider value={{ servers: mcp.items, choices: mcp.choices, error: mcp.error, toggle: mcp.toggle, canManage: server.mcpStoreEnabled, onManage: () => setMCPLibraryOpen(true) }}>
+            <ComposerSkillsContext.Provider value={{ builtIn: builtInSkills, optional: optionalSkills, skills: skills.items, choices: skills.choices, error: skills.error, toggle: skills.toggle, canManage: server.skillStoreEnabled, onManage: () => setLibraryOpen(true) }}>
+            <ComposerMCPContext.Provider value={{ servers: mcp.items, agentServers, choices: mcp.choices, error: mcp.error, toggle: mcp.toggle, canManage: server.mcpStoreEnabled, onManage: () => setMCPLibraryOpen(true) }}>
             <TrayContext.Provider value={activity.tray}>
               <HistoryPager key={`${agentName}:${active.threadId}`} agent={agent} initialCursor={active.nextCursor ?? ""}>
                 <CopilotChat

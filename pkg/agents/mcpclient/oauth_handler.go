@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -27,12 +28,15 @@ type completeAuthorization func(ctx context.Context, result *auth.AuthorizationR
 
 // pendingAuthorization binds an expiring authorization attempt to its subject and server.
 // complete saves under the client that issued the grant; cancel ends an attempt
-// that is abandoned, for flows that hold one open.
+// that is abandoned, for flows that hold one open. browser marks an attempt
+// started by a navigation, which set the cookie its GET callback checks; one
+// started for a script finishes only through the authenticated POST callback.
 type pendingAuthorization struct {
 	namespace, server string
 	expires           time.Time
 	complete          completeAuthorization
 	cancel            func()
+	browser           bool
 }
 
 // oauthHandler keeps only short-lived authorization attempts in memory; credentials use the store.
@@ -72,6 +76,10 @@ func (h *oauthHandler) resolve(w http.ResponseWriter, r *http.Request) (string, 
 }
 
 // connect starts an authorization attempt and redirects the browser to consent.
+// A request that accepts JSON, a script's rather than a navigation's, gets
+// {"authorizationUrl": ...} instead: an app whose API authenticates with
+// headers, which a navigation cannot send, opens that URL itself and finishes
+// through POST /{server}/callback.
 func (h *oauthHandler) connect(w http.ResponseWriter, r *http.Request) {
 	namespace, server, ok := h.resolve(w, r)
 	if !ok {
@@ -120,12 +128,30 @@ func (h *oauthHandler) connect(w http.ResponseWriter, r *http.Request) {
 			delete(h.pending, key)
 		}
 	}
-	h.pending[state] = pendingAuthorization{namespace: namespace, server: name, expires: now.Add(oauthStateLifetime), complete: complete, cancel: cancel}
+	browser := !acceptsJSON(r)
+	h.pending[state] = pendingAuthorization{namespace: namespace, server: name, expires: now.Add(oauthStateLifetime), complete: complete, cancel: cancel, browser: browser}
 	h.mu.Unlock()
 
+	if !browser {
+		// The authenticated POST callback binds the attempt to its user; no cookie is needed.
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{"authorizationUrl": authURL})
+		return
+	}
 	// A per-server HttpOnly cookie prevents another browser from completing this login attempt.
 	http.SetCookie(w, authorizationCookie(name, server.OAuth.RedirectURL, state))
 	http.Redirect(w, r, authURL, http.StatusFound)
+}
+
+// acceptsJSON tells a script's request from a navigation, which asks for HTML.
+func acceptsJSON(r *http.Request) bool {
+	for _, accepted := range strings.Split(r.Header.Get("Accept"), ",") {
+		mediaType, _, _ := strings.Cut(accepted, ";")
+		if strings.EqualFold(strings.TrimSpace(mediaType), "application/json") {
+			return true
+		}
+	}
+	return false
 }
 
 // startConfigured begins an authorization code flow with PKCE against the
@@ -343,14 +369,8 @@ func (h *oauthHandler) callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Consume matching state exactly once, without trusting a namespace or server from the callback query.
-	h.mu.Lock()
-	pending, exists := h.pending[state]
-	valid := exists && pending.namespace == namespace && pending.server == name && time.Now().Before(pending.expires)
-	if valid {
-		delete(h.pending, state)
-	}
-	h.mu.Unlock()
+	// Only an attempt a navigation started set this browser's cookie.
+	pending, valid := h.consume(namespace, name, state, true)
 	if !valid {
 		http.Error(w, "OAuth authorization expired or does not match this user", http.StatusBadRequest)
 		return
@@ -358,23 +378,81 @@ func (h *oauthHandler) callback(w http.ResponseWriter, r *http.Request) {
 	cookie = authorizationCookie(name, server.OAuth.RedirectURL, "")
 	cookie.MaxAge = -1
 	http.SetCookie(w, cookie)
-	if r.URL.Query().Get("error") != "" || r.URL.Query().Get("code") == "" {
-		if pending.cancel != nil {
-			pending.cancel()
-		}
-		http.Error(w, "OAuth authorization was not granted; start again to connect", http.StatusBadRequest)
-		return
-	}
-
-	result := &auth.AuthorizationResult{Code: r.URL.Query().Get("code"), State: state, Iss: r.URL.Query().Get("iss")}
-	if err := pending.complete(r.Context(), result); err != nil {
-		// Never propagate OAuth response bodies: providers may echo sensitive values in them.
-		slog.WarnContext(r.Context(), "MCP OAuth could not complete", slog.String("server", name), slog.Any("error", err))
-		http.Error(w, "OAuth token exchange failed; start again to connect", http.StatusBadGateway)
+	query := r.URL.Query()
+	if !h.finish(w, r, name, pending, query.Get("error"), &auth.AuthorizationResult{Code: query.Get("code"), State: state, Iss: query.Get("iss")}) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	_, _ = w.Write([]byte("MCP account connected. Return to the chat and send your request again."))
+}
+
+// authorizationResponse is what the authorization server sent the browser
+// back with, relayed by a page of the app's own.
+type authorizationResponse struct {
+	State string `json:"state"`
+	Code  string `json:"code,omitempty"`
+	Iss   string `json:"iss,omitempty"`
+	Error string `json:"error,omitempty"`
+}
+
+// complete finishes an attempt from the authorization server's response,
+// relayed by the app: POST /{server}/callback with {"state", "code", "iss"},
+// or {"state", "error"} when consent was refused. The request authenticates
+// like any other, and the attempt must be the same user's, which binds it to
+// its user without the browser cookie a navigation's callback needs.
+func (h *oauthHandler) complete(w http.ResponseWriter, r *http.Request) {
+	namespace, _, ok := h.resolve(w, r)
+	if !ok {
+		return
+	}
+	var response authorizationResponse
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&response); err != nil || response.State == "" {
+		http.Error(w, "Invalid OAuth state", http.StatusBadRequest)
+		return
+	}
+	name := r.PathValue("server")
+	pending, valid := h.consume(namespace, name, response.State, false)
+	if !valid {
+		http.Error(w, "OAuth authorization expired or does not match this user", http.StatusBadRequest)
+		return
+	}
+	if !h.finish(w, r, name, pending, response.Error, &auth.AuthorizationResult{Code: response.Code, State: response.State, Iss: response.Iss}) {
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// consume takes the matching attempt exactly once, without trusting a
+// namespace or server from the callback itself. A navigation's callback
+// passes browser, accepting only attempts that set its cookie.
+func (h *oauthHandler) consume(namespace, server, state string, browser bool) (pendingAuthorization, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	pending, exists := h.pending[state]
+	valid := exists && pending.namespace == namespace && pending.server == server && time.Now().Before(pending.expires) && (pending.browser || !browser)
+	if valid {
+		delete(h.pending, state)
+	}
+	return pending, valid
+}
+
+// finish exchanges a consumed attempt's code, answering the request itself
+// when it fails.
+func (h *oauthHandler) finish(w http.ResponseWriter, r *http.Request, name string, pending pendingAuthorization, refused string, result *auth.AuthorizationResult) bool {
+	if refused != "" || result.Code == "" {
+		if pending.cancel != nil {
+			pending.cancel()
+		}
+		http.Error(w, "OAuth authorization was not granted; start again to connect", http.StatusBadRequest)
+		return false
+	}
+	if err := pending.complete(r.Context(), result); err != nil {
+		// Never propagate OAuth response bodies: providers may echo sensitive values in them.
+		slog.WarnContext(r.Context(), "MCP OAuth could not complete", slog.String("server", name), slog.Any("error", err))
+		http.Error(w, "OAuth token exchange failed; start again to connect", http.StatusBadGateway)
+		return false
+	}
+	return true
 }
 
 // authorizationCookie confines OAuth state to the configured callback path and browser session.

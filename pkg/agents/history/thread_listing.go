@@ -15,7 +15,11 @@ const (
 
 // ThreadInfo summarizes a stored thread for listing UIs.
 type ThreadInfo struct {
-	GroupID        string    `json:"group_id,omitempty"`
+	GroupID string `json:"group_id,omitempty"`
+	// AgentName is the agent the thread belongs to: the one its first run
+	// entered at (see WithAgentName). For a thread saved before runs recorded
+	// it, it is the routine's agent, or the agent that wrote the first reply.
+	// Empty when none of those is known.
 	AgentName      string    `json:"agent_name,omitempty"`
 	ThreadID       string    `json:"thread_id"`
 	ConversationID string    `json:"conversation_id"`
@@ -73,9 +77,7 @@ func (p *InMemoryConversationPersistence) ListThreads(ctx context.Context, names
 				info.UpdatedAt = updatedAt
 			}
 			if info.AgentName == "" {
-				if rc, ok := m.Meta[RunContextMetaKey].(map[string]any); ok {
-					info.AgentName, _ = rc[RoutineAgentContextKey].(string)
-				}
+				info.AgentName = runAgent(m)
 			}
 			if info.Title == "" {
 				info.Title = titleFromBundles(m.Messages)
@@ -90,6 +92,37 @@ func (p *InMemoryConversationPersistence) ListThreads(ctx context.Context, names
 	})
 
 	return threads, nil
+}
+
+// runAgent names the agent a saved run entered at, or "" when it cannot tell.
+// Runs are read oldest first, so the first one that can tell names the thread's.
+func runAgent(m *inMemoryMessage) string {
+	if name, _ := m.Meta[AgentMetaKey].(string); name != "" {
+		return name
+	}
+	if rc, ok := m.Meta[RunContextMetaKey].(map[string]any); ok {
+		if name, _ := rc[RoutineAgentContextKey].(string); name != "" {
+			return name
+		}
+	}
+	// Saved before runs recorded their agent: a run opens with the message it
+	// was started with, and the loop saves what the model wrote after it,
+	// under the answering agent's name — in a thread's first run, its entry
+	// agent's. Senders, not message shapes, tell them apart: a reply read
+	// back from storage no longer has an output message's shape.
+	for _, bundle := range m.Messages {
+		if bundle.SenderID != "" && bundle.SenderID != m.Messages[0].SenderID {
+			return bundle.SenderID
+		}
+	}
+	// A run that failed before any reply still recorded the agent whose loop
+	// ran it. Without a reply nothing was handed off, so that is the entry agent.
+	if state, ok := m.Meta["run_state"].(map[string]any); ok {
+		if name, _ := state["last_agent_name"].(string); name != "" {
+			return name
+		}
+	}
+	return ""
 }
 
 // titleFromBundles extracts the first user-authored text from a

@@ -1,10 +1,12 @@
 package web
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/hastekit/agent-sdk-go/pkg/agents/mcpclient"
@@ -85,6 +87,49 @@ func TestMCPCredentialsThroughWebHandler(t *testing.T) {
 	_, err = store.Load(t.Context(), "bob", "gmail")
 	require.ErrorIs(t, err, mcpclient.ErrCredentialNotFound)
 	require.Equal(t, http.StatusBadRequest, request(callback, "alice", cookies[0]).Code)
+}
+
+// An app that authenticates with headers starts sign-in from a script and
+// relays the authorization server's response to the POST callback.
+func TestMCPCredentialsFromScriptThroughWebHandler(t *testing.T) {
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"private-access","refresh_token":"private-refresh","token_type":"Bearer","expires_in":3600}`))
+	}))
+	defer tokenServer.Close()
+	store, err := mcpclient.NewFileCredentialStore(t.TempDir())
+	require.NoError(t, err)
+	defer store.Close()
+	provider, err := mcpclient.NewOAuthCredentialProvider(mcpclient.OAuthCredentialProviderConfig{Store: store})
+	require.NoError(t, err)
+	authorization := &mcpclient.OAuthConfig{ClientID: "client", RedirectURL: "https://app.example/oauth-callback.html", AuthURL: "https://accounts.example/authorize", TokenURL: tokenServer.URL}
+	configs := mcpclient.NewInlineStore(mcpclient.ServerConfig{Name: "gmail", Endpoint: "https://mcp.example/gmail", Authorization: authorization})
+	handler := Handler(registry{}, agui.WithMCPStore(configs, mcpclient.WithOAuth(provider)), agui.WithNamespaceResolver(func(r *http.Request) (string, error) {
+		return r.Header.Get("Subject"), nil
+	}))
+
+	connect := httptest.NewRequest(http.MethodGet, APIPrefix+"/mcp/gmail/connect", nil)
+	connect.Header.Set("Subject", "alice")
+	connect.Header.Set("Accept", "application/json")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, connect)
+	require.Equal(t, http.StatusOK, response.Code)
+	var started struct {
+		AuthorizationURL string `json:"authorizationUrl"`
+	}
+	require.NoError(t, json.NewDecoder(response.Body).Decode(&started))
+	location, err := url.Parse(started.AuthorizationURL)
+	require.NoError(t, err)
+	require.Equal(t, authorization.RedirectURL, location.Query().Get("redirect_uri"))
+
+	relay := httptest.NewRequest(http.MethodPost, APIPrefix+"/mcp/gmail/callback", strings.NewReader(`{"state":"`+location.Query().Get("state")+`","code":"code"}`))
+	relay.Header.Set("Subject", "alice")
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, relay)
+	require.Equal(t, http.StatusNoContent, response.Code)
+	token, err := store.Load(t.Context(), "alice", mcpclient.OAuthCredentialKey(mcpclient.Connector{Name: "gmail", Endpoint: "https://mcp.example/gmail", Authorization: authorization}))
+	require.NoError(t, err)
+	require.Equal(t, "private-refresh", token.RefreshToken)
 }
 
 func TestMCPCredentialsDisabled(t *testing.T) {

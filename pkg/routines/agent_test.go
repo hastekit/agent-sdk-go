@@ -23,6 +23,8 @@ type registry struct{ agent *agents.Agent }
 
 func (r registry) Agent(name string) (*agents.Agent, bool) { return r.agent, name == r.agent.Name }
 func (r registry) AgentNames() []string                    { return []string{r.agent.Name} }
+
+func static(agent *agents.Agent) AgentRegistry { return StaticRegistry(registry{agent}) }
 func TestAgentExecutorDispatchesUserMessageAndTrustedContext(t *testing.T) {
 	var input *agents.AgentInput
 	agent := agents.NewAgent(&agents.AgentOptions{Name: "assistant", StreamBroker: streambroker.NewMemoryStreamBroker(), Runtime: runtimeFunc(func(_ context.Context, _ *agents.Agent, in *agents.AgentInput) (*agents.AgentOutput, error) {
@@ -30,7 +32,7 @@ func TestAgentExecutorDispatchesUserMessageAndTrustedContext(t *testing.T) {
 		return &agents.AgentOutput{Status: agentstate.RunStatusCompleted}, nil
 	})})
 	trusted := map[string]any{"credential": "trusted"}
-	ex := &AgentExecutor{Registry: registry{agent}, ContextResolver: func(_ context.Context, r Routine) (map[string]any, error) {
+	ex := &AgentExecutor{Registry: static(agent), ContextResolver: func(_ context.Context, r Routine) (map[string]any, error) {
 		if r.Namespace != "tenant" {
 			t.Fatal("wrong namespace")
 		}
@@ -54,7 +56,10 @@ func TestAgentExecutorDispatchesUserMessageAndTrustedContext(t *testing.T) {
 	if len(trusted) != 1 {
 		t.Fatal("mutated trusted context")
 	}
-	if !ex.HasAgent("assistant") || ex.HasAgent("missing") {
+	if ok, _ := ex.HasAgent(context.Background(), "default", "assistant"); !ok {
+		t.Fatal("assistant should be available")
+	}
+	if ok, _ := ex.HasAgent(context.Background(), "default", "missing"); ok {
 		t.Fatal("agent validation")
 	}
 	r.Agent = "missing"
@@ -66,7 +71,7 @@ func TestAgentExecutorPropagatesPause(t *testing.T) {
 	agent := agents.NewAgent(&agents.AgentOptions{Name: "assistant", StreamBroker: streambroker.NewMemoryStreamBroker(), Runtime: runtimeFunc(func(context.Context, *agents.Agent, *agents.AgentInput) (*agents.AgentOutput, error) {
 		return &agents.AgentOutput{Status: agentstate.RunStatusPaused}, nil
 	})})
-	ex := &AgentExecutor{Registry: registry{agent}}
+	ex := &AgentExecutor{Registry: static(agent)}
 	if err := ex.Execute(context.Background(), Routine{Definition: definition()}, Run{}); !errors.Is(err, ErrPaused) {
 		t.Fatal(err)
 	}
@@ -95,7 +100,7 @@ func TestRoutineExecutionPersistsGroup(t *testing.T) {
 	}
 	broker := streambroker.NewMemoryStreamBroker()
 	agent := agents.NewAgent(&agents.AgentOptions{Name: "assistant", History: history.NewConversationManager(store, history.WithMessageAttribution()), StreamBroker: broker, Runtime: local_runtime.NewLocalRuntime(broker), Middlewares: []agents.Middleware{agents.NoopMiddleware{}}}).WithLLM(groupTestLLM{})
-	executor := &AgentExecutor{Registry: registry{agent}}
+	executor := &AgentExecutor{Registry: static(agent)}
 	_, cursor, err := broker.ReadRunEvents(ctx, []string{"tenant"}, "", 0)
 	if err != nil {
 		t.Fatal(err)

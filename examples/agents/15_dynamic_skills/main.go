@@ -51,7 +51,7 @@ func main() {
 		if err := registry.Register(agent); err != nil {
 			log.Fatal(err)
 		}
-		log.Fatal(web.Serve(":8080", registry, agui.WithSkillStore(store)))
+		log.Fatal(web.Serve(":8080", agui.StaticRegistry(registry), agui.WithSkillStore(store)))
 	}
 
 	// A run can turn off the user's own skills; naming a global here has no effect.

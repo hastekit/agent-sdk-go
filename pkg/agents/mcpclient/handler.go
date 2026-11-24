@@ -54,7 +54,9 @@ type ConnectorInfo struct {
 }
 
 // NewHandler serves GET /, PUT /{server}, DELETE /{server}, and optional OAuth
-// GET /{server}/connect and GET /{server}/callback routes. Mount with http.StripPrefix.
+// GET /{server}/connect, GET /{server}/callback and POST /{server}/callback
+// routes; the POST finishes an attempt the app's own page relays (see
+// OAUTH.md). Mount with http.StripPrefix.
 // Writes go to store and are restricted to the authenticated namespace; globals
 // are developer-owned. WithReadOnlyStores adds stores that are listed but never
 // written. Without a namespace resolver requests fail closed. Pending OAuth state
@@ -75,6 +77,7 @@ func NewHandler(store MCPServerConfigStore, options ...HandlerOption) http.Handl
 		oauth := &oauthHandler{provider: settings.oauth, client: h.client, namespace: h.namespace, pending: make(map[string]pendingAuthorization)}
 		mux.HandleFunc("GET /{server}/connect", oauth.connect)
 		mux.HandleFunc("GET /{server}/callback", oauth.callback)
+		mux.HandleFunc("POST /{server}/callback", oauth.complete)
 	}
 	return mux
 }

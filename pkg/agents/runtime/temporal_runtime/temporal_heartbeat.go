@@ -12,6 +12,18 @@ import (
 
 const heartbeatActivitySuffix = "_StreamHeartbeatActivity"
 
+// HeartbeatActivitySuffix names the activity TemporalStreamBrokerProxy's
+// StartHeartbeat schedules: its prefix followed by this suffix. A worker that
+// registers a proxy's activities itself registers NewStreamHeartbeatActivity
+// under that name.
+const HeartbeatActivitySuffix = heartbeatActivitySuffix
+
+// NewStreamHeartbeatActivity is the activity that keeps a run's stream alive
+// for as long as the run goes on; see HeartbeatActivitySuffix.
+func NewStreamHeartbeatActivity(broker agents.StreamBroker) func(ctx context.Context, channel string) error {
+	return (&streamHeartbeatActivity{broker: broker}).Run
+}
+
 // startHeartbeatActivity schedules one activity and joins its cancellation before stream closure.
 func startHeartbeatActivity(workflowCtx workflow.Context, prefix string, broker agents.StreamBroker, channel string) func() {
 	// Disabled streaming has no heartbeat activity; every configured broker owns its lifecycle.

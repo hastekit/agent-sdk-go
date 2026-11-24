@@ -98,55 +98,11 @@ func (s *BackgroundTaskService) Await(ctx restate.Context, in *BackgroundTaskInp
 		return restate.Void{}, err
 	}
 
-	// One durable step for the wait. It is a long one by design — that is what
-	// makes the task a background task — and its outcome is journaled, so a
-	// restart after it finishes does not wait for it again.
-	outcome, err := restate.Run(ctx, func(runCtx restate.RunContext) (*awaitOutcome, error) {
-		// Keep the task stream alive only while its wait step is executing.
-		defer s.broker.StartHeartbeat(runCtx, in.Ref.TaskStreamID)()
-
-		progress := agents.NewStreamProgressReporter(s.broker, in.Ref.TaskStreamID, in.Ref.CallID, in.Ref.ToolName)
-		res, err := tool.AwaitTask(runCtx, in.Ref, progress)
-		if err != nil {
-			// The wait's failure is what the model is told about, not a step
-			// to retry — so it travels as its own field rather than as an
-			// error, and rather than masquerading as the task's result.
-			return &awaitOutcome{Fail: err.Error()}, nil
-		}
-		return &awaitOutcome{Result: res}, nil
-	}, restate.WithName(in.ToolKey+"_AwaitTask"))
-	if err != nil {
+	decision, err := AwaitBackgroundTask(ctx, s.broker, tool, in.Ref, in.ToolKey)
+	if err != nil || !decision.Start {
+		// Not starting: folded into a run that is already going, or onto the
+		// queue of one about to start. Either way somebody else reads it.
 		return restate.Void{}, err
-	}
-
-	var awaitErr error
-	if outcome.Fail != "" {
-		awaitErr = errors.New(outcome.Fail)
-	}
-
-	// Close first: a client watching the task sees it end when it ends, not
-	// when the agent has finished reacting to it.
-	if _, err := restate.Run(ctx, func(runCtx restate.RunContext) (restate.Void, error) {
-		return restate.Void{}, agents.CloseBackgroundTaskStream(runCtx, s.broker, in.Ref)
-	}, restate.WithName("CloseTaskStream")); err != nil {
-		return restate.Void{}, err
-	}
-
-	decision, err := restate.Run(ctx, func(runCtx restate.RunContext) (*DeliverTaskOutput, error) {
-		start, msg, err := agents.DeliverBackgroundResult(runCtx, s.broker, in.Ref, outcome.Result, awaitErr)
-		if err != nil {
-			return nil, err
-		}
-		return &DeliverTaskOutput{Start: start, Message: msg}, nil
-	}, restate.WithName("DeliverTask"))
-	if err != nil {
-		return restate.Void{}, err
-	}
-
-	if !decision.Start {
-		// Folded into a run that is already going, or onto the queue of one
-		// about to start. Either way somebody else reads it.
-		return restate.Void{}, nil
 	}
 
 	// The thread was idle, and this invocation now holds its claim. Start the
@@ -167,6 +123,59 @@ func (s *BackgroundTaskService) Await(ctx restate.Context, in *BackgroundTaskInp
 	})
 
 	return restate.Void{}, nil
+}
+
+// AwaitBackgroundTask waits for one task on tool, closes the task's stream,
+// and puts the outcome in front of the agent, each as a durable step of ctx.
+// A Start decision means the caller now holds the thread's claim and must
+// start a run with the decision's Message; how is the caller's. name labels
+// the wait's step.
+//
+// It is the part of a background invocation every service shares, whichever
+// way it found the tool: BackgroundTaskService by registered agent, a
+// config-built agent's service by catalog key.
+func AwaitBackgroundTask(ctx restate.Context, broker agents.StreamBroker, tool agents.BackgroundTool, ref agents.BackgroundTaskRef, name string) (*DeliverTaskOutput, error) {
+	// One durable step for the wait. It is a long one by design — that is what
+	// makes the task a background task — and its outcome is journaled, so a
+	// restart after it finishes does not wait for it again.
+	outcome, err := restate.Run(ctx, func(runCtx restate.RunContext) (*awaitOutcome, error) {
+		// Keep the task stream alive only while its wait step is executing.
+		defer broker.StartHeartbeat(runCtx, ref.TaskStreamID)()
+
+		progress := agents.NewStreamProgressReporter(broker, ref.TaskStreamID, ref.CallID, ref.ToolName)
+		res, err := tool.AwaitTask(runCtx, ref, progress)
+		if err != nil {
+			// The wait's failure is what the model is told about, not a step
+			// to retry — so it travels as its own field rather than as an
+			// error, and rather than masquerading as the task's result.
+			return &awaitOutcome{Fail: err.Error()}, nil
+		}
+		return &awaitOutcome{Result: res}, nil
+	}, restate.WithName(name+"_AwaitTask"))
+	if err != nil {
+		return nil, err
+	}
+
+	var awaitErr error
+	if outcome.Fail != "" {
+		awaitErr = errors.New(outcome.Fail)
+	}
+
+	// Close first: a client watching the task sees it end when it ends, not
+	// when the agent has finished reacting to it.
+	if _, err := restate.Run(ctx, func(runCtx restate.RunContext) (restate.Void, error) {
+		return restate.Void{}, agents.CloseBackgroundTaskStream(runCtx, broker, ref)
+	}, restate.WithName("CloseTaskStream")); err != nil {
+		return nil, err
+	}
+
+	return restate.Run(ctx, func(runCtx restate.RunContext) (*DeliverTaskOutput, error) {
+		start, msg, err := agents.DeliverBackgroundResult(runCtx, broker, ref, outcome.Result, awaitErr)
+		if err != nil {
+			return nil, err
+		}
+		return &DeliverTaskOutput{Start: start, Message: msg}, nil
+	}, restate.WithName("DeliverTask"))
 }
 
 // awaitOutcome is what the wait step journals: the task's result, or the

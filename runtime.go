@@ -10,7 +10,10 @@ import (
 	"time"
 
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
+	"github.com/hastekit/agent-sdk-go/pkg/agents/agentconfig"
+	"github.com/hastekit/agent-sdk-go/pkg/agents/runtime/restate_agent_builder"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/runtime/restate_runtime"
+	"github.com/hastekit/agent-sdk-go/pkg/agents/runtime/temporal_agent_builder"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/runtime/temporal_runtime"
 	restate "github.com/restatedev/sdk-go"
 	"github.com/restatedev/sdk-go/server"
@@ -72,10 +75,24 @@ func (r *TemporalRuntime) RegisterAgent(options *agents.AgentOptions) error {
 	return r.lifecycle.register(options)
 }
 
+// Bind runs a config-built agent's snapshot through the AgentBuilder workflow,
+// making TemporalRuntime an agentconfig.Runtime.
+func (r *TemporalRuntime) Bind(snapshot *agentconfig.Snapshot) agents.Runtime {
+	return temporal_agent_builder.NewRuntime(r.client, r.broker).Bind(snapshot)
+}
+
+// RegisterBuilder serves config-built agents from builder, through the one
+// AgentBuilder workflow, so agents written to its stores after Serve starts
+// run durably. Call it before Serve. The builder must stream on this runtime's
+// broker: build it with agentconfig.Dependencies.Runtime set to this runtime.
+func (r *TemporalRuntime) RegisterBuilder(builder *agentconfig.Builder) error {
+	return r.lifecycle.registerBuilder(builder, r.broker, temporal_agent_builder.WorkflowName)
+}
+
 // Serve runs the worker until ctx ends or startup fails. The caller owns the
 // runtime and must Close it after Serve and outstanding executions finish.
 func (r *TemporalRuntime) Serve(ctx context.Context) error {
-	ctx, configs, finish, err := r.lifecycle.begin(ctx)
+	ctx, configs, builder, finish, err := r.lifecycle.begin(ctx)
 	if err != nil {
 		return err
 	}
@@ -92,6 +109,9 @@ func (r *TemporalRuntime) Serve(ctx context.Context) error {
 		for name, fn := range proxy.GetWorkflows() {
 			w.RegisterWorkflowWithOptions(fn, workflow.RegisterOptions{Name: name})
 		}
+	}
+	if builder != nil {
+		temporal_agent_builder.New(builder, r.broker).Register(w)
 	}
 	if err := w.Start(); err != nil {
 		return err
@@ -117,6 +137,8 @@ type RestateRuntime struct {
 	*restate_runtime.RestateRuntime
 	lifecycle runtimeLifecycle
 	broker    agents.StreamBroker
+	// configs runs config-built agents through the AgentBuilder workflow.
+	configs *restate_agent_builder.Runtime
 }
 
 // NewRestateRuntime requires an explicit broker shared by callers and service
@@ -131,7 +153,14 @@ func NewRestateRuntime(restateEndpoint string, broker agents.StreamBroker) (*Res
 	return &RestateRuntime{
 		RestateRuntime: restate_runtime.NewRestateRuntime(restateEndpoint, broker),
 		broker:         broker,
+		configs:        restate_agent_builder.NewRuntime(restateEndpoint, broker),
 	}, nil
+}
+
+// Bind runs a config-built agent's snapshot through the AgentBuilder workflow,
+// making RestateRuntime an agentconfig.Runtime.
+func (r *RestateRuntime) Bind(snapshot *agentconfig.Snapshot) agents.Runtime {
+	return r.configs.Bind(snapshot)
 }
 
 // RegisterAgent registers an agent configuration before Serve starts.
@@ -139,10 +168,18 @@ func (r *RestateRuntime) RegisterAgent(options *agents.AgentOptions) error {
 	return r.lifecycle.register(options)
 }
 
+// RegisterBuilder serves config-built agents from builder, through the one
+// AgentBuilder workflow, so agents written to its stores after Serve starts
+// run durably. Call it before Serve. The builder must stream on this runtime's
+// broker: build it with agentconfig.Dependencies.Runtime set to this runtime.
+func (r *RestateRuntime) RegisterBuilder(builder *agentconfig.Builder) error {
+	return r.lifecycle.registerBuilder(builder, r.broker, "")
+}
+
 // Serve blocks serving Restate invocations at address until ctx ends. The
 // address is the local listen address, separate from the ingress endpoint.
 func (r *RestateRuntime) Serve(ctx context.Context, address string) error {
-	ctx, configs, finish, err := r.lifecycle.begin(ctx)
+	ctx, configs, builder, finish, err := r.lifecycle.begin(ctx)
 	if err != nil {
 		return err
 	}
@@ -152,7 +189,12 @@ func (r *RestateRuntime) Serve(ctx context.Context, address string) error {
 	}
 	wf := restate_runtime.NewRestateWorkflow(configs, r.broker)
 	background := restate_runtime.NewBackgroundTaskService(configs, r.broker)
-	handler, err := server.NewRestate().Bind(restate.Reflect(wf)).Bind(restate.Reflect(background)).Handler()
+	services := server.NewRestate().Bind(restate.Reflect(wf)).Bind(restate.Reflect(background))
+	if builder != nil {
+		services = services.Bind(restate.Reflect(restate_agent_builder.New(builder, r.broker))).
+			Bind(restate.Reflect(restate_agent_builder.NewBackground(builder, r.broker)))
+	}
+	handler, err := services.Handler()
 	if err != nil {
 		return err
 	}
@@ -189,9 +231,38 @@ func (r *RestateRuntime) Close() error { r.lifecycle.close(); return nil }
 type runtimeLifecycle struct {
 	mu      sync.Mutex
 	configs map[string]*agents.AgentOptions
-	cancel  context.CancelFunc
-	done    chan struct{}
-	closed  bool
+	builder *agentconfig.Builder
+	// reserved is the agent name a registered builder's workflow claims.
+	reserved string
+	cancel   context.CancelFunc
+	done     chan struct{}
+	closed   bool
+}
+
+// registerBuilder records the builder whose configs the worker serves.
+// reserved is an agent name the builder's workflow and activities claim, which
+// no registered agent may then use.
+func (r *runtimeLifecycle) registerBuilder(builder *agentconfig.Builder, broker agents.StreamBroker, reserved string) error {
+	if builder == nil {
+		return fmt.Errorf("agent builder is nil")
+	}
+	if builder.StreamBroker() != broker {
+		return fmt.Errorf("the agent builder must stream on the runtime's broker; set agentconfig.Dependencies.Runtime to this runtime")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed || r.cancel != nil {
+		return fmt.Errorf("runtime is serving or closed")
+	}
+	if r.builder != nil {
+		return fmt.Errorf("an agent builder is already registered")
+	}
+	if _, exists := r.configs[reserved]; reserved != "" && exists {
+		return fmt.Errorf("agent name %q is reserved for config-built agents", reserved)
+	}
+	r.builder = builder
+	r.reserved = reserved
+	return nil
 }
 
 // register stores the validated configuration resolved by NewAgent. Registration
@@ -208,6 +279,9 @@ func (r *runtimeLifecycle) register(options *agents.AgentOptions) error {
 	if _, exists := r.configs[options.Name]; exists {
 		return fmt.Errorf("%w: %s", ErrAgentAlreadyRegistered, options.Name)
 	}
+	if r.builder != nil && r.reserved != "" && options.Name == r.reserved {
+		return fmt.Errorf("agent name %q is reserved for config-built agents", options.Name)
+	}
 	if r.configs == nil {
 		r.configs = make(map[string]*agents.AgentOptions)
 	}
@@ -215,17 +289,17 @@ func (r *runtimeLifecycle) register(options *agents.AgentOptions) error {
 	return nil
 }
 
-func (r *runtimeLifecycle) begin(ctx context.Context) (context.Context, map[string]*agents.AgentOptions, func(), error) {
+func (r *runtimeLifecycle) begin(ctx context.Context) (context.Context, map[string]*agents.AgentOptions, *agentconfig.Builder, func(), error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if err := ctx.Err(); err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	if r.closed || r.cancel != nil {
-		return nil, nil, nil, fmt.Errorf("runtime is serving or closed")
+		return nil, nil, nil, nil, fmt.Errorf("runtime is serving or closed")
 	}
-	if len(r.configs) == 0 {
-		return nil, nil, nil, fmt.Errorf("runtime has no registered agents")
+	if len(r.configs) == 0 && r.builder == nil {
+		return nil, nil, nil, nil, fmt.Errorf("runtime has no registered agents")
 	}
 	ctx, r.cancel = context.WithCancel(ctx)
 	r.done = make(chan struct{})
@@ -240,7 +314,7 @@ func (r *runtimeLifecycle) begin(ctx context.Context) (context.Context, map[stri
 		r.cancel = nil
 		close(r.done)
 	}
-	return ctx, configs, finish, nil
+	return ctx, configs, r.builder, finish, nil
 }
 
 func (r *runtimeLifecycle) close() {
@@ -261,3 +335,8 @@ func (r *TemporalRuntime) StreamBroker() agents.StreamBroker { return r.broker }
 
 // StreamBroker returns the broker configured for this runtime.
 func (r *RestateRuntime) StreamBroker() agents.StreamBroker { return r.broker }
+
+var (
+	_ agentconfig.Runtime = (*TemporalRuntime)(nil)
+	_ agentconfig.Runtime = (*RestateRuntime)(nil)
+)

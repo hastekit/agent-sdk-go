@@ -788,3 +788,34 @@ body {
    servers register the app themselves. */
 .routine-form .mcp-oauth-app { display: grid; gap: 10px; padding-left: 12px; border-left: 1px solid var(--hk-line); }
 .routine-form .mcp-oauth-app > summary { cursor: pointer; color: var(--hk-muted); }
+
+/* Agent library: reuses the skill library and routine form styles. */
+.agent-library .badge { margin-left: 8px; padding: 1px 6px; border: 1px solid #4a6a8a; border-radius: 999px; font-size: 11px; font-weight: 500; color: #91c9ff; vertical-align: middle; }
+.agent-library .skill-summary p { margin: 6px 0 0; }
+.agent-library .skill-summary small { display: block; margin-top: 4px; color: #aaa; }
+.agent-library .link-button { padding: 0; border: 0; background: none; color: #91c9ff; text-decoration: underline; }
+.agent-library .link-button:hover:not(:disabled) { background: none; }
+.agent-library .primary { background: #2b4a6b; border-color: #3f6b99; }
+.agent-library .primary:hover:not(:disabled) { background: #355a82; }
+.choice-group { display: grid; gap: 8px; margin: 0; padding: 0; border: 0; min-width: 0; }
+.choice-group > legend { display: flex; align-items: center; gap: 8px; padding: 0; margin-bottom: 6px; font-size: 14px; }
+.choice-group > small { color: #aaa; font-size: 12px; }
+.choice-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 8px; }
+.choice { display: grid; gap: 6px; padding: 8px 10px; border: 1px solid #414141; border-radius: 6px; font-size: 13px; }
+.choice.picked { border-color: #3f6b99; background: #1d2733; }
+.choice.gone { border-style: dashed; }
+.routine-form label.choice-label { display: flex; align-items: flex-start; gap: 8px; cursor: pointer; }
+.routine-form .choice-label input { width: auto; margin-top: 2px; flex-shrink: 0; }
+.routine-form label.choice-label.inline { font-size: 13px; }
+.choice-label > span { display: grid; gap: 2px; min-width: 0; }
+.choice-label .nm { font-weight: 500; overflow-wrap: anywhere; }
+.choice-label small { color: #aaa; font-size: 12px; line-height: 1.4; }
+.choice-label small.tag { color: #8fb8e0; }
+.routine-form .choice-tools { font-size: 12px; padding: 6px 8px; }
+.agent-advanced { display: grid; gap: 12px; }
+.agent-advanced > summary { cursor: pointer; color: var(--hk-muted); font-size: 14px; }
+.agent-advanced[open] > summary { margin-bottom: 4px; }
+.agent-form-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.agent-opt.agent-manage { border-top: 1px solid var(--hk-line, #333); margin-top: 4px; padding-top: 10px; color: #91c9ff; }
+.routine-empty .primary-action { margin-top: 8px; padding: 10px 16px; border: 1px solid #3f6b99; border-radius: 8px; background: #2b4a6b; color: #eee; cursor: pointer; font: inherit; }
+.routine-empty .primary-action:hover { background: #355a82; }

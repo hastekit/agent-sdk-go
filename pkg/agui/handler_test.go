@@ -106,17 +106,17 @@ func toolCallResponse(callID, name, args string) *responses.Response {
 
 type registry map[string]*agents.Agent
 
-func (r registry) Agent(name string) (*agents.Agent, bool) {
+func (r registry) Agent(_ context.Context, _ string, name string) (*agents.Agent, bool, error) {
 	a, ok := r[name]
-	return a, ok
+	return a, ok, nil
 }
 
-func (r registry) AgentNames() []string {
+func (r registry) AgentNames(context.Context, string) ([]string, error) {
 	names := make([]string, 0, len(r))
 	for name := range r {
 		names = append(names, name)
 	}
-	return names
+	return names, nil
 }
 
 type sseFrame struct {
