@@ -75,8 +75,8 @@ export function SkillLibrary({builtIn, onClose, onSaved}: {builtIn: SkillInfo[];
     {error && <p role="alert" className="skill-library-error">{error}</p>}
     {notice && <p role="status" className="skill-library-notice">{notice}</p>}
     <section aria-label="Stored skills">
-      <h3>Skills <span className="skill-count">{builtIn.length + skills.length}{cursor ? "+" : ""}</span></h3>
-      {builtIn.map(skill => <article key={`built-in:${skill.name}`}>
+      <h3>Skills <span className="skill-count">{builtIn.filter(skill => !skills.some(own => own.name === skill.name)).length + skills.length}{cursor ? "+" : ""}</span></h3>
+      {builtIn.filter(skill => !skills.some(own => own.name === skill.name)).map(skill => <article key={`built-in:${skill.name}`}>
         <div className="skill-summary"><strong>{skill.name}</strong><p>{skill.description}</p><small>Built in · always on</small></div>
       </article>)}
       {!skills.length && <p className="skill-empty">{busy ? "Loading skills…" : "Your library is empty. Upload a skill to get started."}</p>}

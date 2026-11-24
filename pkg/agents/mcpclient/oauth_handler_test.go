@@ -1,7 +1,9 @@
 package mcpclient
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -32,7 +34,7 @@ func TestOAuthHandlerAuthorization(t *testing.T) {
 	}))
 	defer tokenServer.Close()
 	provider, store := oauthTestProvider(t, tokenServer.URL)
-	handler := NewHandler(oauthTestStore(tokenServer.URL), WithOAuth(provider), WithNamespaceResolver(func(r *http.Request) (string, error) { return r.Header.Get("Subject"), nil }))
+	handler := NewHandler(nil, WithBuiltInStore(oauthTestStore(tokenServer.URL)), WithOAuth(provider), WithNamespaceResolver(func(r *http.Request) (string, error) { return r.Header.Get("Subject"), nil }))
 
 	// Starting consent sets a browser-bound cookie and never puts the namespace or secrets in state.
 	request := httptest.NewRequest(http.MethodGet, "/gmail/connect", nil)
@@ -88,6 +90,84 @@ func TestOAuthHandlerAuthorization(t *testing.T) {
 	_, err = store.Load(t.Context(), "grace", oauthTestKey("gmail", tokenServer.URL))
 	require.ErrorIs(t, err, ErrCredentialNotFound)
 	require.Equal(t, http.StatusBadRequest, callback("ada", "gmail", state, cookies[0]).Code)
+	require.EqualValues(t, 1, exchanges.Load())
+}
+
+// An app whose API authenticates with headers starts consent from a script and
+// relays the authorization server's response: the attempt finishes only for
+// the user who started it, and never through the cookie-checked GET callback.
+func TestOAuthHandlerAuthorizationForScripts(t *testing.T) {
+	var exchanges atomic.Int32
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		assert.Equal(t, "authorization-code", r.Form.Get("code"))
+		assert.NotEmpty(t, r.Form.Get("code_verifier"))
+		exchanges.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"access","refresh_token":"refresh","token_type":"Bearer","expires_in":3600}`))
+	}))
+	defer tokenServer.Close()
+	provider, store := oauthTestProvider(t, tokenServer.URL)
+	handler := NewHandler(nil, WithBuiltInStore(oauthTestStore(tokenServer.URL)), WithOAuth(provider), WithNamespaceResolver(func(r *http.Request) (string, error) { return r.Header.Get("Subject"), nil }))
+
+	start := func(server string) string {
+		t.Helper()
+		request := httptest.NewRequest(http.MethodGet, "/"+server+"/connect", nil)
+		request.Header.Set("Subject", "ada")
+		request.Header.Set("Accept", "application/json")
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		require.Equal(t, http.StatusOK, response.Code)
+		require.Empty(t, response.Result().Cookies(), "a script's attempt sets no browser cookie")
+		var body struct {
+			AuthorizationURL string `json:"authorizationUrl"`
+		}
+		require.NoError(t, json.NewDecoder(response.Body).Decode(&body))
+		location, err := url.Parse(body.AuthorizationURL)
+		require.NoError(t, err)
+		require.Equal(t, "S256", location.Query().Get("code_challenge_method"))
+		require.Equal(t, oauthTestConfig("").RedirectURL, location.Query().Get("redirect_uri"))
+		return location.Query().Get("state")
+	}
+	relay := func(subject, server string, body map[string]string) int {
+		t.Helper()
+		encoded, err := json.Marshal(body)
+		require.NoError(t, err)
+		request := httptest.NewRequest(http.MethodPost, "/"+server+"/callback", bytes.NewReader(encoded))
+		request.Header.Set("Subject", subject)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		return response.Code
+	}
+	state := start("gmail")
+
+	// The GET callback accepts only attempts that set its cookie, even a forged one.
+	navigation := httptest.NewRequest(http.MethodGet, "/gmail/callback?code=authorization-code&state="+url.QueryEscape(state), nil)
+	navigation.Header.Set("Subject", "ada")
+	navigation.AddCookie(authorizationCookie("gmail", oauthTestConfig("").RedirectURL, state))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, navigation)
+	require.Equal(t, http.StatusBadRequest, response.Code)
+
+	// Another user, server, or state cannot finish it.
+	code := map[string]string{"state": state, "code": "authorization-code"}
+	require.Equal(t, http.StatusBadRequest, relay("grace", "gmail", code))
+	require.Equal(t, http.StatusBadRequest, relay("ada", "calendar", code))
+	require.Equal(t, http.StatusBadRequest, relay("ada", "gmail", map[string]string{"state": "wrong-state", "code": "authorization-code"}))
+	require.Zero(t, exchanges.Load())
+
+	// The user who started it does, once.
+	require.Equal(t, http.StatusNoContent, relay("ada", "gmail", code))
+	token, err := store.Load(t.Context(), "ada", oauthTestKey("gmail", tokenServer.URL))
+	require.NoError(t, err)
+	require.Equal(t, "refresh", token.RefreshToken)
+	require.Equal(t, http.StatusBadRequest, relay("ada", "gmail", code))
+	require.EqualValues(t, 1, exchanges.Load())
+
+	// Refused consent ends the attempt without an exchange.
+	refused := start("calendar")
+	require.Equal(t, http.StatusBadRequest, relay("ada", "calendar", map[string]string{"state": refused, "error": "access_denied"}))
+	require.Equal(t, http.StatusBadRequest, relay("ada", "calendar", map[string]string{"state": refused, "code": "authorization-code"}))
 	require.EqualValues(t, 1, exchanges.Load())
 }
 

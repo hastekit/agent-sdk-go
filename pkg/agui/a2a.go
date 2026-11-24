@@ -32,19 +32,27 @@ func WithA2AAuthorizer(authorizer agents.A2AAuthorizer) Option {
 	return func(o *options) { o.a2aAuthorizer = authorizer }
 }
 
+// a2aKey names an adapter by agent name, not pointer: a config-built agent is
+// rebuilt whenever its config changes, and keying by pointer would keep every
+// version's adapter forever.
 type a2aKey struct {
-	agent     *agents.Agent
+	agent     string
 	namespace string
 }
+
+type a2aAdapter struct {
+	agent   *agents.Agent
+	adapter *agents.A2A
+}
 type a2aRoutes struct {
-	registry Registry
+	registry agents.Registry
 	options  options
 	mu       sync.Mutex
-	adapters map[a2aKey]*agents.A2A
+	adapters map[a2aKey]a2aAdapter
 }
 
-func (o options) mountA2A(mux *http.ServeMux, registry Registry) {
-	routes := &a2aRoutes{registry: registry, options: o, adapters: map[a2aKey]*agents.A2A{}}
+func (o options) mountA2A(mux *http.ServeMux, registry agents.Registry) {
+	routes := &a2aRoutes{registry: registry, options: o, adapters: map[a2aKey]a2aAdapter{}}
 	directory := o.withNamespace(http.HandlerFunc(routes.directory))
 	mux.Handle("GET /a2a", directory)
 	mux.Handle("GET /a2a/{$}", directory)
@@ -73,7 +81,12 @@ func (h *a2aRoutes) directory(w http.ResponseWriter, r *http.Request) {
 		AgentCardURL string `json:"agentCardUrl"`
 	}
 	entries := []entry{}
-	for _, name := range h.registry.AgentNames() {
+	names, err := h.registry.AgentNames(r.Context(), requestNamespace(r))
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "unable to list agents")
+		return
+	}
+	for _, name := range names {
 		endpoint := h.endpoint(r, name)
 		entries = append(entries, entry{Name: name, URL: endpoint, AgentCardURL: endpoint + a2asrv.WellKnownAgentCardPath})
 	}
@@ -81,9 +94,8 @@ func (h *a2aRoutes) directory(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"agents": entries})
 }
 func (h *a2aRoutes) card(w http.ResponseWriter, r *http.Request) {
-	agent, ok := h.registry.Agent(r.PathValue("agent"))
+	agent, ok := lookupAgent(w, r, h.registry)
 	if !ok {
-		writeJSONError(w, http.StatusNotFound, "agent not found")
 		return
 	}
 	card := h.agentCard(r, agent)
@@ -99,21 +111,21 @@ func (h *a2aRoutes) agentCard(r *http.Request, agent *agents.Agent) *a2a.AgentCa
 	}
 }
 func (h *a2aRoutes) invoke(w http.ResponseWriter, r *http.Request) {
-	agent, ok := h.registry.Agent(r.PathValue("agent"))
+	agent, ok := lookupAgent(w, r, h.registry)
 	if !ok {
-		writeJSONError(w, http.StatusNotFound, "agent not found")
 		return
 	}
-	key := a2aKey{agent, requestNamespace(r)}
+	key := a2aKey{agent.Name, requestNamespace(r)}
 	h.mu.Lock()
-	adapter := h.adapters[key]
-	if adapter == nil {
+	cached := h.adapters[key]
+	adapter := cached.adapter
+	if adapter == nil || cached.agent != agent {
 		opts := []agents.A2AOption{agents.WithA2ANamespace(key.namespace), agents.WithA2AAuthorizer(h.options.a2aAuthorizer)}
 		if h.options.a2aHandlerOptions != nil {
 			opts = append(opts, agents.WithA2AHandlerOptions(h.options.a2aHandlerOptions(agent.Name, key.namespace)...))
 		}
 		adapter = agent.A2A(h.agentCard(r, agent), opts...)
-		h.adapters[key] = adapter
+		h.adapters[key] = a2aAdapter{agent: agent, adapter: adapter}
 	}
 	h.mu.Unlock()
 	r.Body = http.MaxBytesReader(w, r.Body, 4<<20)

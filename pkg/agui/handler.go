@@ -13,6 +13,7 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
 	"github.com/google/uuid"
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
+	"github.com/hastekit/agent-sdk-go/pkg/agents/agentconfig"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/attachments"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/history"
 	"github.com/hastekit/agent-sdk-go/pkg/agents/mcpclient"
@@ -23,24 +24,19 @@ import (
 	"github.com/hastekit/agent-sdk-go/pkg/routines"
 )
 
-// Registry is the minimal view of an SDK client the AG-UI handler
-// needs. *hastekit.SDK satisfies it.
-type Registry interface {
-	Agent(name string) (*agents.Agent, bool)
-	AgentNames() []string
-}
-
 type options struct {
 	routineService     *routines.Service
 	routineScheduler   routines.Scheduler
 	a2aBaseURL         string
 	a2aHandlerOptions  func(agentName, namespace string) []a2asrv.RequestHandlerOption
 	a2aAuthorizer      agents.A2AAuthorizer
-	skillStore         skills.Store
+	skillStore         skills.MutableStore
 	attachmentStore    attachments.UploadStore
 	attachmentMaxBytes int64
-	mcpStore           mcpclient.MCPServerConfigStore
+	mcpStore           mcpclient.MutableStore
 	mcpOptions         []mcpclient.HandlerOption
+	agentConfigs       bool
+	agentConfigOptions []agentconfig.HandlerOption
 	namespaceResolver  NamespaceResolver
 	senderID           string
 	fullHistory        bool
@@ -68,7 +64,9 @@ func WithRoutines(service *routines.Service, schedulers ...routines.Scheduler) O
 // per agent in code, are always on, and never appear here; uploads cannot reuse
 // a registered agent's global skill name. Protect management routes with
 // application authorization middleware.
-func WithSkillStore(store skills.Store) Option { return func(o *options) { o.skillStore = store } }
+func WithSkillStore(store skills.MutableStore) Option {
+	return func(o *options) { o.skillStore = store }
+}
 
 // WithAttachmentStore enables upload/download endpoints and owned file references.
 // Give the same store to the agent's middleware.NewAttachmentMiddleware, which resolves
@@ -78,12 +76,38 @@ func WithAttachmentStore(store attachments.UploadStore) Option {
 	return func(o *options) { o.attachmentStore = store }
 }
 
-// WithMCPStore mounts connector management and OAuth routes under /mcp.
-// Pass the same config store and optional OAuth provider used by the agent client.
+// WithMCPStore mounts connector management and OAuth routes under /mcp (see
+// mcpclient.NewHandler), as WithSkillStore does for skills. Pass the agents'
+// mcpclient.Client's user store, which users write to, and its built-in store
+// and OAuth provider through mcpclient.WithBuiltInStore and mcpclient.WithOAuth.
 // The handler always uses AG-UI's authenticated namespace resolver.
-func WithMCPStore(store mcpclient.MCPServerConfigStore, handlerOptions ...mcpclient.HandlerOption) Option {
+func WithMCPStore(store mcpclient.MutableStore, handlerOptions ...mcpclient.HandlerOption) Option {
 	return func(o *options) { o.mcpStore = store; o.mcpOptions = handlerOptions }
 }
+
+// mcpRoutes reports whether WithMCPStore gave the /mcp routes anything to
+// serve: a store, or options such as a built-in store to connect with OAuth.
+func (o options) mcpRoutes() bool { return o.mcpStore != nil || len(o.mcpOptions) > 0 }
+
+// WithAgentConfigs mounts /agent-configs, where each namespace manages the
+// agents it creates at run time (see agentconfig.NewHandler), in the store of
+// the registry given to NewHandler — so what users write is what it runs:
+//
+//	registry, err := agentconfig.NewRegistry(builder, builtIns, userStore, codeAgents)
+//	agui.NewHandler(registry, agui.WithAgentConfigs())
+//
+// The registry must be an *agentconfig.Registry with a store; NewHandler
+// panics otherwise. Its Validate checks each config first — refusing names a
+// code or built-in agent holds and anything the Builder cannot run — unless
+// the options supply a validator of their own, and its Choices serves
+// /agent-choices for the embedded UI's agent editor. The routes always use
+// AG-UI's namespace resolver, and never write built-ins. Protect management
+// routes with application authorization middleware.
+func WithAgentConfigs(handlerOptions ...agentconfig.HandlerOption) Option {
+	return func(o *options) { o.agentConfigs = true; o.agentConfigOptions = handlerOptions }
+}
+
+const agentConfigRegistryPanic = "agui: WithAgentConfigs needs an *agentconfig.Registry with a store"
 
 // WithAttachmentUploadLimit bounds each HTTP upload (default 20 MiB).
 func WithAttachmentUploadLimit(n int64) Option {
@@ -140,22 +164,24 @@ func buildOptions(opts []Option) options {
 	return o
 }
 
-// NewHandler exposes every agent registered on the client over the
-// AG-UI protocol:
+// NewHandler exposes every agent the registry finds for the request's
+// namespace over the AG-UI protocol:
 //
 //	GET  /a2a                                     → A2A agent directory (trailing slash optional)
 //	GET  /a2a/{agent}/.well-known/agent-card.json  → A2A discovery card
 //	POST /a2a/{agent}                            → A2A 1.0 JSON-RPC (including SSE)
 //	GET  /agents                                  → {"agents": ["name", ...]}
 //	POST /agents/{agent}/run                      → run the agent; SSE stream of AG-UI events
-//	GET  /agents/{agent}/skills                   → the agent's built-in skills, always on
-//	GET  /agents/{agent}/threads                  → stored conversation threads, newest first
+//	GET  /agents/{agent}/skills                   → the agent's skills: always on, and the user's it may use
+//	GET  /agents/{agent}/mcp                      → {"servers": [{"name", "always_on"}]}: the agent's own MCP servers
+//	GET  /agents/{agent}/threads                  → the agent's own stored threads, newest first
 //	GET  /agents/{agent}/threads/{thread}/messages → thread history as AG-UI messages
 //	GET  /skills                                  → the caller's own skills (WithSkillStore)
+//	GET  /agent-configs                           → the caller's own agent configs (WithAgentConfigs)
 //
 // The caller's own skills are not scoped to an agent: /skills manages them,
 // and every agent using the store can read them. An agent's built-in skills
-// are configured in code, so /agents/{agent}/skills lists them per agent. Runs turn them off with
+// are configured by the server, so /agents/{agent}/skills lists them per agent. Runs turn them off with
 // forwardedProps.skills.disable; an agent's global skills are always on.
 //
 // The run endpoint accepts the canonical AG-UI RunAgentInput body and
@@ -163,7 +189,7 @@ func buildOptions(opts []Option) options {
 // (CopilotKit's HttpAgent, raw @ag-ui/client, the embedded UI in
 // pkg/agui/web) can point at it directly:
 //
-//	http.ListenAndServe(":8080", agui.NewHandler(client))
+//	http.ListenAndServe(":8080", agui.NewHandler(agents.StaticRegistry(registry)))
 //
 // The stop endpoint (POST /agents/{agent}/stop) ends a run already
 // streaming, identified by its thread id in the resolved namespace — a separate request, since the
@@ -175,7 +201,7 @@ func buildOptions(opts []Option) options {
 // the agent's persistence adapter to implement history.ThreadLister
 // (the SDK's in-memory and file adapters do); when it doesn't, the
 // listing endpoint answers 501 so clients can hide the picker.
-func NewHandler(registry Registry, opts ...Option) http.Handler {
+func NewHandler(registry agents.Registry, opts ...Option) http.Handler {
 	o := buildOptions(opts)
 	mux := http.NewServeMux()
 	o.mountA2A(mux, registry)
@@ -198,6 +224,23 @@ func NewHandler(registry Registry, opts ...Option) http.Handler {
 		))
 		mux.Handle("/skills", h)
 		mux.Handle("/skills/", h)
+	}
+	if o.agentConfigs {
+		configs, ok := registry.(*agentconfig.Registry)
+		if !ok || configs.Store() == nil {
+			panic(agentConfigRegistryPanic)
+		}
+		handlerOptions := []agentconfig.HandlerOption{
+			agentconfig.WithValidator(configs.Validate),
+			agentconfig.WithChoices(configs.Choices),
+		}
+		handlerOptions = append(handlerOptions, o.agentConfigOptions...)
+		// Last, so no option can replace the authenticated namespace.
+		handlerOptions = append(handlerOptions, agentconfig.WithNamespaceResolver(func(r *http.Request) (string, error) { return requestNamespace(r), nil }))
+		h := o.withNamespace(agentconfig.NewHandler(configs.Store(), handlerOptions...))
+		mux.Handle("/agent-configs", h)
+		mux.Handle("/agent-configs/", h)
+		mux.Handle("/agent-choices", h)
 	}
 	if o.attachmentStore != nil {
 		// Uploads and downloads live under this handler's namespace, the same
@@ -223,14 +266,23 @@ func NewHandler(registry Registry, opts ...Option) http.Handler {
 			seen := map[string]bool{}
 			supported := false
 			// Try the current agent first for legacy rows without agent attribution.
-			names := append([]string{routine.Agent}, registry.AgentNames()...)
+			known, err := registry.AgentNames(r.Context(), requestNamespace(r))
+			if err != nil {
+				writeJSONError(w, 500, "unable to list agents")
+				return
+			}
+			names := append([]string{routine.Agent}, known...)
 			visited := map[string]bool{}
 			for _, name := range names {
 				if visited[name] {
 					continue
 				}
 				visited[name] = true
-				agent, ok := registry.Agent(name)
+				agent, ok, err := registry.Agent(r.Context(), requestNamespace(r), name)
+				if err != nil {
+					writeJSONError(w, 500, "unable to load agent")
+					return
+				}
 				if !ok {
 					continue
 				}
@@ -277,6 +329,14 @@ func NewHandler(registry Registry, opts ...Option) http.Handler {
 	}
 
 	handleFunc("GET /agents", func(w http.ResponseWriter, r *http.Request) {
+		names, err := registry.AgentNames(r.Context(), requestNamespace(r))
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "unable to list agents")
+			return
+		}
+		if names == nil {
+			names = []string{}
+		}
 		w.Header().Set("Content-Type", "application/json")
 		// full_history tells a client whether this server needs the whole
 		// conversation on every run. It normally does not — the agent loads
@@ -285,79 +345,102 @@ func NewHandler(registry Registry, opts ...Option) http.Handler {
 		// grows. Under WithFullHistory there is no stored thread to load
 		// from, and the client's list is the only history there is.
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"agents":       registry.AgentNames(),
-			"full_history": o.fullHistory,
-			"attachments":  o.attachmentStore != nil,
-			"skill_store":  o.skillStore != nil,
-			"mcp_store":    o.mcpStore != nil,
-			"routines":     o.routineService != nil,
+			"agents":        names,
+			"full_history":  o.fullHistory,
+			"attachments":   o.attachmentStore != nil,
+			"skill_store":   o.skillStore != nil,
+			"mcp_store":     o.mcpRoutes(),
+			"agent_configs": o.agentConfigs,
+			"routines":      o.routineService != nil,
 		})
 	})
 
 	handleFunc("POST /agents/{agent}/run", func(w http.ResponseWriter, r *http.Request) {
-		agent, ok := registry.Agent(r.PathValue("agent"))
+		agent, ok := lookupAgent(w, r, registry)
 		if !ok {
-			writeJSONError(w, http.StatusNotFound, "agent not found")
 			return
 		}
 		serveRun(w, r, agent, o)
 	})
 
 	handleFunc("POST /agents/{agent}/stop", func(w http.ResponseWriter, r *http.Request) {
-		agent, ok := registry.Agent(r.PathValue("agent"))
+		agent, ok := lookupAgent(w, r, registry)
 		if !ok {
-			writeJSONError(w, http.StatusNotFound, "agent not found")
 			return
 		}
 		serveStop(w, r, agent)
 	})
 
 	handleFunc("GET /agents/{agent}/threads/{thread}/stream", func(w http.ResponseWriter, r *http.Request) {
-		agent, ok := registry.Agent(r.PathValue("agent"))
+		agent, ok := lookupAgent(w, r, registry)
 		if !ok {
-			writeJSONError(w, http.StatusNotFound, "agent not found")
 			return
 		}
 		serveStream(w, r, agent, r.PathValue("thread"), o)
 	})
 
 	handleFunc("GET /agents/{agent}/runs", func(w http.ResponseWriter, r *http.Request) {
-		agent, ok := registry.Agent(r.PathValue("agent"))
+		agent, ok := lookupAgent(w, r, registry)
 		if !ok {
-			writeJSONError(w, http.StatusNotFound, "agent not found")
 			return
 		}
 		serveRunFeed(w, r, agent, o)
 	})
 
 	handleFunc("GET /agents/{agent}/threads", func(w http.ResponseWriter, r *http.Request) {
-		agent, ok := registry.Agent(r.PathValue("agent"))
+		agent, ok := lookupAgent(w, r, registry)
 		if !ok {
-			writeJSONError(w, http.StatusNotFound, "agent not found")
 			return
 		}
 		serveThreads(w, r, agent, o)
 	})
 
+	// The agent's own skills: "skills" are always on — a code agent's globals,
+	// or a config's picks — and "optional" the user's own the agent can use,
+	// on unless a run turns them off. An agent without a skill client has none.
 	handleFunc("GET /agents/{agent}/skills", func(w http.ResponseWriter, r *http.Request) {
-		agent, ok := registry.Agent(r.PathValue("agent"))
+		agent, ok := lookupAgent(w, r, registry)
 		if !ok {
-			writeJSONError(w, http.StatusNotFound, "agent not found")
 			return
 		}
-		skills, err := builtInSkills(r, agent)
+		always, optional, err := agentSkills(r, agent)
 		if err != nil {
 			writeJSONError(w, http.StatusInternalServerError, "unable to list skills")
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"skills": skills})
+		_ = json.NewEncoder(w).Encode(map[string]any{"skills": always, "optional": optional})
+	})
+
+	// The agent's own MCP servers, listed without connecting: each with
+	// whether a run can turn it off. A global, or a config's pick, is always
+	// on; the user's own are on unless a run turns them off. An agent with no
+	// MCP client has none; one whose client cannot list its servers answers
+	// null, and a client falls back to every server GET /mcp lists.
+	handleFunc("GET /agents/{agent}/mcp", func(w http.ResponseWriter, r *http.Request) {
+		agent, ok := lookupAgent(w, r, registry)
+		if !ok {
+			return
+		}
+		var servers []mcpclient.ListedServer
+		switch client := agent.MCPClient().(type) {
+		case nil:
+			servers = []mcpclient.ListedServer{}
+		case mcpclient.ServerLister:
+			listed, err := client.ListServers(r.Context(), requestNamespace(r), map[string]any{"Header": collectHeaders(r.Header)})
+			if err != nil {
+				writeJSONError(w, http.StatusInternalServerError, "unable to list the agent's connectors")
+				return
+			}
+			servers = append([]mcpclient.ListedServer{}, listed...)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"servers": servers})
 	})
 
 	handleFunc("GET /agents/{agent}/threads/{thread}/messages", func(w http.ResponseWriter, r *http.Request) {
-		agent, ok := registry.Agent(r.PathValue("agent"))
+		agent, ok := lookupAgent(w, r, registry)
 		if !ok {
-			writeJSONError(w, http.StatusNotFound, "agent not found")
 			return
 		}
 		serveThreadMessages(w, r, agent, r.PathValue("thread"), o)
@@ -366,19 +449,30 @@ func NewHandler(registry Registry, opts ...Option) http.Handler {
 	return mux
 }
 
-// serveThreads lists the agent's stored threads in the handler's
-// namespace, newest first. Answers 501 when the agent's persistence
-// adapter can't enumerate threads.
+// serveThreads lists the agent's own threads in the handler's namespace,
+// newest first: those whose ThreadInfo.AgentName is the agent, since agents
+// often share one store. A thread whose agent the adapter cannot tell is
+// listed for every agent, as an adapter that never tells is. A group other
+// than the default, such as a routine's, is a scope of its own, listed whole
+// whichever agent ran each of its threads. Answers 501 when the agent's
+// persistence adapter can't enumerate threads.
 func serveThreads(w http.ResponseWriter, r *http.Request, agent *agents.Agent, o options) {
 	lister := threadLister(agent)
 	if lister == nil {
 		writeJSONError(w, http.StatusNotImplemented, "the agent's persistence adapter does not support thread listing")
 		return
 	}
-	threads, err := lister.ListThreads(r.Context(), requestNamespace(r), history.NormalizeGroupID(r.URL.Query().Get("group_id")))
+	group := history.NormalizeGroupID(r.URL.Query().Get("group_id"))
+	listed, err := lister.ListThreads(r.Context(), requestNamespace(r), group)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "unable to list threads: "+err.Error())
 		return
+	}
+	threads := make([]history.ThreadInfo, 0, len(listed))
+	for _, thread := range listed {
+		if group != history.DefaultGroupID || thread.AgentName == "" || thread.AgentName == agent.Name {
+			threads = append(threads, thread)
+		}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"threads": threads})
@@ -844,7 +938,7 @@ func collectHeaders(headers http.Header) map[string]string {
 	return out
 }
 
-// BuiltInSkill is one of an agent's developer-owned skills: configured in code,
+// BuiltInSkill is one of an agent's developer-owned skills: configured by the server,
 // always on, and never managed through /skills.
 type BuiltInSkill struct {
 	Name        string `json:"name"`
@@ -852,9 +946,33 @@ type BuiltInSkill struct {
 }
 
 // builtInSkills lists an agent's developer-owned skills. An empty namespace asks
-// its skill client for globals only.
+// its skill client for globals only, so a user's own skill never counts — not
+// even one a config picks, which the agent has always on (see agentSkills).
 func builtInSkills(r *http.Request, agent *agents.Agent) ([]BuiltInSkill, error) {
-	catalog, err := agent.ListSkills(r.Context(), "", map[string]any{"Header": collectHeaders(r.Header)}, agents.SkillSelection{})
+	return agentGlobalSkills(r.Context(), agent, map[string]any{"Header": collectHeaders(r.Header)})
+}
+
+// agentSkills splits the skills the agent has in the request's namespace into
+// those always on and the user's own a run may turn off.
+func agentSkills(r *http.Request, agent *agents.Agent) (always, optional []BuiltInSkill, err error) {
+	catalog, err := agent.ListSkills(r.Context(), requestNamespace(r), map[string]any{"Header": collectHeaders(r.Header)}, agents.SkillSelection{})
+	if err != nil {
+		return nil, nil, err
+	}
+	always, optional = []BuiltInSkill{}, []BuiltInSkill{}
+	for _, skill := range catalog {
+		listed := BuiltInSkill{Name: skill.Name, Description: skill.Description}
+		if skill.Global {
+			always = append(always, listed)
+		} else {
+			optional = append(optional, listed)
+		}
+	}
+	return always, optional, nil
+}
+
+func agentGlobalSkills(ctx context.Context, agent *agents.Agent, runContext map[string]any) ([]BuiltInSkill, error) {
+	catalog, err := agent.ListSkills(ctx, "", runContext, agents.SkillSelection{})
 	if err != nil {
 		return nil, err
 	}
@@ -867,12 +985,23 @@ func builtInSkills(r *http.Request, agent *agents.Agent) ([]BuiltInSkill, error)
 	return skills, nil
 }
 
-// globalSkillNames lists every registered agent's developer-owned skills, which
-// user uploads may not reuse.
-func globalSkillNames(r *http.Request, registry Registry) ([]string, error) {
+// globalSkillNames lists the developer-owned skills user uploads may not
+// reuse. A GlobalSkillLister answers from its stores, building no agent; any
+// other registry is asked for each agent the namespace can run.
+func globalSkillNames(r *http.Request, registry agents.Registry) ([]string, error) {
+	if lister, ok := registry.(GlobalSkillLister); ok {
+		return lister.GlobalSkillNames(r.Context())
+	}
+	known, err := registry.AgentNames(r.Context(), requestNamespace(r))
+	if err != nil {
+		return nil, err
+	}
 	var names []string
-	for _, name := range registry.AgentNames() {
-		agent, ok := registry.Agent(name)
+	for _, name := range known {
+		agent, ok, err := registry.Agent(r.Context(), requestNamespace(r), name)
+		if err != nil {
+			return nil, err
+		}
 		if !ok {
 			continue
 		}

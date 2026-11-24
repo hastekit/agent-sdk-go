@@ -5,109 +5,90 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"sort"
 
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
 )
 
-// Client is one agent's skill catalog: the developer's global skills from its
-// Sources plus the skills each namespace saved in the shared Store. It mirrors
+// Client is one agent's skill catalog, read from two stores. It mirrors
 // mcpclient.Client.
 //
-// Globals are always enabled and shadow a user skill with the same name, so a
-// user can never replace or turn off a developer's skill. Namespace skills are
-// enabled unless a run disables them. Share one Store across agents and give
-// each its own globals:
+// The built-in store holds the developer's skills. They are global: listed for
+// every namespace, always on, and shadowing a user's skill with the same name,
+// so a user can never replace a developer's skill. The user store, given with
+// WithUserStore, holds each namespace's own skills, which a run may turn off
+// (agents.SkillSelection). Stores do not know which role they play: the client
+// reads the built-in store under the empty namespace and the user store under
+// the run's, so any store can fill either, and one store can fill both:
 //
-//	base := skills.NewClient(userStore)
-//	reviewer := base.WithGlobalSkills(reviewSkills)
-//	writer := base.WithGlobalSkills(writingSkills, styleGuide)
+//	builtIns, err := skills.NewDirStore("./skills")    // developer-owned globals
+//	uploads, err := skills.NewFileStore("./data/skills") // users' uploads, shared by every agent
+//	client := skills.NewClient(builtIns, skills.WithUserStore(uploads))
+//	custom := skills.NewClient(skills.Filter(builtIns, picks), skills.WithUserStore(skills.Filter(uploads, picks)))
 type Client struct {
-	store   Store
-	globals []Source
+	builtIn Store
+	user    Store
 }
 
-// NewClient reads users' own skills from store by namespace. A nil store serves
-// globals only. Add developer-owned skills with WithGlobalSkills.
-func NewClient(store Store) *Client {
-	return &Client{store: store}
+// ClientOption configures NewClient.
+type ClientOption func(*Client)
+
+// WithUserStore reads each namespace's own skills from store.
+func WithUserStore(store Store) ClientOption {
+	return func(c *Client) { c.user = store }
 }
 
-// WithGlobalSkills returns a copy with additional developer-owned sources. Copies
-// share the user store, so every agent sees the same user skills, while each
-// agent's globals stay its own. A skill name must be unique across all globals.
-func (c *Client) WithGlobalSkills(sources ...Source) *Client {
-	return &Client{store: c.store, globals: append(slices.Clone(c.globals), sources...)}
-}
-
-// globalCatalog lists every global source and records which one owns each name.
-func (c *Client) globalCatalog(ctx context.Context) ([]agents.Skill, map[string]Source, error) {
-	var skills []agents.Skill
-	owners := map[string]Source{}
-	for _, source := range c.globals {
-		if source == nil {
-			return nil, nil, errors.New("skill source must not be nil")
-		}
-		listed, err := source.List(ctx)
-		if err != nil {
-			return nil, nil, fmt.Errorf("list global skills: %w", err)
-		}
-		for _, skill := range listed {
-			// Two developer sources claiming one name is a configuration error, not a precedence rule.
-			if _, exists := owners[skill.Name]; exists {
-				return nil, nil, fmt.Errorf("duplicate global skill %q", skill.Name)
-			}
-			owners[skill.Name] = source
-			skill.Global = true
-			skill.Resources = slices.Clone(skill.Resources)
-			skills = append(skills, skill)
+// NewClient reads its stores at listing and read time, so skills added at run
+// time appear on the next run. builtIn may be nil, for a client of users'
+// skills only.
+func NewClient(builtIn Store, options ...ClientOption) *Client {
+	client := &Client{builtIn: builtIn}
+	for _, option := range options {
+		if option != nil {
+			option(client)
 		}
 	}
-	sort.Slice(skills, func(i, j int) bool { return skills[i].Name < skills[j].Name })
-	return skills, owners, nil
+	return client
 }
 
-// ListSkills returns globals first, then the namespace's own skills that no
-// global shadows, each group ordered by name. An empty namespace lists globals only.
+// ListSkills returns the built-in skills first, then the namespace's own that
+// no built-in shadows, each group ordered by name. An empty namespace lists
+// built-ins only.
 func (c *Client) ListSkills(ctx context.Context, namespace string, _ map[string]any) ([]agents.Skill, error) {
-	skills, owners, err := c.globalCatalog(ctx)
+	globals, err := listStore(ctx, c.builtIn, "")
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("list built-in skills: %w", err)
 	}
-	if namespace == "" || c.store == nil {
+	skills := make([]agents.Skill, 0, len(globals))
+	shadowed := map[string]bool{}
+	for _, m := range globals {
+		shadowed[m.Name] = true
+		skills = append(skills, agents.Skill{Global: true, Name: m.Name, Description: m.Description, FileLocation: m.FileLocation, Resources: slices.Clone(m.Resources)})
+	}
+	if namespace == "" {
 		return skills, nil
 	}
 
 	// A shadowed user skill stays in storage but never reaches the agent.
-	listed, err := listStore(ctx, c.store, namespace)
+	users, err := listStore(ctx, c.user, namespace)
 	if err != nil {
 		return nil, fmt.Errorf("list user skills: %w", err)
 	}
-	var users []agents.Skill
-	for _, m := range listed {
-		if _, global := owners[m.Name]; global {
-			continue
+	for _, m := range users {
+		if !shadowed[m.Name] {
+			skills = append(skills, agents.Skill{Name: m.Name, Description: m.Description, FileLocation: m.FileLocation, Resources: slices.Clone(m.Resources)})
 		}
-		users = append(users, agents.Skill{Name: m.Name, Description: m.Description, Resources: slices.Clone(m.Resources)})
 	}
-	sort.Slice(users, func(i, j int) bool { return users[i].Name < users[j].Name })
-	return append(skills, users...), nil
+	return skills, nil
 }
 
-// ReadSkill resolves by the listing's precedence: a global wins in its entirety,
-// and the namespace's own skill is read only when no global has the name.
+// ReadSkill resolves by the listing's precedence: a built-in wins in its
+// entirety, and the namespace's own skill is read only when no built-in has
+// the name.
 func (c *Client) ReadSkill(ctx context.Context, namespace string, _ map[string]any, name, file string) (string, error) {
-	_, owners, err := c.globalCatalog(ctx)
-	if err != nil {
-		return "", err
+	bundle, err := getStore(ctx, c.builtIn, "", name)
+	if errors.Is(err, ErrNotFound) && namespace != "" {
+		bundle, err = getStore(ctx, c.user, namespace, name)
 	}
-	if source, ok := owners[name]; ok {
-		return source.Read(ctx, name, file)
-	}
-	if namespace == "" || c.store == nil {
-		return "", ErrNotFound
-	}
-	bundle, err := c.store.Get(ctx, namespace, name)
 	if err != nil {
 		return "", err
 	}
@@ -115,3 +96,54 @@ func (c *Client) ReadSkill(ctx context.Context, namespace string, _ map[string]a
 }
 
 var _ agents.SkillClient = (*Client)(nil)
+
+func getStore(ctx context.Context, store Store, namespace, name string) (Bundle, error) {
+	if store == nil {
+		return Bundle{}, ErrNotFound
+	}
+	return store.Get(ctx, namespace, name)
+}
+
+// listStore reads every page of one namespace, rejecting cursors that repeat.
+// A nil store lists nothing.
+func listStore(ctx context.Context, store Store, namespace string) ([]Metadata, error) {
+	if store == nil {
+		return nil, ctx.Err()
+	}
+	var result []Metadata
+	cursor := ""
+	seen := map[string]bool{}
+	for {
+		page, err := store.List(ctx, namespace, ListOptions{Limit: 200, Cursor: cursor})
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, page.Skills...)
+		if page.NextCursor == "" {
+			return result, nil
+		}
+		if seen[page.NextCursor] {
+			return nil, fmt.Errorf("skill store repeated pagination cursor")
+		}
+		seen[page.NextCursor] = true
+		cursor = page.NextCursor
+	}
+}
+
+// readBundle returns instructions without frontmatter for an empty file, and
+// any other bundled file, including an explicit SKILL.md, as stored.
+func readBundle(bundle Bundle, file string) (string, error) {
+	instructions := file == ""
+	if instructions {
+		file = agents.SkillFileName
+	}
+	data, ok := bundle.Files[file]
+	if !ok {
+		return "", ErrNotFound
+	}
+	if instructions {
+		_, body, err := parseSkillFrontmatter(data)
+		return body, err
+	}
+	return string(data), nil
+}

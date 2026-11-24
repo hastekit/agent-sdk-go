@@ -7,10 +7,13 @@ export function AgentMenu({
   agents,
   agentName,
   onAgentChange,
+  onManage,
 }: {
   agents: string[];
   agentName: string;
   onAgentChange: (name: string) => void;
+  // Opens the agent library, where the user creates agents of their own.
+  onManage?: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const wrap = useRef<HTMLDivElement | null>(null);
@@ -31,7 +34,8 @@ export function AgentMenu({
     };
   }, [open]);
 
-  const single = agents.length < 2;
+  // One agent and nothing to manage reads as a heading, not a control.
+  const single = agents.length < 2 && !onManage;
 
   return (
     <div className="agent-menu" ref={wrap}>
@@ -62,6 +66,18 @@ export function AgentMenu({
               {n === agentName && <CheckIcon />}
             </button>
           ))}
+          {onManage && (
+            <button
+              role="menuitem"
+              className="agent-opt agent-manage"
+              onClick={() => {
+                setOpen(false);
+                onManage();
+              }}
+            >
+              <span className="nm">New or edit agents…</span>
+            </button>
+          )}
         </div>
       )}
     </div>

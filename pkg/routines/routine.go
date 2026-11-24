@@ -86,8 +86,10 @@ type Store interface {
 	Delete(context.Context, string, string, uint64) error
 }
 
+// Executor runs routines. HasAgent reports whether namespace can target the
+// named agent; Execute runs one occurrence in the routine's namespace.
 type Executor interface {
-	HasAgent(string) bool
+	HasAgent(ctx context.Context, namespace, name string) (bool, error)
 	Execute(context.Context, Routine, Run) error
 }
 
@@ -106,8 +108,15 @@ func namespace(ns string) string {
 	}
 	return ns
 }
-func (s *Service) validate(d Definition, now time.Time) (time.Time, error) {
-	if strings.TrimSpace(d.Name) == "" || strings.TrimSpace(d.Instruction) == "" || !s.executor.HasAgent(d.Agent) {
+func (s *Service) validate(ctx context.Context, ns string, d Definition, now time.Time) (time.Time, error) {
+	if strings.TrimSpace(d.Name) == "" || strings.TrimSpace(d.Instruction) == "" {
+		return time.Time{}, fmt.Errorf("%w: name, instruction and an available agent are required", ErrInvalid)
+	}
+	available, err := s.executor.HasAgent(ctx, namespace(ns), d.Agent)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if !available {
 		return time.Time{}, fmt.Errorf("%w: name, instruction and an available agent are required", ErrInvalid)
 	}
 	next, err := d.Schedule.next(now)
@@ -118,7 +127,7 @@ func (s *Service) validate(d Definition, now time.Time) (time.Time, error) {
 }
 func (s *Service) Create(ctx context.Context, ns string, d Definition) (Routine, error) {
 	now := time.Now().UTC()
-	_, err := s.validate(d, now)
+	_, err := s.validate(ctx, ns, d, now)
 	if err != nil {
 		return Routine{}, err
 	}
@@ -136,7 +145,7 @@ func (s *Service) Update(ctx context.Context, ns, id string, d Definition) (Rout
 		return r, err
 	}
 	now := time.Now().UTC()
-	_, err = s.validate(d, now)
+	_, err = s.validate(ctx, ns, d, now)
 	if err != nil {
 		return r, err
 	}
@@ -150,7 +159,7 @@ func (s *Service) SetEnabled(ctx context.Context, ns, id string, enabled bool) (
 		return r, err
 	}
 	if enabled {
-		_, err := s.validate(r.Definition, time.Now())
+		_, err := s.validate(ctx, ns, r.Definition, time.Now())
 		if err != nil {
 			return r, err
 		}

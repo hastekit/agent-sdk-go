@@ -69,7 +69,7 @@ func TestRuntimeRegistrationAndLifecycle(t *testing.T) {
 	require.ErrorIs(t, err, ErrAgentAlreadyRegistered)
 	_, err = NewAgent(cfg, WithRuntime(right))
 	require.NoError(t, err)
-	ctx, _, finish, err := left.lifecycle.begin(context.Background())
+	ctx, _, _, finish, err := left.lifecycle.begin(context.Background())
 	require.NoError(t, err)
 	_, err = NewAgent(&AgentConfig{Name: "late", LLM: model}, WithRuntime(left))
 	require.Error(t, err)

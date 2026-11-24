@@ -8,7 +8,7 @@ import (
 
 // mountMCPCredentials shares the chat namespace with connector management and OAuth routes.
 func (o options) mountMCPCredentials(mux *http.ServeMux) {
-	if o.mcpStore == nil {
+	if !o.mcpRoutes() {
 		return
 	}
 
@@ -24,6 +24,7 @@ func (o options) mountMCPCredentials(mux *http.ServeMux) {
 	mux.Handle("DELETE /mcp/{server}", handler)
 	mux.Handle("GET /mcp/{server}/connect", handler)
 	mux.Handle("GET /mcp/{server}/callback", handler)
+	mux.Handle("POST /mcp/{server}/callback", handler)
 }
 
 // withTrailingSlash serves a collection root requested without its trailing

@@ -46,9 +46,9 @@ func main() {
 		log.Fatal(err)
 	}
 
-	mcpClient := mcpclient.NewClient(mcpclient.NewMemoryStore().WithMCPServerConfig([]mcpclient.ServerConfig{{Name: "sample",
+	mcpClient := mcpclient.NewClient(mcpclient.NewInlineStore(mcpclient.ServerConfig{Name: "sample",
 		Endpoint:  "http://127.0.0.1:8000/mcp",
-		Transport: "streamable-http"}}))
+		Transport: "streamable-http"}))
 
 	defer rt.Close()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)

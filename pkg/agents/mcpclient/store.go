@@ -5,34 +5,52 @@ import (
 	"errors"
 )
 
-// MutableMCPServerConfigStore adds persistence for user-owned connector settings.
-// Custom database stores can implement this interface to enable the HTTP write routes.
-type MutableMCPServerConfigStore interface {
-	MCPServerConfigStore
+// Store lists one namespace's server definitions in one consistent snapshot.
+// It is everything a Client needs, so built-in servers, filters and custom
+// backends implement only this. It mirrors skills.Store.
+//
+// A store does not know whether its servers are global or a user's: that is
+// the Client's to say, by which of its two stores it reads (see NewClient). A
+// namespace is an opaque key, the empty one included, under which the Client
+// reads built-in servers. A database adapter selects the records whose
+// namespace matches; a store with no notion of namespaces, such as
+// InlineStore, serves the same definitions for every one.
+type Store interface {
+	ListServerConfigs(ctx context.Context, namespace string, runContext map[string]any) ([]ServerConfig, error)
+}
+
+// MutableStore is a Store that also saves definitions, as skills.MutableStore
+// is for skills. Custom database stores can implement it to enable the HTTP
+// write routes.
+type MutableStore interface {
+	Store
 	Put(ctx context.Context, namespace string, config ServerConfig) error
 	Delete(ctx context.Context, namespace, name string) error
 }
 
-// Store decorates a source with immutable inline definitions.
-// Copies share the backing persistence, but never share mutable inline configurations.
-type Store struct {
-	source MCPServerConfigStore
-	inline []ServerConfig
-	err    error
+// validatedStore validates every write before it reaches its source, so a
+// definition passes the same checks whatever persistence backs it.
+type validatedStore struct {
+	source Store
 }
 
-// NewStore adapts a custom source, such as a database-backed config store.
-func NewStore(source MCPServerConfigStore) *Store {
-	return &Store{source: source}
+// NewStore adapts a custom source, such as a database-backed config store,
+// validating every write before it reaches it. A source that is not a
+// MutableStore is read-only: writes return ErrReadOnlyConfig. For server
+// definitions written in code, use NewInlineStore.
+func NewStore(source Store) MutableStore {
+	return &validatedStore{source: source}
 }
 
 // NewMemoryStore creates process-local configuration persistence.
-func NewMemoryStore() *Store {
+func NewMemoryStore() MutableStore {
 	return NewStore(newMemoryConfigStore())
 }
 
-// NewFileStore loads a JSON array of global and namespace-owned server configs.
-func NewFileStore(path string) (*Store, error) {
+// NewFileStore keeps a JSON array of server configs, each under its
+// namespace. Records with no namespace are what a Client reads as built-ins
+// when the store is its built-in store.
+func NewFileStore(path string) (MutableStore, error) {
 	source, err := newFileConfigStore(path)
 	if err != nil {
 		return nil, err
@@ -40,62 +58,17 @@ func NewFileStore(path string) (*Store, error) {
 	return NewStore(source), nil
 }
 
-// WithMCPServerConfig returns a copy with additional inline configurations.
-// Inline definitions override the same scope/name in the source and cannot be edited through HTTP.
-// Invalid inline values are reported on listing, just like invalid database records.
-func (s *Store) WithMCPServerConfig(configs []ServerConfig) *Store {
-	// Clone both existing and added definitions so caller mutations cannot change this view.
-	result := &Store{source: s.source, err: s.err}
-	for _, group := range [][]ServerConfig{s.inline, configs} {
-		for _, config := range group {
-			copy, err := cloneServerConfig(config)
-			if err == nil {
-				err = validateServerConfig(copy)
-			}
-			if err != nil {
-				result.err = err
-				return result
-			}
-			result.inline = append(result.inline, copy)
-		}
-	}
-	return result
-}
-
-// ListServerConfigs merges a fresh source snapshot with this view's inline definitions.
-func (s *Store) ListServerConfigs(ctx context.Context, namespace string, runContext map[string]any) ([]ServerConfig, error) {
-	// Fail before exposing a partial catalog when inline configuration is invalid.
+// ListServerConfigs returns a fresh snapshot of the source, ordered by scope and name.
+func (s *validatedStore) ListServerConfigs(ctx context.Context, namespace string, runContext map[string]any) ([]ServerConfig, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if s.err != nil {
-		return nil, s.err
+	if s.source == nil {
+		return nil, nil
 	}
-	var configs []ServerConfig
-	if s.source != nil {
-		var err error
-		configs, err = s.source.ListServerConfigs(ctx, namespace, runContext)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	// Preserve duplicate source records for catalog validation; only explicit overlays replace them.
-	for _, inline := range s.inline {
-		if inline.Namespace != "" && inline.Namespace != namespace {
-			continue
-		}
-		filtered := make([]ServerConfig, 0, len(configs)+1)
-		for _, config := range configs {
-			if config.Namespace != inline.Namespace || config.Name != inline.Name {
-				filtered = append(filtered, config)
-			}
-		}
-		copy, err := cloneServerConfig(inline)
-		if err != nil {
-			return nil, err
-		}
-		configs = append(filtered, copy)
+	configs, err := s.source.ListServerConfigs(ctx, namespace, runContext)
+	if err != nil {
+		return nil, err
 	}
 	sortServerConfigs(configs)
 	return configs, nil
@@ -103,14 +76,9 @@ func (s *Store) ListServerConfigs(ctx context.Context, namespace string, runCont
 
 var ErrReadOnlyConfig = errors.New("MCP configuration is read-only")
 
-// writable rejects inline edits and sources that do not implement persistence.
-func (s *Store) writable(namespace, name string) (MutableMCPServerConfigStore, error) {
-	for _, config := range s.inline {
-		if config.Namespace == namespace && config.Name == name {
-			return nil, ErrReadOnlyConfig
-		}
-	}
-	source, ok := s.source.(MutableMCPServerConfigStore)
+// writable rejects sources that do not implement persistence.
+func (s *validatedStore) writable() (MutableStore, error) {
+	source, ok := s.source.(MutableStore)
 	if !ok {
 		return nil, ErrReadOnlyConfig
 	}
@@ -118,23 +86,23 @@ func (s *Store) writable(namespace, name string) (MutableMCPServerConfigStore, e
 }
 
 // Put persists a definition in the caller-authorized namespace.
-func (s *Store) Put(ctx context.Context, namespace string, config ServerConfig) error {
+func (s *validatedStore) Put(ctx context.Context, namespace string, config ServerConfig) error {
 	// Enforce the same boundary when the backing store is supplied by the application.
 	config.Namespace = namespace
 	if err := validateServerConfig(config); err != nil {
 		return err
 	}
 
-	source, err := s.writable(namespace, config.Name)
+	source, err := s.writable()
 	if err != nil {
 		return err
 	}
 	return source.Put(ctx, namespace, config)
 }
 
-// Delete removes a persisted definition without changing inline configurations.
-func (s *Store) Delete(ctx context.Context, namespace, name string) error {
-	source, err := s.writable(namespace, name)
+// Delete removes a persisted definition.
+func (s *validatedStore) Delete(ctx context.Context, namespace, name string) error {
+	source, err := s.writable()
 	if err != nil {
 		return err
 	}

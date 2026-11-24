@@ -33,17 +33,17 @@ func TestSkillSelectionInput(t *testing.T) {
 // skillAgents is a registry of named agents for HTTP tests.
 type skillAgents map[string]*agents.Agent
 
-func (s skillAgents) AgentNames() []string {
+func (s skillAgents) AgentNames(context.Context, string) ([]string, error) {
 	var names []string
 	for name := range s {
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	return names
+	return names, nil
 }
-func (s skillAgents) Agent(name string) (*agents.Agent, bool) {
+func (s skillAgents) Agent(_ context.Context, _ string, name string) (*agents.Agent, bool, error) {
 	agent, ok := s[name]
-	return agent, ok
+	return agent, ok, nil
 }
 
 func skillBundle(name, description string) skills.Bundle {
@@ -53,15 +53,16 @@ func skillBundle(name, description string) skills.Bundle {
 func TestSkillsAreNotScopedToAgents(t *testing.T) {
 	store, err := skills.NewFileStore(t.TempDir())
 	require.NoError(t, err)
-	agent := agents.NewAgent(&agents.AgentOptions{Name: "helper", SkillClient: skills.NewClient(store)})
+	agent := agents.NewAgent(&agents.AgentOptions{Name: "helper", SkillClient: skills.NewClient(nil, skills.WithUserStore(store))})
 	handler := NewHandler(skillAgents{"helper": agent}, WithSkillStore(store), WithNamespaceResolver(func(*http.Request) (string, error) { return "tenant", nil }))
 
-	// Users manage one library for every agent; the per-agent route lists only
-	// the agent's built-in skills, of which this one has none.
+	// Users manage one library for every agent; the per-agent route lists the
+	// agent's skills: built-in ones, of which this one has none, and the user's
+	// own it reads, none yet.
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/agents/helper/skills", nil))
 	require.Equal(t, http.StatusOK, recorder.Code)
-	require.JSONEq(t, `{"skills":[]}`, recorder.Body.String())
+	require.JSONEq(t, `{"skills":[],"optional":[]}`, recorder.Body.String())
 	recorder = httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/skills", nil))
 	require.Equal(t, http.StatusOK, recorder.Code)
@@ -71,7 +72,7 @@ func TestSkillsAreNotScopedToAgents(t *testing.T) {
 func TestSkillStoreManagementUsesResolvedNamespace(t *testing.T) {
 	store, err := skills.NewFileStore(t.TempDir())
 	require.NoError(t, err)
-	agent := agents.NewAgent(&agents.AgentOptions{Name: "helper", SkillClient: skills.NewClient(store)})
+	agent := agents.NewAgent(&agents.AgentOptions{Name: "helper", SkillClient: skills.NewClient(nil, skills.WithUserStore(store))})
 	handler := NewHandler(skillAgents{"helper": agent}, WithSkillStore(store), WithNamespaceResolver(func(r *http.Request) (string, error) { return r.Header.Get("Tenant"), nil }))
 	data, err := json.Marshal(skillBundle("review", "Review work"))
 	require.NoError(t, err)
@@ -108,14 +109,13 @@ func TestSkillStoreManagementUsesResolvedNamespace(t *testing.T) {
 func TestUploadsCannotReuseAnyAgentsGlobalSkillName(t *testing.T) {
 	store, err := skills.NewFileStore(t.TempDir())
 	require.NoError(t, err)
-	base := skills.NewClient(store)
-	reviewGlobals, err := skills.NewBundleSource(skillBundle("review", "Developer review"))
+	reviewGlobals, err := skills.NewInlineStore(skillBundle("review", "Developer review"))
 	require.NoError(t, err)
-	styleGlobals, err := skills.NewBundleSource(skillBundle("style", "Developer style"))
+	styleGlobals, err := skills.NewInlineStore(skillBundle("style", "Developer style"))
 	require.NoError(t, err)
 	registry := skillAgents{
-		"reviewer": agents.NewAgent(&agents.AgentOptions{Name: "reviewer", SkillClient: base.WithGlobalSkills(reviewGlobals)}),
-		"writer":   agents.NewAgent(&agents.AgentOptions{Name: "writer", SkillClient: base.WithGlobalSkills(styleGlobals)}),
+		"reviewer": agents.NewAgent(&agents.AgentOptions{Name: "reviewer", SkillClient: skills.NewClient(reviewGlobals, skills.WithUserStore(store))}),
+		"writer":   agents.NewAgent(&agents.AgentOptions{Name: "writer", SkillClient: skills.NewClient(styleGlobals, skills.WithUserStore(store))}),
 	}
 	handler := NewHandler(registry, WithSkillStore(store), WithNamespaceResolver(func(*http.Request) (string, error) { return "tenant", nil }))
 	upload := func(method, path, name string) int {
@@ -151,13 +151,20 @@ func TestUploadsCannotReuseAnyAgentsGlobalSkillName(t *testing.T) {
 	require.Equal(t, http.StatusOK, recorder.Code)
 	require.Contains(t, recorder.Body.String(), "mine")
 
-	// Each agent lists its own built-in skills, and not the user's.
+	// Each agent lists its own built-in skills, always on, and the user's it
+	// reads, which a run may turn off.
 	for name, global := range map[string]string{"reviewer": "review", "writer": "style"} {
 		recorder := httptest.NewRecorder()
 		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/agents/"+name+"/skills", nil))
 		require.Equal(t, http.StatusOK, recorder.Code)
-		require.JSONEq(t, `{"skills":[{"name":"`+global+`","description":"Developer `+global+`"}]}`, recorder.Body.String())
+		require.JSONEq(t, `{"skills":[{"name":"`+global+`","description":"Developer `+global+`"}],"optional":[{"name":"mine","description":"Tenant copy"}]}`, recorder.Body.String())
 	}
+	// An agent that reads no skills has none of the user's either.
+	registry["plain"] = agents.NewAgent(&agents.AgentOptions{Name: "plain"})
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/agents/plain/skills", nil))
+	require.Equal(t, http.StatusOK, recorder.Code)
+	require.JSONEq(t, `{"skills":[],"optional":[]}`, recorder.Body.String())
 	recorder = httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/agents/nobody/skills", nil))
 	require.Equal(t, http.StatusNotFound, recorder.Code)

@@ -51,7 +51,7 @@ func TestChatAttachmentHTTPToProviderAndHistory(t *testing.T) {
 	// handler's namespace; nothing has to be stamped by hand.
 	registry := NewRegistry()
 	require.NoError(t, registry.Register(registeredAgent))
-	server := httptest.NewServer(web.Handler(registry, agui.WithAttachmentStore(store)))
+	server := httptest.NewServer(web.Handler(agents.StaticRegistry(registry), agui.WithAttachmentStore(store)))
 	defer server.Close()
 	png, err := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a6xkAAAAASUVORK5CYII=")
 	require.NoError(t, err)

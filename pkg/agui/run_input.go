@@ -369,6 +369,7 @@ func (in *RunAgentInput) SkillSelection() (agents.SkillSelection, error) {
 }
 
 // MCPSelection reads per-run server and tool selection from forwardedProps.mcp.
+// It can only disable or narrow the caller's own servers; global servers ignore it.
 func (in *RunAgentInput) MCPSelection() (agents.MCPSelection, error) {
 	var selection agents.MCPSelection
 	props, ok := in.ForwardedProps.(map[string]any)

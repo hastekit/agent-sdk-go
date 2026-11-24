@@ -148,3 +148,31 @@ func TestHTTPRejectsOversizedAndDuplicateUploads(t *testing.T) {
 		require.ErrorIs(t, err, ErrNotFound)
 	}
 }
+
+// The empty namespace holds every agent's global skills, so no request may
+// resolve to it, or to a blank stand-in for it.
+func TestHTTPNeverWritesGlobalSkills(t *testing.T) {
+	store, err := NewFileStore(t.TempDir())
+	require.NoError(t, err)
+	_, err = store.Put(t.Context(), "", bundle("review", "developer review"))
+	require.NoError(t, err)
+	for _, namespace := range []string{"", " "} {
+		handler := NewHandler(store, WithNamespaceResolver(func(*http.Request) (string, error) { return namespace, nil }))
+		data, err := json.Marshal(bundle("review", "replaced"))
+		require.NoError(t, err)
+		for _, req := range []*http.Request{
+			httptest.NewRequest(http.MethodPost, "/skills", bytes.NewReader(data)),
+			httptest.NewRequest(http.MethodPut, "/skills/review", bytes.NewReader(data)),
+			httptest.NewRequest(http.MethodDelete, "/skills/review", nil),
+			httptest.NewRequest(http.MethodGet, "/skills", nil),
+		} {
+			req.Header.Set("Content-Type", "application/json")
+			resp := httptest.NewRecorder()
+			handler.ServeHTTP(resp, req)
+			require.Equal(t, http.StatusForbidden, resp.Code, "%s %s for namespace %q", req.Method, req.URL, namespace)
+		}
+	}
+	got, err := store.Get(t.Context(), "", "review")
+	require.NoError(t, err)
+	require.Contains(t, string(got.Files["SKILL.md"]), "developer review")
+}

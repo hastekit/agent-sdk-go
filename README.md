@@ -581,7 +581,7 @@ if err := registry.Register(agent); err != nil { log.Fatal(err) }
 //   GET  /agents/{agent}/runs                      → long poll: runs in the resolved namespace
 //   GET  /agents/{agent}/threads                   → stored conversation threads, newest first
 //   GET  /agents/{agent}/threads/{thread}/messages → thread history as AG-UI messages
-http.ListenAndServe(":8080", agui.NewHandler(registry))
+http.ListenAndServe(":8080", agui.NewHandler(agents.StaticRegistry(registry)))
 
 // Or mount a single agent's run endpoint on an existing mux:
 // mux.Handle("POST /assistant/run", agui.AgentHandler(agent))
@@ -594,7 +594,7 @@ import "github.com/hastekit/agent-sdk-go/pkg/agui/web"
 
 // Serves the embedded CopilotKit chat UI at / and the AG-UI protocol
 // endpoints under /api/agui/*.
-if err := web.Serve(":8080", registry); err != nil {
+if err := web.Serve(":8080", agents.StaticRegistry(registry)); err != nil {
     log.Fatal(err)
 }
 ```
@@ -793,34 +793,43 @@ built on it.
 
 #### MCP Tools Integration
 
-Define MCP servers through configuration stores and give one client to the agent:
+Define MCP servers through two configuration stores — the developer's and the users' — and give one client to the agent:
 
 ```go
-store, err := mcpclient.NewFileStore("./data/mcp-config.json")
+store, err := mcpclient.NewFileStore("./data/mcp-config.json") // users' connectors
 if err != nil {
     log.Fatal(err)
 }
 
-// Inline definitions are developer-owned and do not modify the persisted file.
-store = store.WithMCPServerConfig([]mcpclient.ServerConfig{{
+// Servers defined in code are global, developer-owned and read-only.
+builtins := mcpclient.NewInlineStore(mcpclient.ServerConfig{
     Name: "sample", Endpoint: "http://localhost:9001/sse", Transport: "sse",
     ToolPrefix: "sample__",
     ToolFilter: mcpclient.ToolFilter{Include: []string{"list_users", "get_user"}},
     Meta: map[string]any{"thread_id": "{{thread_id}}", "run_id": "{{run_id}}"},
-}})
+})
 
 agent := hastekit.MustNewAgent(&hastekit.AgentConfig{
     Name: "MCP Agent", LLM: model,
     Instruction: hastekit.NewPrompt("You are a helpful assistant."),
-    MCPClient: mcpclient.NewClient(store),
+    MCPClient: mcpclient.NewClient(builtins, mcpclient.WithUserStore(store)),
 })
 ```
 
-`NewClient(storeA, storeB)` supports multiple sources. Use `NewMemoryStore()` for
-in-memory definitions or implement `MCPServerConfigStore` for database storage.
-Stores receive the execution namespace and run context. Globals are developer-owned;
-namespace-scoped records belong to users. Per-run server/tool selection is provided
-through `AgentInput.MCP`. Discovery returns tools and connector statuses for the prompt.
+`NewClient(builtIn, mcpclient.WithUserStore(user))` reads the built-in store's servers as global —
+developer-owned, always on, and winning over a user's server with the same name —
+and the user store's as each namespace's own. A store does not know which role it
+plays: the client reads the built-in store under the empty namespace and the user
+store under the run's, so any store can fill either slot, one store can fill both,
+and either may be nil. `NewInlineStore(configs...)` serves servers written in
+code, `NewMemoryStore()` and `NewFileStore(path)` persist definitions by
+namespace, and you can implement `mcpclient.Store` for database storage.
+`mcpclient.Filter(store, servers)` gives an agent only the named servers of a
+store, each narrowed to the tools it names, such as
+`mcpclient.Filter(builtins, map[string]mcpclient.ToolFilter{"docs": {}, "github":
+{Include: []string{"get_issue"}}})`; filter either store, or both.
+Stores receive their namespace and the run context. `AgentInput.MCP` lets a run
+disable or narrow the user's own servers; global servers are mandatory and ignore it. Discovery returns tools and connector statuses for the prompt.
 
 See [MCP configuration stores](pkg/agents/mcpclient/CATALOG.md) for store composition,
 selection, caching, and connector management APIs.
@@ -832,7 +841,7 @@ selection, caching, and connector management APIs.
 - `ToolPrefix: "fs__"` exposes `read_file` as `fs__read_file`; filters and approval
   lists still use original tool names.
 - `CacheTTLSeconds` and `DefaultCacheScope` configure discovery caching. Supply a
-  cache with `client.WithSchemaCache(cache)`. Use public scope only when all users
+  cache with the `mcpclient.WithSchemaCache(cache)` client option. Use public scope only when all users
   see the same tools; private is the default when the server omits its scope.
 
 #### Per-call MCP metadata
@@ -848,12 +857,12 @@ activities or Restate steps, so retries use the persisted run context.
 Developer-owned configs can start an MCP process on demand:
 
 ```go
-store := mcpclient.NewMemoryStore().WithMCPServerConfig([]mcpclient.ServerConfig{{
+store := mcpclient.NewInlineStore(mcpclient.ServerConfig{
     Name: "filesystem", Transport: mcpclient.TransportStdio,
     Command: []string{"npx", "-y", "@modelcontextprotocol/server-filesystem", "/tmp"},
     Env: map[string]string{"WORKSPACE": "{{workspace}}"},
     ToolPrefix: "fs__",
-}})
+})
 client := mcpclient.NewClient(store)
 ```
 
@@ -863,16 +872,18 @@ approvals, deferral, prefixes, and caching work across transports.
 #### User connectors and OAuth
 
 `mcpclient.NewHandler(store, ...)` lists visible connectors and lets users save or
-delete their namespace-owned HTTP configs. `ServerConfig.Authorization` contains
+delete their namespace-owned HTTP configs in `store`, the client's user store.
+Pass the client's built-in store with `mcpclient.WithBuiltInStore(builtins)`: its
+servers are listed and reserved, and can be connected with OAuth, but never written. `ServerConfig.Authorization` contains
 OAuth application settings. A shared `OAuthCredentialProvider` resolves and refreshes
 tokens stored by **namespace + `OAuthCredentialKey`** (owner, server name, and OAuth
 client), without a separate server registry.
 
 ```go
-client := mcpclient.NewClient(store).WithCredentials(provider)
+client := mcpclient.NewClient(builtins, mcpclient.WithUserStore(store), mcpclient.WithCredentials(provider))
 handler := web.Handler(registry,
     agui.WithNamespaceResolver(authenticatedNamespace),
-    agui.WithMCPStore(store, mcpclient.WithOAuth(provider)),
+    agui.WithMCPStore(store, mcpclient.WithBuiltInStore(builtins), mcpclient.WithOAuth(provider)),
 )
 ```
 
@@ -1139,28 +1150,41 @@ Each `SKILL.md` needs YAML frontmatter with a description and an optional name
 (defaulting to the folder name), followed by the instructions.
 
 ```go
-builtins, err := hastekit.NewDirSkillSource("./skills")
+builtins, err := hastekit.NewDirSkillStore("./skills")
 if err != nil { log.Fatal(err) }
 agent := hastekit.MustNewAgent(&hastekit.AgentConfig{
     Name: "Release_Agent",
     LLM: model,
-    SkillClient: hastekit.NewSkillClient(nil).WithGlobalSkills(builtins),
+    SkillClient: hastekit.NewSkillClient(builtins),
     Instruction: hastekit.NewPrompt("Help prepare releases.",
         prompts.WithResolver(prompts.DefaultResolvers()...)),
 })
 ```
 
-Skills work like MCP servers. `skills.NewClient(store)` reads users' own skills
-from a `Store` by namespace; `WithGlobalSkills(sources...)` returns a copy with
-developer-owned skills. Share one store across agents and give each agent its
-own globals. A source is a folder (`skills.NewDirSource`), an `embed.FS` or other
-`fs.FS` (`skills.NewFSSource`), inline bundles (`skills.NewBundleSource`), a
-store namespace the application manages (`skills.NewStoreSource`), or your own
-`skills.Source` (`List`, `Read`).
+Skills work like MCP servers. `skills.NewClient(builtIn, skills.WithUserStore(user))` reads two
+`skills.Store`s (`List`, `Get`): the built-in store's skills are global
+(developer-owned), the user store's are each namespace's own. A store does not
+know which role it plays — the client reads the built-in store under the empty
+namespace and the user store under the run's — so any store fills either slot:
+a folder (`skills.NewDirStore`), an `embed.FS` or other `fs.FS`
+(`skills.NewFSStore`), inline bundles (`skills.NewInlineStore`), a
+`skills.MutableStore` such as `NewFileStore` or `NewS3Store`, or your own
+`skills.Store`. Share the user store across agents and give each agent its own
+built-in store. The names match MCP's `mcpclient.Store` and
+`mcpclient.MutableStore`.
+
+`skills.Filter(store, names)` gives an agent only the named skills of a store
+and drops the rest, including later uploads; filter either store, or both:
+
+```go
+everything := skills.NewClient(builtins, skills.WithUserStore(store)) // default agent
+custom := skills.NewClient(skills.Filter(builtins, picks), skills.WithUserStore(skills.Filter(store, picks))) // picks from both
+```
 
 Global skills are always on: users cannot turn them off, and a global shadows a
 user skill with the same name. Users' own skills are on unless the run disables
-them with `Input.Skills.Disable`. Each run discovers added and removed skills
+them with `Input.Skills.Disable`. The `/skills` routes refuse the empty
+namespace, so users never write what a built-in store reads. Each run discovers added and removed skills
 without reconstructing the agent; its catalog becomes a snapshot for that run,
 and content is read on demand. An empty namespace sees globals only.
 
@@ -1172,8 +1196,8 @@ the user's own skills from `/skills`, which is not scoped to an agent, and
 remembers choices once per browser. Temporal and Restate execute
 listing and reads within durable steps.
 
-`NewFileStore` and `NewS3Store` implement the pluggable `Store` interface for
-uploaded skills. Enable library APIs and uploads with
+`NewFileStore` and `NewS3Store` implement the pluggable `MutableStore` interface
+for uploaded skills. Enable library APIs and uploads with
 `web.Serve(":8080", registry, agui.WithSkillStore(store))`; uploads cannot reuse a
 registered agent's global skill name. See [persistent skills](pkg/agents/skills/README.md).
 

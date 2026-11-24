@@ -45,7 +45,7 @@ func TestOAuthConfigEditsReplacePooledSessions(t *testing.T) {
 				require.NoError(t, store.Put(t.Context(), "", config))
 			}
 			saveGrant("old-account")
-			client := NewClient(store).WithCredentials(provider)
+			client := NewClient(store, WithCredentials(provider))
 			_, tools, err := client.ListTools(t.Context(), "alice", nil)
 			require.NoError(t, err)
 			require.Len(t, tools, 1)

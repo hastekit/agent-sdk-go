@@ -15,6 +15,7 @@ export function Sidebar({
   onNew,
   onManageSkills,
   onManageMCP,
+  onManageAgents,
   onManageRoutines,
   routines,
   routinesLoading,
@@ -33,6 +34,7 @@ export function Sidebar({
   onNew: () => void;
   onManageSkills?: () => void;
   onManageMCP?: () => void;
+  onManageAgents?: () => void;
   onManageRoutines?: () => void;
   routines: Routine[];
   selectedRoutineId?: string;
@@ -48,6 +50,7 @@ export function Sidebar({
       error={error} onSelect={onSelect} onNew={onNew} onRetry={onRetry}>
       <div slot="header" className="drawer-header">
         <span className="brand"><img className="logo" src={LOGO} alt="" />HasteKit</span>
+        {onManageAgents && <button className="nav-item" onClick={onManageAgents}>Agents</button>}
         {onManageSkills && <button className="nav-item" onClick={onManageSkills}>Skill library</button>}
         {onManageMCP && <button className="nav-item" onClick={onManageMCP}>MCP servers</button>}
       </div>

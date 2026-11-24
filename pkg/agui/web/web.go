@@ -5,9 +5,9 @@
 // this package needs no Node toolchain and no separate frontend deploy.
 // Serve mirrors http.ListenAndServe:
 //
-//	client, _ := hastekit.NewWithOptions(...)
-//	client.NewAgent(...)
-//	if err := web.Serve(":8080", client); err != nil { log.Fatal(err) }
+//	registry := hastekit.NewRegistry()
+//	registry.Register(agent)
+//	if err := web.Serve(":8080", agents.StaticRegistry(registry)); err != nil { log.Fatal(err) }
 //
 // Then open http://localhost:8080. The default UI (index.html) is a
 // CopilotKit chat: it lists registered agents, shows a sidebar of
@@ -32,7 +32,7 @@
 //	GET  /api/agui/agents             → registered agent names
 //	POST /api/agui/agents/{name}/run  → AG-UI run endpoint (SSE)
 //	POST /api/agui/agents/{name}/stop → stop a run in flight
-//	GET  /api/agui/agents/{name}/threads                   → conversation list
+//	GET  /api/agui/agents/{name}/threads                   → the agent's own conversations
 //	GET  /api/agui/agents/{name}/threads/{thread}/messages → thread history
 //	GET  /api/agui/agents/{name}/threads/{thread}/stream   → rejoin a run in flight
 //
@@ -64,6 +64,7 @@ import (
 	"io/fs"
 	"net/http"
 
+	"github.com/hastekit/agent-sdk-go/pkg/agents"
 	"github.com/hastekit/agent-sdk-go/pkg/agui"
 )
 
@@ -77,13 +78,20 @@ const APIPrefix = "/api/agui"
 
 // Handler serves the embedded AG-UI chat client over every agent in
 // the registry, with the AG-UI protocol endpoints mounted under
-// APIPrefix. *hastekit.SDK satisfies agui.Registry.
+// APIPrefix. Wrap agents built in code with agents.StaticRegistry, or use an
+// agentconfig.Registry for agents namespaces create at run time.
 // Use agui.WithSkillStore to enable the skill library.
-// Use agui.WithMCPStore(store, mcpclient.WithOAuth(provider)) to mount connector
+// Use agui.WithMCPStore(store, mcpclient.WithBuiltInStore(builtIns), mcpclient.WithOAuth(provider)) to mount connector
 // management and OAuth routes under /api/agui/mcp using the chat namespace resolver.
 // Use agui.WithRoutines(service, scheduler) to enable routine management at
 // /api/agui/routines and the Routines panel. The caller runs the scheduler.
-func Handler(registry agui.Registry, opts ...agui.Option) http.Handler {
+// Use agui.WithAgentConfigs() to enable the Agents panel, where users create,
+// edit and chat with agents of their own; the registry is then an
+// agentconfig.Registry with a store, holding any code agents too:
+//
+//	registry, err := agentconfig.NewRegistry(builder, builtIns, userStore, codeAgents)
+//	web.Serve(":8080", registry, agui.WithAgentConfigs())
+func Handler(registry agents.Registry, opts ...agui.Option) http.Handler {
 	mux := http.NewServeMux()
 	api := agui.NewHandler(registry, opts...)
 	mux.Handle(APIPrefix+"/", http.StripPrefix(APIPrefix, api))
@@ -103,6 +111,6 @@ func Handler(registry agui.Registry, opts ...agui.Option) http.Handler {
 // skills.NewClient to enable skill management in the UI.
 // Use agui.WithRoutines(service, scheduler) to enable routines APIs and UI.
 // The application remains responsible for running and stopping the scheduler.
-func Serve(addr string, registry agui.Registry, opts ...agui.Option) error {
+func Serve(addr string, registry agents.Registry, opts ...agui.Option) error {
 	return http.ListenAndServe(addr, Handler(registry, opts...))
 }

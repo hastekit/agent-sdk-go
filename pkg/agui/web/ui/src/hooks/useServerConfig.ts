@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { fetchAgents } from "../api";
 
 export interface ServerConfig {
@@ -10,6 +10,8 @@ export interface ServerConfig {
   skillStoreEnabled: boolean;
   mcpStoreEnabled: boolean;
   routinesEnabled: boolean;
+  // Whether the user can create agents of their own (/agent-configs).
+  agentConfigsEnabled: boolean;
 }
 
 const NOTHING: ServerConfig = {
@@ -19,6 +21,7 @@ const NOTHING: ServerConfig = {
   skillStoreEnabled: false,
   mcpStoreEnabled: false,
   routinesEnabled: false,
+  agentConfigsEnabled: false,
 };
 
 // useServerConfig loads the registered agents and what the server supports,
@@ -37,7 +40,9 @@ export function useServerConfig(preferredAgent: string, onError: (message: strin
       .then(({ agents, ...supported }) => {
         setConfig({ agents, ...supported });
         if (!agents.length) {
-          onError("No agents registered on the server.");
+          // With agent creation on, an empty list is a server waiting for its
+          // first agent, not a misconfigured one.
+          if (!supported.agentConfigsEnabled) onError("No agents registered on the server.");
           return;
         }
         setAgentName(agents.includes(preferredAgent) ? preferredAgent : agents[0]);
@@ -47,5 +52,14 @@ export function useServerConfig(preferredAgent: string, onError: (message: strin
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  return { ...config, agentName, setAgentName };
+  // reloadAgents refetches the list after the user creates, edits or deletes
+  // an agent, and returns it; choosing which agent the chat points at is the
+  // caller's, since that also resets the open conversation.
+  const reloadAgents = useCallback(async () => {
+    const { agents, ...supported } = await fetchAgents();
+    setConfig({ agents, ...supported });
+    return agents;
+  }, []);
+
+  return { ...config, agentName, setAgentName, reloadAgents };
 }

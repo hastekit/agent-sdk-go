@@ -1,7 +1,6 @@
 package mcpclient
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,9 +11,10 @@ import (
 	"golang.org/x/oauth2"
 )
 
-// ServerConfig is a serializable MCP definition. Empty Namespace means developer-owned/global.
-// Stores must return only global definitions and definitions owned by the requested namespace.
-// Globals are always enabled; namespace-owned servers are enabled unless selected for disabling.
+// ServerConfig is a serializable MCP definition. Namespace is its owner, which
+// the Client sets from the store it read the definition from: empty for a
+// built-in (developer-owned, global), the namespace for a user's own.
+// Built-ins are always enabled; namespace-owned servers are enabled unless selected for disabling.
 // Namespace-owned definitions must be literal (no templates), use public HTTP endpoints,
 // and cannot set UseCredentials, which hands the client's CredentialProvider to a global definition.
 // Applications authorize writes; never let a user choose an arbitrary write namespace.
@@ -55,13 +55,6 @@ type OAuthConfig struct {
 	Scopes         []string          `json:"scopes,omitempty"`
 	AuthStyle      oauth2.AuthStyle  `json:"authStyle,omitempty"`
 	AuthCodeParams map[string]string `json:"authCodeParams,omitempty"`
-}
-
-// MCPServerConfigStore lists all definitions visible to a subject in one consistent snapshot.
-// A database adapter selects globals and records whose namespace matches the subject.
-// Listing with an empty namespace returns global definitions only.
-type MCPServerConfigStore interface {
-	ListServerConfigs(ctx context.Context, namespace string, runContext map[string]any) ([]ServerConfig, error)
 }
 
 // cloneServerConfig isolates mutable configuration and verifies it can be stored as JSON.

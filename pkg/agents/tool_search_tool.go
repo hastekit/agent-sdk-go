@@ -91,9 +91,30 @@ func (t *ToolSearchTool) Execute(ctx context.Context, params *ToolCall) (*ToolCa
 			},
 		},
 		StateUpdates: map[string]string{
-			"activated_deferred_tools": strings.Join(toolNames, ","),
+			"activated_deferred_tools": mergeActivated(params.State["activated_deferred_tools"], toolNames),
 		},
 	}, nil
+}
+
+// mergeActivated appends added to the comma-separated names earlier ToolSearch
+// calls in the run already activated, skipping any already there, in order.
+//
+// The loop copies StateUpdates over the run's state key by key, so writing only
+// this call's names would replace the earlier activations: a model that
+// searched twice would lose the first search's tools on its next request.
+func mergeActivated(prior string, added []string) string {
+	var names []string
+	for _, name := range strings.Split(prior, ",") {
+		if name != "" && !slices.Contains(names, name) {
+			names = append(names, name)
+		}
+	}
+	for _, name := range added {
+		if !slices.Contains(names, name) {
+			names = append(names, name)
+		}
+	}
+	return strings.Join(names, ",")
 }
 
 // keywordSearch ranks deferred tools by how many query terms appear in

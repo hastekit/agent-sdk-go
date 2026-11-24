@@ -76,12 +76,12 @@ func (f *fakeS3) ListObjectsV2(ctx context.Context, in *s3.ListObjectsV2Input, _
 	}
 	return out, nil
 }
-func stores(t *testing.T) map[string]Store {
+func stores(t *testing.T) map[string]MutableStore {
 	fs, err := NewFileStore(t.TempDir())
 	require.NoError(t, err)
 	remote, err := NewS3Store(&fakeS3{objects: map[string][]byte{}}, S3Config{Bucket: "private", Prefix: "skills"})
 	require.NoError(t, err)
-	return map[string]Store{"filesystem": fs, "s3": remote}
+	return map[string]MutableStore{"filesystem": fs, "s3": remote}
 }
 func TestStoreContract(t *testing.T) {
 	for kind, store := range stores(t) {
@@ -164,7 +164,7 @@ func TestClientUsesTheExecutionNamespace(t *testing.T) {
 	require.NoError(t, err)
 	_, err = store.Put(context.Background(), "tenant", bundle("review", "content"))
 	require.NoError(t, err)
-	client := NewClient(store)
+	client := NewClient(nil, WithUserStore(store))
 	empty, err := client.ListSkills(context.Background(), "other", nil)
 	require.NoError(t, err)
 	require.Empty(t, empty)

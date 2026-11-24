@@ -43,7 +43,7 @@ func main() {
 
 	// WithCommand selects the stdio transport, so WithTransport is not needed
 	// as well. There is no URL to connect to, so the endpoint is empty.
-	mcpClient := mcpclient.NewClient(mcpclient.NewMemoryStore().WithMCPServerConfig([]mcpclient.ServerConfig{{Name: "filesystem",
+	mcpClient := mcpclient.NewClient(mcpclient.NewInlineStore(mcpclient.ServerConfig{Name: "filesystem",
 		Endpoint:              "",
 		Transport:             mcpclient.TransportStdio,
 		Command:               []string{"npx", "-y", "@modelcontextprotocol/server-filesystem", "/tmp"},
@@ -52,7 +52,7 @@ func main() {
 		ApprovalRequiredTools: []string{"read_file"},
 		Env: map[string]string{
 			"WORKSPACE": "{{workspace}}",
-		}}}))
+		}}))
 
 	agent := hastekit.MustNewAgent(&hastekit.AgentConfig{
 		Name:        "Filesystem_Agent",

@@ -23,8 +23,12 @@ type fakeExecutor struct {
 	execute func(context.Context, Routine, Run) error
 }
 
-func (*fakeExecutor) HasAgent(name string) bool { return name == "assistant" }
-func (*fakeExecutor) AgentNames() []string      { return []string{"assistant"} }
+func (*fakeExecutor) HasAgent(_ context.Context, _ string, name string) (bool, error) {
+	return name == "assistant", nil
+}
+func (*fakeExecutor) AgentNames(context.Context, string) ([]string, error) {
+	return []string{"assistant"}, nil
+}
 func (f *fakeExecutor) Execute(ctx context.Context, r Routine, run Run) error {
 	if f.execute != nil {
 		return f.execute(ctx, r, run)
@@ -138,7 +142,7 @@ func TestScheduleValidationAndTimezone(t *testing.T) {
 	svc := NewService(testStore(t), &fakeExecutor{})
 	d := definition()
 	d.Schedule = Schedule{At: &now}
-	if _, err := svc.validate(d, now); !errors.Is(err, ErrInvalid) {
+	if _, err := svc.validate(context.Background(), "default", d, now); !errors.Is(err, ErrInvalid) {
 		t.Fatal("past datetime accepted")
 	}
 	d = definition()

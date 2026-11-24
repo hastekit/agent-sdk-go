@@ -34,9 +34,9 @@ func run() error {
 		func(*http.Request) *mcp.Server { return mcpServer }, &mcp.StreamableHTTPOptions{Stateless: true},
 	))
 	defer mcpHTTP.Close()
-	connector := mcpclient.NewClient(mcpclient.NewMemoryStore().WithMCPServerConfig([]mcpclient.ServerConfig{{Name: "payments",
+	connector := mcpclient.NewClient(mcpclient.NewInlineStore(mcpclient.ServerConfig{Name: "payments",
 		Endpoint:  mcpHTTP.URL,
-		Transport: mcpclient.TransportStreamableHTTP}}))
+		Transport: mcpclient.TransportStreamableHTTP}))
 
 	prepare, err := workflow.NewJavaScriptNode("prepare", workflow.JavaScriptNodeConfig{
 		Code: "return {amount: input.amount, currency: 'USD'};",

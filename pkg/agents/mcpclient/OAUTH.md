@@ -2,7 +2,7 @@
 
 MCP connection definitions and tokens have separate stores:
 
-- `MCPServerConfigStore` holds server endpoints and OAuth application settings.
+- `Store` holds server endpoints and OAuth application settings.
 - `CredentialStore` holds tokens under **namespace + credential key**. The key,
   `OAuthCredentialKey(connector)`, binds the definition's owner (global or the
   user's own), its server name, and the OAuth client ID and token URL (for
@@ -17,11 +17,11 @@ and authenticated namespace. There is no registration map to keep synchronized,
 and connecting an account does not require listing tools first.
 
 ```go
-configs, err := mcpclient.NewFileStore("./data/mcp-config.json")
+configs, err := mcpclient.NewFileStore("./data/mcp-config.json") // users' connectors
 if err != nil {
     return err
 }
-configs = configs.WithMCPServerConfig([]mcpclient.ServerConfig{{
+builtins := mcpclient.NewInlineStore(mcpclient.ServerConfig{
     Name: "gmail",
     Endpoint: "https://gmailmcp.googleapis.com/mcp/v1",
     Transport: mcpclient.TransportStreamableHTTP,
@@ -35,7 +35,7 @@ configs = configs.WithMCPServerConfig([]mcpclient.ServerConfig{{
         Scopes: []string{"https://www.googleapis.com/auth/gmail.readonly"},
         AuthCodeParams: map[string]string{"prompt": "consent"},
     },
-}})
+})
 
 // Share token refresh coordination between agent execution and browser callbacks.
 tokens, err := mcpclient.NewFileCredentialStore("./data/mcp-credentials")
@@ -49,21 +49,23 @@ provider, err := mcpclient.NewOAuthCredentialProvider(mcpclient.OAuthCredentialP
 if err != nil {
     return err
 }
-client := mcpclient.NewClient(configs).WithCredentials(provider)
+client := mcpclient.NewClient(builtins, mcpclient.WithUserStore(configs), mcpclient.WithCredentials(provider))
 ```
 
-Give `client` to the agent's `MCPClient` option, then mount the config store:
+Give `client` to the agent's `MCPClient` option, then mount the same two config
+stores. The handler finds Gmail's OAuth settings in the built-in store without
+ever writing to it:
 
 ```go
 handler := web.Handler(registry,
     agui.WithNamespaceResolver(authenticatedNamespace),
-    agui.WithMCPStore(configs, mcpclient.WithOAuth(provider)),
+    agui.WithMCPStore(configs, mcpclient.WithBuiltInStore(builtins), mcpclient.WithOAuth(provider)),
 )
 ```
 
 Use the same authenticated namespace for agent runs and HTTP requests. For the
-standalone handler, use `NewHandler(configs, WithNamespaceResolver(...),
-WithOAuth(provider))` and mount it with `http.StripPrefix`.
+standalone handler, use `NewHandler(configs, WithBuiltInStore(builtins),
+WithNamespaceResolver(...), WithOAuth(provider))` and mount it with `http.StripPrefix`.
 
 Visit `/api/agui/mcp/gmail/connect`. The handler resolves Gmail's OAuth config,
 creates expiring browser-bound state and an S256 PKCE challenge, then redirects
@@ -73,6 +75,27 @@ resolve those tokens automatically. Missing credentials become an authentication
 connector status before opening an MCP connection or using cached tools.
 
 Register the full callback URL in the OAuth application.
+
+### Apps that authenticate with headers
+
+A navigation sends cookies but not an `Authorization` header, so an app whose
+API authenticates with headers cannot visit `/connect` or receive the callback
+there. It starts consent from a script and finishes it the same way:
+
+1. Set the definition's `RedirectURL` to a page of the app's own.
+2. `GET /mcp/{server}/connect` with `Accept: application/json` and the app's
+   usual headers. The handler answers `{"authorizationUrl": "..."}` instead of
+   redirecting, and sets no cookie; open that URL, in a popup for example.
+3. The authorization server sends the browser to the app's page with `code`,
+   `state` and possibly `iss` (or `error`). The page hands them to the app, which
+   sends `POST /mcp/{server}/callback` with `{"state", "code", "iss"}`, or
+   `{"state", "error"}`, authenticated as usual. The handler answers 204 when
+   the account is connected.
+
+The attempt must be the authenticated user's own, which binds it to its user
+without the browser cookie. An attempt started this way never finishes through
+the GET callback. Hand the response only to the app's own origin: the page can
+use a `BroadcastChannel`, which is same-origin.
 
 ## Discovery and dynamic client registration
 
@@ -143,7 +166,7 @@ definitions; user definitions always use the protected transport. See the
 Implement `CredentialProvider.Resolve(ctx, namespace, connector, runContext)` and
 return a token source and stable principal. Set `UseCredentials: true` on the
 relevant global `ServerConfig` (user-owned definitions cannot set it, so a user's
-endpoint never receives application credentials), and call `client.WithCredentials(provider)` before sharing
-the client. Custom providers need no OAuth routes. Credentials stay out of agent
+endpoint never receives application credentials), and pass `mcpclient.WithCredentials(provider)` to
+`NewClient`. Custom providers need no OAuth routes. Credentials stay out of agent
 run state and durable histories; `Connector.Authorization` contains the current
 OAuth settings when present.

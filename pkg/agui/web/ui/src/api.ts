@@ -31,11 +31,93 @@ export async function fetchAgents(): Promise<{
   skillStoreEnabled: boolean;
   mcpStoreEnabled: boolean;
   routinesEnabled: boolean;
+  agentConfigsEnabled: boolean;
 }> {
   const r = await fetch(`${API}/agents`);
   if (!r.ok) throw new Error(`agents → ${r.status}`);
   const body = await r.json();
-  return { routinesEnabled: body.routines === true, agents: body.agents ?? [], fullHistory: body.full_history === true, attachmentsEnabled: body.attachments === true, skillStoreEnabled: body.skill_store === true, mcpStoreEnabled: body.mcp_store === true };
+  return { routinesEnabled: body.routines === true, agents: body.agents ?? [], fullHistory: body.full_history === true, attachmentsEnabled: body.attachments === true, skillStoreEnabled: body.skill_store === true, mcpStoreEnabled: body.mcp_store === true, agentConfigsEnabled: body.agent_configs === true };
+}
+
+// An agent the user creates: plain data the server builds into an agent, with
+// tools, skills and connectors picked from what the server offers (see
+// fetchAgentChoices). Mirrors agentconfig.Config.
+export interface AgentConfig {
+  name: string;
+  description?: string;
+  model: string;
+  parameters?: { temperature?: number; max_output_tokens?: number };
+  instruction?: string;
+  max_loops?: number;
+  output?: Record<string, unknown>;
+  skills?: string[];
+  // Connector name → the tools to keep; an empty or missing include keeps them all.
+  mcp?: Record<string, { include?: string[]; exclude?: string[] }>;
+  tools?: string[];
+  handoffs?: { name: string; description?: string }[];
+  sticky_handoff?: boolean;
+  // Agents this one calls as tools, keeping the conversation. "Isolated", the
+  // default, keeps one conversation with each per chat; "None" lets the model
+  // pick which to continue.
+  sub_agents?: { name: string; description?: string; context_mode?: "Isolated" | "None" }[];
+}
+
+export interface AgentChoice {
+  name: string;
+  description?: string;
+  // The developer's: a global skill or connector, or a built-in agent.
+  builtIn?: boolean;
+}
+
+export interface AgentChoices {
+  models: string[];
+  tools: AgentChoice[];
+  skills: AgentChoice[];
+  connectors: AgentChoice[];
+  agents: AgentChoice[];
+}
+
+async function agentConfigError(r: Response): Promise<Error> {
+  const body = await r.json().catch(() => ({}));
+  return new Error(body.error || `Agent request failed (${r.status})`);
+}
+
+// The user's own agents. Built-in agents are the server's and never listed here.
+export async function fetchAgentConfigs(): Promise<AgentConfig[]> {
+  const configs: AgentConfig[] = [];
+  const seen = new Set<string>();
+  let cursor = "";
+  for (;;) {
+    const r = await fetch(`${API}/agent-configs?limit=200&cursor=${encodeURIComponent(cursor)}`);
+    if (!r.ok) throw await agentConfigError(r);
+    const page: { agents?: AgentConfig[]; nextCursor?: string } = await r.json();
+    configs.push(...(page.agents ?? []));
+    if (!page.nextCursor) return configs;
+    if (seen.has(page.nextCursor)) throw new Error("agents → repeated pagination cursor");
+    seen.add(page.nextCursor);
+    cursor = page.nextCursor;
+  }
+}
+
+export async function fetchAgentChoices(): Promise<AgentChoices> {
+  const r = await fetch(`${API}/agent-choices`);
+  if (!r.ok) throw await agentConfigError(r);
+  const body = await r.json();
+  return { models: body.models ?? [], tools: body.tools ?? [], skills: body.skills ?? [], connectors: body.connectors ?? [], agents: body.agents ?? [] };
+}
+
+// Creates or replaces the agent. The server checks the model, tools and name.
+export async function saveAgentConfig(config: AgentConfig): Promise<AgentConfig> {
+  const r = await fetch(`${API}/agent-configs/${encodeURIComponent(config.name)}`, {
+    method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(config),
+  });
+  if (!r.ok) throw await agentConfigError(r);
+  return r.json();
+}
+
+export async function deleteAgentConfig(name: string): Promise<void> {
+  const r = await fetch(`${API}/agent-configs/${encodeURIComponent(name)}`, { method: "DELETE" });
+  if (!r.ok) throw await agentConfigError(r);
 }
 
 // fetchThreads returns supported=false when the agent's persistence
@@ -83,19 +165,40 @@ export async function uploadAttachment(file: File, sessionId: string): Promise<U
 }
 
 // The user's own skills, shared by every agent and on unless turned off. Agents'
-// built-in skills are configured on the server and always on; see fetchBuiltInSkills.
+// built-in skills are configured on the server and always on; see fetchAgentSkills.
 export interface SkillInfo {
   name: string;
   description: string;
 }
 
 // An agent's built-in skills: always on, and never in the user's library.
-export async function fetchBuiltInSkills(agentName: string): Promise<SkillInfo[]> {
+// The agent's skills: those always on — built in, or picked by its config —
+// and the names of the user's own it reads, which a run may turn off. optional
+// is null when the server does not say (an older one): then every skill in the
+// user's library applies.
+export async function fetchAgentSkills(agentName: string): Promise<{ always: SkillInfo[]; optional: string[] | null }> {
   const r = await fetch(`${API}/agents/${encodeURIComponent(agentName)}/skills`);
-  if (r.status === 404) return []; // an older server, or an unknown agent
-  if (!r.ok) throw new Error(`built-in skills → ${r.status}`);
-  const body: { skills?: SkillInfo[] } = await r.json();
-  return body.skills ?? [];
+  if (r.status === 404) return { always: [], optional: null }; // an older server, or an unknown agent
+  if (!r.ok) throw new Error(`agent skills → ${r.status}`);
+  const body: { skills?: SkillInfo[]; optional?: SkillInfo[] } = await r.json();
+  return { always: body.skills ?? [], optional: body.optional ? body.optional.map(skill => skill.name) : null };
+}
+// One of an agent's own MCP servers: always on — built in, or picked by the
+// agent's config — or the user's, on unless a run turns it off.
+export interface AgentServer {
+  name: string;
+  always_on: boolean;
+}
+
+// The agent's own MCP servers, or null when the server cannot say (an older
+// server, or an agent whose client cannot list them): then every server the
+// MCP library lists applies, built-in ones always on.
+export async function fetchAgentServers(agentName: string): Promise<AgentServer[] | null> {
+  const r = await fetch(`${API}/agents/${encodeURIComponent(agentName)}/mcp`);
+  if (r.status === 404) return null;
+  if (!r.ok) throw new Error(`agent MCP servers → ${r.status}`);
+  const body: { servers?: AgentServer[] | null } = await r.json();
+  return body.servers ?? null;
 }
 export async function fetchSkillCatalog(): Promise<SkillInfo[]> {
   const skills: SkillInfo[] = [];

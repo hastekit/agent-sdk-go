@@ -42,7 +42,7 @@ func WithReservedNames(reserved func(*http.Request) ([]string, error)) HandlerOp
 // the route name. Both replace the complete bundle. GET ?file=path returns a
 // bundled file as an attachment. Without a namespace resolver requests fail
 // closed; global skills are never managed here. It mirrors mcpclient.NewHandler.
-func NewHandler(store Store, options ...HandlerOption) http.Handler {
+func NewHandler(store MutableStore, options ...HandlerOption) http.Handler {
 	settings := handlerOptions{}
 	for _, option := range options {
 		option(&settings)

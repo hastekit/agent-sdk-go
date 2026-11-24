@@ -2,6 +2,7 @@ package web
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -22,17 +23,19 @@ import (
 
 type registry map[string]*agents.Agent
 
-func (r registry) Agent(name string) (*agents.Agent, bool) {
+// Agent and AgentNames make registry a code-built set; tests hand it to
+// Handler as an agents.Registry directly.
+func (r registry) Agent(_ context.Context, _ string, name string) (*agents.Agent, bool, error) {
 	a, ok := r[name]
-	return a, ok
+	return a, ok, nil
 }
 
-func (r registry) AgentNames() []string {
+func (r registry) AgentNames(context.Context, string) ([]string, error) {
 	names := make([]string, 0, len(r))
 	for name := range r {
 		names = append(names, name)
 	}
-	return names
+	return names, nil
 }
 
 func TestHandlerServesEmbeddedUIAndAPI(t *testing.T) {
@@ -132,7 +135,7 @@ func TestHandlerSkillStore(t *testing.T) {
 	require.NoError(t, err)
 	for _, enabled := range []bool{true, false} {
 		t.Run(fmt.Sprint(enabled), func(t *testing.T) {
-			var configured skills.Store
+			var configured skills.MutableStore
 			if enabled {
 				configured = store
 			}
