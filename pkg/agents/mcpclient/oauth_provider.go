@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
@@ -39,7 +38,7 @@ type oauthServerConfig struct {
 	authorizationConfig
 }
 
-// OAuthCredentialProviderConfig configures shared persistence and token exchange settings.
+// OAuthCredentialProviderConfig configures shared persistence and token request settings.
 // OAuth application settings come from each ServerConfig, not a provider registry.
 type OAuthCredentialProviderConfig struct {
 	Store CredentialStore
@@ -51,14 +50,13 @@ type OAuthCredentialProviderConfig struct {
 	TokenTimeout time.Duration
 }
 
-// OAuthCredentialProvider resolves tokens by namespace and server, persisting every refresh.
-// Share one provider per process. Multiple processes require a store/refresh coordinator
-// designed for concurrent refresh-token rotation; the file store is intended for local use.
+// OAuthCredentialProvider resolves tokens by namespace and server, persisting every refresh:
+// the authorization code grants users connect, through the handler, to servers whose config
+// sets Authorization. Share one provider per process. Multiple processes need a store that
+// implements CredentialUpdater, which serializes refresh-token rotation across them; the
+// file store is intended for local use.
 type OAuthCredentialProvider struct {
-	store   CredentialStore
-	client  *http.Client
-	timeout time.Duration
-	locks   sync.Map
+	*grantKeeper
 }
 
 var _ CredentialProvider = (*OAuthCredentialProvider)(nil)
@@ -69,17 +67,9 @@ func NewOAuthCredentialProvider(cfg OAuthCredentialProviderConfig) (*OAuthCreden
 	if cfg.Store == nil {
 		return nil, errors.New("MCP OAuth requires a credential store")
 	}
-	if cfg.TokenTimeout <= 0 {
-		cfg.TokenTimeout = 30 * time.Second
-	}
-	if cfg.HTTPClient == nil {
-		cfg.HTTPClient = http.DefaultClient
-	}
 
 	// Configuration is supplied with each resolution; the provider owns only credentials.
-	return &OAuthCredentialProvider{
-		store: cfg.Store, client: cfg.HTTPClient, timeout: cfg.TokenTimeout,
-	}, nil
+	return &OAuthCredentialProvider{grantKeeper: newGrantKeeper(cfg.Store, cfg.HTTPClient, cfg.TokenTimeout)}, nil
 }
 
 // OAuthCredentialKey names the stored grant for one connector definition; it is the
@@ -244,13 +234,6 @@ func (p *OAuthCredentialProvider) withClient(ctx context.Context, namespace stri
 	return server, nil
 }
 
-// credentialLock serializes refreshes and authorization writes for one stored grant in this provider.
-func (p *OAuthCredentialProvider) credentialLock(namespace, key string) *sync.Mutex {
-	id, _ := credentialKey(namespace, key)
-	lock, _ := p.locks.LoadOrStore(id, &sync.Mutex{})
-	return lock.(*sync.Mutex)
-}
-
 // httpClient applies a config's ownership policy to every OAuth request made for
 // it: discovery, registration, code exchange and token refresh.
 func (p *OAuthCredentialProvider) httpClient(config oauthServerConfig) *http.Client {
@@ -275,41 +258,29 @@ type persistedTokenSource struct {
 }
 
 // Token refreshes only expired tokens and saves any rotated refresh token before returning it.
+// Refreshes of one grant are serialized across all sources for this subject, including
+// separate pooled MCP connections, and across processes when the store is a CredentialUpdater.
 func (s *persistedTokenSource) Token() (*oauth2.Token, error) {
-	// Coordinate all sources for this subject, including separate pooled MCP connections.
 	p := s.provider
-	lock := p.credentialLock(s.namespace, s.key)
-	lock.Lock()
-	defer lock.Unlock()
 	ctx, cancel := p.tokenContext(context.Background(), s.config)
 	defer cancel()
-
-	// Reload inside the lock so another request's refresh is immediately visible.
-	token, err := p.store.Load(ctx, s.namespace, s.key)
-	if err != nil {
-		return nil, err
-	}
-	if token.Valid() {
-		return token, nil
-	}
-	if token.RefreshToken == "" {
-		return nil, errors.New("MCP OAuth token expired; reconnect this account")
-	}
-
-	// Never propagate OAuth response bodies: providers may echo sensitive values in them.
-	config := s.config.OAuth
-	refreshed, err := config.TokenSource(ctx, token).Token()
-	if err != nil {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
+	return p.renew(ctx, s.namespace, s.key, (*oauth2.Token).Valid, func(token *oauth2.Token) (*oauth2.Token, error) {
+		if token.RefreshToken == "" {
+			return nil, errors.New("MCP OAuth token expired; reconnect this account")
 		}
-		return nil, errors.New("MCP OAuth refresh failed; reconnect this account")
-	}
-	if refreshed.RefreshToken == "" {
-		refreshed.RefreshToken = token.RefreshToken
-	}
-	if err := p.store.Save(ctx, s.namespace, s.key, refreshed); err != nil {
-		return nil, fmt.Errorf("persist refreshed MCP credential: %w", err)
-	}
-	return refreshed, nil
+
+		// Never propagate OAuth response bodies: providers may echo sensitive values in them.
+		config := s.config.OAuth
+		refreshed, err := config.TokenSource(ctx, token).Token()
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			return nil, errors.New("MCP OAuth refresh failed; reconnect this account")
+		}
+		if refreshed.RefreshToken == "" {
+			refreshed.RefreshToken = token.RefreshToken
+		}
+		return refreshed, nil
+	})
 }

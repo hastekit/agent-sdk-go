@@ -98,11 +98,22 @@ func (c serverConn) digest() string {
 
 // authorizationDigest includes refresh settings such as the client secret, while
 // keeping their plaintext out of pool keys and logs. OAuthConfig is JSON-safe.
-func authorizationDigest(config *OAuthConfig) string {
-	if config == nil {
+//
+// It also names the provider whose token sources the connection carries, by
+// identity: a server with a credentials provider of its own, rebuilt with
+// another (other scopes, say), must not be handed a session opened with the
+// first one's tokens. Sessions stay pooled per principal, which the provider
+// names; the client's shared provider is one identity for all its servers, so
+// it changes nothing for them.
+func authorizationDigest(config *OAuthConfig, provider CredentialProvider) string {
+	if config == nil && provider == nil {
 		return ""
 	}
-	data, _ := json.Marshal(config)
+	identity := ""
+	if provider != nil {
+		identity = fmt.Sprintf("%T:%p", provider, provider)
+	}
+	data, _ := json.Marshal([]any{config, identity})
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
 }

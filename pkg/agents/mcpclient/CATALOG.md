@@ -222,6 +222,10 @@ that need it; user-owned configs cannot set it. Public definitions do not use th
 provider. OAuth tokens are keyed by the execution namespace and
 `OAuthCredentialKey`, which binds the definition's owner, name, and OAuth client. OAuth needs no provider-side registration;
 HTTP authorization can start before the first agent run. See [OAuth setup](OAUTH.md).
+A definition written in code, such as `NewInlineStore`'s, can instead carry a
+`CredentialsProvider` of its own for that server alone; it is never JSON, stores
+refuse to save one, and user-owned definitions cannot set one. See [a server's
+own credentials provider](OAUTH.md#a-servers-own-credentials-provider).
 
 Set `CacheTTLSeconds` and `DefaultCacheScope` in each config. Explicit server
 cache scope takes precedence; absent scopes default to private unless configured

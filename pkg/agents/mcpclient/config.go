@@ -16,8 +16,14 @@ import (
 // built-in (developer-owned, global), the namespace for a user's own.
 // Built-ins are always enabled; namespace-owned servers are enabled unless selected for disabling.
 // Namespace-owned definitions must be literal (no templates), use public HTTP endpoints,
-// and cannot set UseCredentials, which hands the client's CredentialProvider to a global definition.
+// and cannot set UseCredentials or CredentialsProvider, which hand application-held
+// credentials to a global definition.
 // Applications authorize writes; never let a user choose an arbitrary write namespace.
+//
+// A server's credentials come from at most one of: Authorization, an OAuth grant each
+// user connects, through the client's CredentialProvider; UseCredentials, the client's
+// CredentialProvider; CredentialsProvider, the server's own. Headers carry a static
+// token; a server with none of them is open.
 type ServerConfig struct {
 	Name                  string            `json:"name"`
 	Namespace             string            `json:"namespace,omitempty"`
@@ -36,6 +42,15 @@ type ServerConfig struct {
 	DisableStandaloneSSE  bool              `json:"disableStandaloneSSE,omitempty"`
 	UseCredentials        bool              `json:"useCredentials,omitempty"`
 	Authorization         *OAuthConfig      `json:"authorization,omitempty"`
+
+	// CredentialsProvider supplies this server's credentials in place of the
+	// client's provider, as the MCP Go SDK's transports each take an OAuth
+	// handler of their own. It is for definitions written in code, such as
+	// NewInlineStore's: it is never JSON, so no stored definition carries one,
+	// a store refuses to save one, and a user-owned definition cannot set one,
+	// as its endpoint is the user's choice. A stdio server has no request to
+	// put a token on.
+	CredentialsProvider CredentialProvider `json:"-"`
 }
 
 // OAuthConfig is the JSON representation of a client's trusted OAuth application settings.
@@ -58,14 +73,18 @@ type OAuthConfig struct {
 }
 
 // cloneServerConfig isolates mutable configuration and verifies it can be stored as JSON.
+// A definition's CredentialsProvider, which JSON never carries, comes along as it is.
 func cloneServerConfig(config ServerConfig) (ServerConfig, error) {
 	data, err := json.Marshal(config)
 	if err != nil {
 		return ServerConfig{}, errors.New("MCP server config must be JSON serializable")
 	}
 	var copy ServerConfig
-	err = json.Unmarshal(data, &copy)
-	return copy, err
+	if err := json.Unmarshal(data, &copy); err != nil {
+		return ServerConfig{}, err
+	}
+	copy.CredentialsProvider = config.CredentialsProvider
+	return copy, nil
 }
 
 // validateServerConfig rejects ambiguous names and unsupported transports before storage or discovery.
@@ -105,6 +124,19 @@ func validateServerConfig(config ServerConfig) error {
 			return err
 		}
 	}
+	// A server takes its credentials from one source.
+	sources := 0
+	for _, set := range []bool{config.Authorization != nil, config.UseCredentials, config.CredentialsProvider != nil} {
+		if set {
+			sources++
+		}
+	}
+	if sources > 1 {
+		return fmt.Errorf("MCP server %q takes its credentials from one of authorization, useCredentials and its own credentials provider", config.Name)
+	}
+	if config.CredentialsProvider != nil && config.Transport == TransportStdio {
+		return errors.New("an MCP server's credentials provider requires an HTTP transport")
+	}
 	if config.DefaultCacheScope != "" && config.DefaultCacheScope != CacheScopePublic && config.DefaultCacheScope != CacheScopePrivate {
 		return errors.New("invalid default MCP cache scope")
 	}
@@ -121,6 +153,10 @@ func validateUserServerConfig(config ServerConfig) error {
 	// Users authenticate with literal headers or their own OAuth authorization instead.
 	if config.UseCredentials {
 		return errors.New("user MCP configurations cannot use the shared credential provider; use headers or authorization")
+	}
+	// A server's own provider holds application credentials too.
+	if config.CredentialsProvider != nil {
+		return errors.New("user MCP configurations cannot have a credentials provider; use headers or authorization")
 	}
 
 	// Inspect canonical JSON so nested metadata and typed maps receive the same checks.

@@ -86,7 +86,9 @@ type Credential struct {
 // A connector with a non-empty Namespace is a user-owned definition whose
 // endpoint the user chose. The client only calls a provider for one when it
 // carries its own Authorization (OAuth); never return application-held tokens
-// for such a connector.
+// for such a connector. The client calls its own provider for connectors that
+// set Authorization or UseCredentials, OAuthCredentialProvider serving the
+// first, and a server's CredentialsProvider for that server alone.
 //
 // Returning nil, or a Credential with no TokenSource, means "no auth".
 //

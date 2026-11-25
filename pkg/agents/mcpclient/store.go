@@ -92,6 +92,10 @@ func (s *validatedStore) Put(ctx context.Context, namespace string, config Serve
 	if err := validateServerConfig(config); err != nil {
 		return err
 	}
+	// A store keeps definitions that serialize; a credentials provider is code's alone.
+	if config.CredentialsProvider != nil {
+		return errors.New("an MCP server's credentials provider is for definitions written in code (NewInlineStore); a store cannot keep one")
+	}
 
 	source, err := s.writable()
 	if err != nil {

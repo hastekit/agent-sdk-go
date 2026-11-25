@@ -413,7 +413,7 @@ func (srv *server) connFor(ctx context.Context, namespace string, runContext map
 		Env:                  resolveTemplates(srv.Env, runContext),
 		TokenSource:          tokens,
 		Principal:            principal,
-		AuthorizationKey:     authorizationDigest(srv.authorization),
+		AuthorizationKey:     authorizationDigest(srv.authorization, srv.credentials),
 		DisableStandaloneSSE: srv.DisableStandaloneSSE,
 	}, nil
 }

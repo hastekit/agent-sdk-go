@@ -227,8 +227,12 @@ func (c *Client) build(ctx context.Context, config ServerConfig) (*server, error
 		options = append(options, withDeferredTools(*config.DeferredTools))
 	}
 
-	// Only definitions that request credentials use the shared provider.
-	if config.UseCredentials || config.Authorization != nil {
+	// A server with a provider of its own uses it; only definitions that request
+	// credentials otherwise use the shared provider.
+	switch {
+	case config.CredentialsProvider != nil:
+		options = append(options, withCredentials(config.CredentialsProvider))
+	case config.UseCredentials || config.Authorization != nil:
 		if c.credentials == nil {
 			return nil, errors.New("MCP server requests credentials but no provider is configured")
 		}

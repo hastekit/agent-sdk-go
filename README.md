@@ -895,6 +895,14 @@ registration), using the MCP Go SDK's authorization flow, and keeps the
 registration in the credential store. See [persisted MCP credentials, discovery
 and Gmail setup](pkg/agents/mcpclient/OAUTH.md) and `samples/new/main.go`.
 
+A server defined in code can instead carry a `CredentialsProvider` of its own,
+as each of the MCP Go SDK's transports takes its own OAuth handler; stored and
+user-owned definitions cannot. Write one for a server whose tokens come from
+somewhere the client's provider knows nothing about, such as a token service of
+the host's own. Servers with their own providers, OAuth, static-header and open
+servers mix in one client; see [a server's own credentials
+provider](pkg/agents/mcpclient/OAUTH.md#a-servers-own-credentials-provider).
+
 #### Tool Annotations
 
 Tools can advertise what they do. The hints mirror [MCP's tool annotations](https://modelcontextprotocol.io/docs/concepts/tools), so hints read off an MCP server and hints declared on a local function tool are the same thing — one policy can read both:

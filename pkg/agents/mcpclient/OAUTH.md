@@ -133,6 +133,66 @@ redirecting anywhere. The sample in
 `samples/new/main.go` reads `GMAIL_CLIENT_ID`, `GMAIL_CLIENT_SECRET`, and optionally
 `SAMPLE_NAMESPACE`; its default namespace is `default`.
 
+## A server's own credentials provider
+
+A server defined in code can carry a `CredentialsProvider` of its own, which
+gives that server's credentials in place of the client's provider, as each of
+the MCP Go SDK's transports takes an OAuth handler of its own. Use it for a
+server whose tokens come from somewhere the client's provider knows nothing
+about, such as a token service of the host's own. Servers with providers of
+their own mix with OAuth servers, static tokens in `Headers`, and open servers,
+in one client:
+
+```go
+// platformTokens gives each user's token for the platform's servers, from the
+// host's own token service.
+type platformTokens struct{ tokens *TokenService }
+
+func (p *platformTokens) Resolve(ctx context.Context, namespace string, connector mcpclient.Connector, _ map[string]any) (*mcpclient.Credential, error) {
+    source, err := p.tokens.ForUser(ctx, namespace, connector.Endpoint) // an oauth2.TokenSource
+    if errors.Is(err, ErrNotSignedIn) {
+        // The server reports itself not connected, for the user to sign in.
+        return nil, agents.NewToolsetError(agents.ToolsetErrorAuth, err)
+    }
+    if err != nil {
+        return nil, err
+    }
+    return &mcpclient.Credential{Principal: namespace, TokenSource: source}, nil
+}
+
+client := mcpclient.NewClient(mcpclient.NewInlineStore(
+    // Its own provider.
+    mcpclient.ServerConfig{Name: "planner", Endpoint: "https://mcp.example.com/planner/mcp", CredentialsProvider: &platformTokens{tokens}},
+    // Connected by each user, through the client's provider.
+    mcpclient.ServerConfig{Name: "gmail", Endpoint: "https://gmailmcp.googleapis.com/mcp/v1", Authorization: gmailOAuth},
+    // A static token.
+    mcpclient.ServerConfig{Name: "search", Endpoint: "https://search.example/mcp", Headers: map[string]string{"Authorization": "Bearer " + os.Getenv("SEARCH_TOKEN")}},
+    // Open.
+    mcpclient.ServerConfig{Name: "docs", Endpoint: "https://docs.example/mcp"},
+), mcpclient.WithCredentials(oauth))
+```
+
+`Resolve` runs before the connection opens, so an authentication toolset error
+reports the server as not connected rather than failing the run. The token
+source is asked for a token on every request the connection makes, and pooled
+connections outlive the run that opened them, so it must renew its own tokens
+and never depend on the run's context. Only the namespace crosses into a run;
+the provider resolves the rest wherever the run does, a durable worker or a
+routine included. Keep the user's own token from reaching the server, as the
+MCP authorization spec's no-passthrough rule requires: give it a token minted
+for it.
+
+It is for definitions written in code alone, such as `NewInlineStore`'s or a
+store you implement in Go. The field is never JSON, so no stored definition
+carries one: `NewMemoryStore` and `NewFileStore` refuse to save one, and a
+user-owned definition that sets one is invalid, since its endpoint is the
+user's choice. It needs an HTTP transport, as a stdio server has no request to
+put a token on, and a definition sets at most one of `Authorization`,
+`UseCredentials` and `CredentialsProvider`. Connections are pooled by the
+provider whose tokens they carry, told apart by its type and pointer, and by
+principal as for every server: give each provider a pointer of its own, as
+above, rather than a `CredentialProviderFn` closure.
+
 ## Persistence and deployment
 
 File credential persistence uses private directories/files and atomic writes.
@@ -140,7 +200,8 @@ Tokens are plaintext on disk: place the directory on appropriately protected
 storage. The provider reloads tokens per request, refreshes expired credentials,
 and saves rotated refresh tokens before returning them. One shared provider
 coordinates refresh and callback writes in one process. Multi-process deployments
-need a credential store/refresh coordinator that handles concurrent rotation.
+need a credential store that implements `CredentialUpdater`, so concurrent
+refreshes of one grant rotate its refresh token once.
 
 OAuth state is process-local and expires after ten minutes; connect and callback
 must reach the same handler instance. A flow uses the OAuth configuration captured
