@@ -3,12 +3,14 @@ package mcpclient
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -91,8 +93,11 @@ func (a *authStatus) refused() bool {
 
 // mcpRoundTripper does the two things the SDK's http transports leave to the
 // http client: it sets our headers on every request, and it keeps the
-// authorization status of what came back.
+// authorization status of what came back. It logs each request, with the
+// headers it went with, credentials redacted.
 type mcpRoundTripper struct {
+	// server names the MCP server in its logs.
+	server  string
 	headers map[string]string
 	tokens  oauth2.TokenSource
 	auth    *authStatus
@@ -103,7 +108,9 @@ type mcpRoundTripper struct {
 func (h *mcpRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	// User servers cannot redirect credentials or advertise SSE endpoints at another origin.
 	if h.origin != nil && (req.URL.Scheme != h.origin.Scheme || !strings.EqualFold(req.URL.Host, h.origin.Host)) {
-		return nil, fmt.Errorf("user MCP requests must stay on the configured origin")
+		err := fmt.Errorf("user MCP requests must stay on the configured origin")
+		logRequest(req.Context(), h.server, req, rpcMethod(req), nil, err)
+		return nil, err
 	}
 
 	if len(h.headers) > 0 || h.tokens != nil {
@@ -124,7 +131,9 @@ func (h *mcpRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 			// request either succeeds against a lenient server, which is
 			// worse, or costs a round trip to learn what we already know.
 			h.auth.recordTokenError(err)
-			return nil, fmt.Errorf("mcp: no access token for %s: %w", req.URL.Host, err)
+			err = fmt.Errorf("mcp: no access token for %s: %w", req.URL.Host, err)
+			logRequest(req.Context(), h.server, req, rpcMethod(req), nil, err)
+			return nil, err
 		}
 		token.SetAuthHeader(req)
 	}
@@ -133,10 +142,13 @@ func (h *mcpRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	if base == nil {
 		base = http.DefaultTransport
 	}
+	method := rpcMethod(req)
+	start := time.Now()
 	resp, err := base.RoundTrip(req)
 	if resp != nil {
 		h.auth.record(resp.StatusCode)
 	}
+	logRequest(req.Context(), h.server, req, method, resp, err, slog.Duration("duration", time.Since(start)))
 	return resp, err
 }
 
@@ -144,7 +156,7 @@ func (h *mcpRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 // authorization status it will record into.
 func newHTTPClient(conn serverConn) (*http.Client, *authStatus) {
 	auth := &authStatus{}
-	rt := &mcpRoundTripper{headers: conn.Headers, tokens: conn.TokenSource, auth: auth}
+	rt := &mcpRoundTripper{server: conn.Name, headers: conn.Headers, tokens: conn.TokenSource, auth: auth}
 	client := &http.Client{Transport: rt}
 
 	// The definition's owner determines policy; a global server can still run for any user.
@@ -209,8 +221,11 @@ func connect(ctx context.Context, conn serverConn) (*mcp.ClientSession, error) {
 
 	transport, auth := newClientTransport(ctx, conn)
 
+	start := time.Now()
 	session, err := sdkClient.Connect(ctx, transport, nil)
 	if err != nil {
+		slog.WarnContext(ctx, "MCP connection failed", append(conn.logAttrs(),
+			slog.Bool("credentials_refused", auth.refused()), slog.Duration("duration", time.Since(start)), slog.Any("error", err))...)
 		// A server that refused our credentials is something the user can put
 		// right, and the layer above says so in the agent's prompt. Everything
 		// else is just a server that is not there.
@@ -220,5 +235,6 @@ func connect(ctx context.Context, conn serverConn) (*mcp.ClientSession, error) {
 		return nil, err
 	}
 
+	slog.InfoContext(ctx, "MCP connected", append(conn.logAttrs(), slog.Duration("duration", time.Since(start)))...)
 	return session, nil
 }

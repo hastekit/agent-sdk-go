@@ -2,7 +2,11 @@ package mcpclient
 
 import (
 	"context"
+	"log/slog"
 	"maps"
+	"strings"
+	"time"
+	"unicode/utf8"
 
 	"github.com/bytedance/sonic"
 	"github.com/hastekit/agent-sdk-go/pkg/agents"
@@ -182,11 +186,16 @@ func NewLazyMcpTool(t *mcp.Tool, conn serverConn, meta mcp.Meta, requiresApprova
 	}
 }
 
-func (c *LazyMcpTool) Execute(ctx context.Context, params *agents.ToolCall) (*agents.ToolCallResponse, error) {
+// Execute calls the tool on its server, and logs the call: the server, the
+// tool, the headers it went with, credentials redacted, and how it went.
+func (c *LazyMcpTool) Execute(ctx context.Context, params *agents.ToolCall) (_ *agents.ToolCallResponse, err error) {
+	call := &toolCallLog{start: time.Now()}
+	defer func() { c.logCall(ctx, params, call, err) }()
+
 	var args map[string]any
 	if params.Arguments != "" {
-		err := sonic.Unmarshal([]byte(params.Arguments), &args)
-		if err != nil {
+		if err := sonic.Unmarshal([]byte(params.Arguments), &args); err != nil {
+			call.failure = err
 			return &agents.ToolCallResponse{
 				FunctionCallOutputMessage: &responses.FunctionCallOutputMessage{
 					ID:     params.ID,
@@ -201,9 +210,10 @@ func (c *LazyMcpTool) Execute(ctx context.Context, params *agents.ToolCall) (*ag
 
 	meta := resolveMeta(c.meta, params.RunContext)
 
-	cli, release, err := checkoutSession(ctx, c.conn)
-	if err != nil {
-		return toolOutput(params, err.Error()), nil
+	cli, release, checkoutErr := checkoutSession(ctx, c.conn)
+	if checkoutErr != nil {
+		call.failure = checkoutErr
+		return toolOutput(params, checkoutErr.Error()), nil
 	}
 	defer release()
 
@@ -217,8 +227,8 @@ func (c *LazyMcpTool) Execute(ctx context.Context, params *agents.ToolCall) (*ag
 	// before the run paused.
 	resumeElicitation(callParams, params)
 
-	res, err := cli.CallTool(ctx, callParams)
-	if err != nil {
+	res, callErr := cli.CallTool(ctx, callParams)
+	if callErr != nil {
 		// The caller gave up — not a broken connection. Treating it as one
 		// would drop the session that carries the notifications/cancelled
 		// for this request, and the retry below would start the tool again
@@ -230,34 +240,105 @@ func (c *LazyMcpTool) Execute(ctx context.Context, params *agents.ToolCall) (*ag
 		// A connection this call opened for itself cannot be a stale one the
 		// pool held on to, so there is nothing a second attempt would fix.
 		if !c.conn.poolable() {
-			return toolOutput(params, err.Error()), nil
+			call.failure = callErr
+			return toolOutput(params, callErr.Error()), nil
 		}
 
 		// Connection might be dead — remove from pool and retry once
 		globalPool.Remove(c.conn)
-		cli, retryRelease, retryErr := globalPool.Checkout(ctx, c.conn)
+		retried, retryRelease, retryErr := globalPool.Checkout(ctx, c.conn)
 		if retryErr != nil {
-			return toolOutput(params, err.Error()), nil
+			call.failure = callErr
+			return toolOutput(params, callErr.Error()), nil
 		}
 		defer retryRelease()
 
-		res, err = cli.CallTool(ctx, callParams)
-		if err != nil {
-			return toolOutput(params, err.Error()), nil
+		call.retried = true
+		res, callErr = retried.CallTool(ctx, callParams)
+		if callErr != nil {
+			call.failure = callErr
+			return toolOutput(params, callErr.Error()), nil
 		}
 	}
+	call.result = res
 
 	// The server wants something from the user rather than having an answer:
 	// pause the run on it.
-	pause, err := elicitationPause(params, res)
-	if err != nil {
-		return toolOutput(params, err.Error()), nil
+	pause, pauseErr := elicitationPause(params, res)
+	if pauseErr != nil {
+		call.failure = pauseErr
+		return toolOutput(params, pauseErr.Error()), nil
 	}
 	if pause != nil {
+		call.paused = true
 		return pause, nil
 	}
 
 	return mcpToolResult(params, res.Content)
+}
+
+// toolCallLog is what a tool call's log says of how it went.
+type toolCallLog struct {
+	start time.Time
+	// failure is what the model was shown in place of a result.
+	failure error
+	// result is the server's answer.
+	result *mcp.CallToolResult
+	// retried is a call made again on a new connection.
+	retried bool
+	// paused is a call the server asked the user something on.
+	paused bool
+}
+
+// maxLoggedToolError bounds how much of a tool's error a log keeps.
+const maxLoggedToolError = 500
+
+// logCall logs a tool call: its server, where that is and the headers the call
+// went with, credentials redacted, the tool, the run's namespace, and how it
+// went, a tool's error with as much of its text as maxLoggedToolError allows.
+func (c *LazyMcpTool) logCall(ctx context.Context, params *agents.ToolCall, call *toolCallLog, err error) {
+	attrs := append(c.conn.logAttrs(),
+		slog.String("tool", c.Name),
+		slog.String("namespace", params.Namespace),
+		slog.String("call_id", params.CallID),
+		slog.Bool("retried", call.retried),
+		slog.Duration("duration", time.Since(call.start)),
+	)
+	switch {
+	case err != nil:
+		slog.WarnContext(ctx, "MCP tool call failed", append(attrs, slog.Any("error", err))...)
+	case call.failure != nil:
+		slog.WarnContext(ctx, "MCP tool call failed", append(attrs, slog.Any("error", call.failure))...)
+	case call.paused:
+		slog.InfoContext(ctx, "MCP tool call paused for the user's answer", attrs...)
+	case call.result != nil && call.result.IsError:
+		slog.WarnContext(ctx, "MCP tool call returned an error", append(attrs, slog.String("result", toolErrorText(call.result)))...)
+	default:
+		slog.InfoContext(ctx, "MCP tool call", attrs...)
+	}
+}
+
+// toolErrorText is the text of a tool's error result, up to maxLoggedToolError
+// bytes, cut at a character's boundary.
+func toolErrorText(res *mcp.CallToolResult) string {
+	var b strings.Builder
+	for _, content := range res.Content {
+		if text, ok := content.(*mcp.TextContent); ok {
+			b.WriteString(text.Text)
+		}
+		if b.Len() > maxLoggedToolError {
+			break
+		}
+	}
+	text := b.String()
+	if len(text) <= maxLoggedToolError {
+		return text
+	}
+	cut := maxLoggedToolError
+	for cut > 0 && !utf8.RuneStart(text[cut]) {
+		cut--
+	}
+	return text[:cut] + "…"
 }
 
 // toolOutput wraps text as this call's result, which is how a failure the

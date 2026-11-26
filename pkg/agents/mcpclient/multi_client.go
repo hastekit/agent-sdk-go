@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"maps"
 	"slices"
 	"sort"
@@ -290,13 +291,16 @@ func (c *Client) ListTools(ctx context.Context, namespace string, runContext map
 			continue
 		}
 		if !valid {
-			statuses = append(statuses, agents.FailedConnectorStatus(name, fmt.Errorf("invalid MCP server configuration: %w", resolved.invalid[name])))
+			err := fmt.Errorf("invalid MCP server configuration: %w", resolved.invalid[name])
+			logUnavailable(ctx, namespace, name, err)
+			statuses = append(statuses, agents.FailedConnectorStatus(name, err))
 			continue
 		}
 
 		// A global misconfiguration fails the run; a user's own only fails that connector.
 		server, err := c.build(ctx, config)
 		if err != nil {
+			logUnavailable(ctx, namespace, name, err)
 			if config.Namespace != "" {
 				statuses = append(statuses, agents.FailedConnectorStatus(name, err))
 				continue
@@ -310,6 +314,7 @@ func (c *Client) ListTools(ctx context.Context, namespace string, runContext map
 			return nil, nil, ctx.Err()
 		}
 		if err != nil {
+			logUnavailable(ctx, namespace, name, err)
 			statuses = append(statuses, agents.FailedConnectorStatus(name, err))
 			continue
 		}
@@ -352,6 +357,7 @@ func (c *Client) ListTools(ctx context.Context, namespace string, runContext map
 		// is dropped on its own rather than failing the owner's runs. Globals keep failing
 		// loudly: the developer owns both sides of the conflict.
 		if conflict != "" {
+			logUnavailable(ctx, namespace, name, fmt.Errorf("tool %q conflicts with another connector", conflict))
 			if config.Namespace == "" {
 				return nil, nil, fmt.Errorf("duplicate MCP tool %q; configure distinct tool prefixes", conflict)
 			}
@@ -363,8 +369,15 @@ func (c *Client) ListTools(ctx context.Context, namespace string, runContext map
 		}
 		tools = append(tools, bound...)
 		statuses = append(statuses, agents.ConnectedConnectorStatus(name, len(bound)))
+		slog.InfoContext(ctx, "MCP server ready", slog.String("server", name), slog.String("namespace", namespace), slog.Int("tools", len(bound)))
 	}
 	return statuses, tools, nil
+}
+
+// logUnavailable logs a server a listing could not use, and why: its run goes
+// on without its tools.
+func logUnavailable(ctx context.Context, namespace, name string, err error) {
+	slog.WarnContext(ctx, "MCP server unavailable", slog.String("server", name), slog.String("namespace", namespace), slog.Any("error", err))
 }
 
 func selectedTool(selection agents.MCPToolSelection, name string) bool {
